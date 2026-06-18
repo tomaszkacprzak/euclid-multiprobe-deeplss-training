@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from euclid_multiprobe_deeplss_training.cli import main
 
 
@@ -57,3 +59,78 @@ def test_train_command_passes_cli_overrides(monkeypatch) -> None:
             },
         )
     ]
+
+
+def test_train_from_config_loads_forward_model_config(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("wandb")
+
+    from euclid_multiprobe_deeplss_training import training
+
+    forward_model_path = tmp_path / "forward_model.yaml"
+    forward_model_path.write_text("survey: euclid\nparams:\n  omega_m: 0.3\n", encoding="utf-8")
+    config_path = tmp_path / "training.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "records_pattern: records/*.tar",
+                "config_forward_model: forward_model.yaml",
+                "max_steps: 0",
+                "use_wandb: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    def fake_train(config_or_path, *, device=None):
+        captured["config"] = config_or_path
+        captured["device"] = device
+        return {"step": 0}
+
+    monkeypatch.setattr(training, "train", fake_train)
+
+    result = training.train_from_config(config_path, device="cpu")
+
+    assert result == {"step": 0}
+    assert captured["device"] == "cpu"
+    assert captured["config"]["forward_model"] == {"survey": "euclid", "params": {"omega_m": 0.3}}
+
+
+def test_train_passes_forward_model_to_records_dataset(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("wandb")
+    from torch.utils.data import IterableDataset
+
+    from euclid_multiprobe_deeplss_training import training
+
+    calls = []
+
+    class OneSampleDataset(IterableDataset):
+        def __iter__(self):
+            yield torch.tensor([[1.0, 2.0]]), torch.tensor([[0.5]])
+
+    def fake_build_records_dataset(records_pattern, config):
+        calls.append((records_pattern, config))
+        return OneSampleDataset()
+
+    monkeypatch.setattr(training, "build_records_dataset", fake_build_records_dataset)
+
+    training.train(
+        {
+            "records_pattern": "records/*.tar",
+            "forward_model": {"survey": "euclid"},
+            "max_steps": 1,
+            "validation_fraction": 0.0,
+            "use_wandb": False,
+            "num_targets": 1,
+            "hidden_channels": 2,
+            "num_blocks": 1,
+        },
+        device="cpu",
+    )
+
+    assert calls[0][0] == "records/*.tar"
+    assert calls[0][1]["forward_model"] == {"survey": "euclid"}
+    assert calls[0][1]["config"].forward_model == {"survey": "euclid"}

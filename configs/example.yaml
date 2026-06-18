@@ -1,6 +1,6 @@
 # Glob pattern for the WebDataset record shards used for training.
 records_pattern: "webdataset_EuclidDR1F/EuclidDR1F_grid_dmb_*.tar"
-config_msfm: "config_msfm_EuclidDR1F_onthefly.yaml"
+config_forward_model: "config_msfm_EuclidDR1F_onthefly.yaml"
 
 # Training settings.
 batch_size: 32
