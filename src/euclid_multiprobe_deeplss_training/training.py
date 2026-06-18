@@ -223,10 +223,11 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     step: int,
+    config: TrainingConfig | Mapping[str, Any],
     train_losses: list[float],
-    validation_losses: list[float],
+    val_losses: list[float],
 ) -> None:
-    """Save model, optimizer, and loss-history state."""
+    """Save model, optimizer, config, and loss-history state."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -234,8 +235,9 @@ def save_checkpoint(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "step": step,
+            "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
             "train_losses": train_losses,
-            "validation_losses": validation_losses,
+            "val_losses": val_losses,
         },
         path,
     )
@@ -244,15 +246,24 @@ def save_checkpoint(
 def load_checkpoint(
     path: str | Path,
     model: nn.Module,
-    optimizer: torch.optim.Optimizer | None = None,
-    device: torch.device | str = "cpu",
-) -> dict[str, Any]:
-    """Load a checkpoint into a model and, optionally, an optimizer."""
+    optimizer: torch.optim.Optimizer,
+    device: torch.device | str,
+) -> tuple[int, list[float], list[float]]:
+    """Restore model/optimizer state and return step plus loss histories.
+
+    Iterable dataset stream position is not exactly restored during resume.
+    Until a future dataset implementation supports deterministic seeking,
+    restarting from a checkpoint restores only model state, optimizer state,
+    and global-step/loss-history bookkeeping.
+    """
     checkpoint = torch.load(Path(path), map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    if optimizer is not None and "optimizer_state_dict" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    return checkpoint
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    return (
+        int(checkpoint["step"]),
+        list(checkpoint.get("train_losses", [])),
+        list(checkpoint.get("val_losses", checkpoint.get("validation_losses", []))),
+    )
 
 
 def train(
@@ -260,7 +271,13 @@ def train(
     model: nn.Module | None = None,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
-    """Run a compact train/evaluate/checkpoint loop."""
+    """Run a compact train/evaluate/checkpoint loop.
+
+    Resuming from a checkpoint restores the model, optimizer, and global-step
+    state before the main loop starts.  Iterable dataset stream position is not
+    exactly restored unless a future dataset implementation supports
+    deterministic seeking.
+    """
     config = _coerce_config(config_or_path)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
@@ -280,10 +297,12 @@ def train(
     validation_losses: list[float] = []
 
     if config.resume_from_checkpoint:
-        checkpoint = load_checkpoint(config.resume_from_checkpoint, model, optimizer, device)
-        step = int(checkpoint.get("step", 0))
-        train_losses = list(checkpoint.get("train_losses", []))
-        validation_losses = list(checkpoint.get("validation_losses", []))
+        step, train_losses, validation_losses = load_checkpoint(
+            config.resume_from_checkpoint,
+            model,
+            optimizer,
+            device,
+        )
 
     run = (
         wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=asdict(config))
@@ -306,6 +325,7 @@ def train(
                     model,
                     optimizer,
                     step,
+                    config,
                     train_losses,
                     validation_losses,
                 )
@@ -328,6 +348,7 @@ def train(
             model,
             optimizer,
             step,
+            config,
             train_losses,
             validation_losses,
         )
