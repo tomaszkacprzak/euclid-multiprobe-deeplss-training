@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -36,6 +37,8 @@ class TrainingConfig:
     resume_from_checkpoint: str | None = None
     wandb_project: str | None = None
     wandb_run_name: str | None = None
+    wandb_mode: str | None = None
+    use_wandb: bool = True
     seed: int = 0
     drop_last: bool = False
     in_channels: int = 1
@@ -218,6 +221,31 @@ def evaluate(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, devic
     return sum(losses) / len(losses)
 
 
+def init_wandb(config: TrainingConfig | Mapping[str, Any]):
+    """Initialize a Weights & Biases run when enabled by configuration.
+
+    Local training should not require network access, so runs default to
+    ``offline`` mode unless ``wandb_mode`` explicitly requests another mode.
+    Set ``wandb_mode: disabled`` or ``use_wandb: false`` to skip wandb entirely.
+    """
+    config_dict = asdict(config) if isinstance(config, TrainingConfig) else dict(config)
+    use_wandb = bool(config_dict.get("use_wandb", True))
+    wandb_mode = config_dict.get("wandb_mode")
+    if not use_wandb or wandb_mode == "disabled":
+        return None
+
+    wandb_project = config_dict.get("wandb_project")
+    if not wandb_project:
+        return None
+
+    return wandb.init(
+        project=wandb_project,
+        name=config_dict.get("wandb_run_name"),
+        mode=wandb_mode or "offline",
+        config=config_dict,
+    )
+
+
 def save_checkpoint(
     path: str | Path,
     model: nn.Module,
@@ -305,11 +333,9 @@ def train(
             device,
         )
 
-    run = (
-        wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=asdict(config))
-        if config.wandb_project
-        else None
-    )
+    run = init_wandb(config)
+    train_start_time = time.perf_counter()
+    examples_seen = 0
 
     # Training loop.
     for _epoch in range(config.num_epochs or 10**12):
@@ -317,12 +343,25 @@ def train(
             step += 1
             train_loss = train_one_step(model, batch, optimizer, loss_fn, device)
             train_losses.append(train_loss)
+            maps, _labels = batch
+            examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
+            elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
+            current_learning_rate = optimizer.param_groups[0]["lr"]
             if run is not None:
-                wandb.log({"train/loss": train_loss, "step": step}, step=step)
+                wandb.log(
+                    {
+                        "train/loss": train_loss,
+                        "step": step,
+                        "learning_rate": current_learning_rate,
+                        "runtime/examples_per_second": examples_seen / elapsed_seconds,
+                    },
+                    step=step,
+                )
 
             if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                checkpoint_path = Path(config.checkpoint_dir) / f"checkpoint-step-{step}.pt"
                 save_checkpoint(
-                    Path(config.checkpoint_dir) / f"checkpoint-step-{step}.pt",
+                    checkpoint_path,
                     model,
                     optimizer,
                     step,
@@ -330,6 +369,11 @@ def train(
                     train_losses,
                     validation_losses,
                 )
+                if run is not None:
+                    wandb.log(
+                        {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
+                        step=step,
+                    )
 
             if config.max_steps is not None and step >= config.max_steps:
                 break
@@ -338,14 +382,22 @@ def train(
         if validation_loss is not None:
             validation_losses.append(validation_loss)
             if run is not None:
-                wandb.log({"validation/loss": validation_loss, "step": step}, step=step)
+                wandb.log(
+                    {
+                        "validation/loss": validation_loss,
+                        "step": step,
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                    },
+                    step=step,
+                )
 
         if config.max_steps is not None and step >= config.max_steps:
             break
 
     if config.checkpoint_dir:
+        final_checkpoint_path = Path(config.checkpoint_dir) / "checkpoint-final.pt"
         save_checkpoint(
-            Path(config.checkpoint_dir) / "checkpoint-final.pt",
+            final_checkpoint_path,
             model,
             optimizer,
             step,
@@ -353,6 +405,11 @@ def train(
             train_losses,
             validation_losses,
         )
+        if run is not None:
+            wandb.log(
+                {"checkpoint/saved": 1, "checkpoint/path": str(final_checkpoint_path), "step": step},
+                step=step,
+            )
     if run is not None:
         run.finish()
 
@@ -369,16 +426,12 @@ def train_from_config(
     wandb_mode: str | None = None,
 ) -> dict[str, Any]:
     """Train from a YAML config file with optional CLI-style overrides."""
-    if wandb_mode is not None:
-        import os
-
-        os.environ["WANDB_MODE"] = wandb_mode
-
     raw_config = load_config(config_path)
     overrides = {
         "resume_from_checkpoint": resume_from_checkpoint,
         "checkpoint_dir": checkpoint_dir,
         "max_steps": max_steps,
+        "wandb_mode": wandb_mode,
     }
     raw_config.update({key: value for key, value in overrides.items() if value is not None})
     return train(raw_config, device=device)
