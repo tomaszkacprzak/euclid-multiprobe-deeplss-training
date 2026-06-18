@@ -26,6 +26,8 @@ class TrainingConfig:
     """
 
     records_pattern: str
+    config_forward_model: str | None = None
+    forward_model: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 32
     num_epochs: int | None = 1
     max_steps: int | None = None
@@ -93,6 +95,26 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise TypeError("The YAML training config must load to a mapping.")
     return loaded
+
+
+def _load_forward_model_config(path: str | Path) -> dict[str, Any]:
+    """Load the forward-model YAML configuration file."""
+    loaded = load_config(path)
+    return loaded
+
+
+def _with_forward_model_config(raw_config: Mapping[str, Any], base_dir: Path | None = None) -> dict[str, Any]:
+    """Return a copy of ``raw_config`` with ``forward_model`` loaded when configured."""
+    config = dict(raw_config)
+    forward_model_path = config.get("config_forward_model")
+    if forward_model_path is None:
+        return config
+
+    path = Path(forward_model_path)
+    if not path.is_absolute() and base_dir is not None:
+        path = base_dir / path
+    config["forward_model"] = _load_forward_model_config(path)
+    return config
 
 
 def build_records_dataset(records_pattern: str, config: Mapping[str, Any]) -> IterableDataset:
@@ -312,7 +334,7 @@ def train(
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     # Data streams.
-    dataset = build_records_dataset(config.records_pattern, config.extra | {"config": config})
+    dataset = build_records_dataset(config.records_pattern, config.extra | {"config": config, "forward_model": config.forward_model})
     train_dataset, validation_dataset = split_iterable_dataset(dataset, config.validation_fraction, config.seed)
     train_loader = make_dataloader(train_dataset, config, drop_last=config.drop_last)
     validation_loader = make_dataloader(validation_dataset, config, drop_last=False)
@@ -427,7 +449,8 @@ def train_from_config(
     wandb_mode: str | None = None,
 ) -> dict[str, Any]:
     """Train from a YAML config file with optional CLI-style overrides."""
-    raw_config = load_config(config_path)
+    config_path = Path(config_path)
+    raw_config = _with_forward_model_config(load_config(config_path), config_path.parent)
     overrides = {
         "resume_from_checkpoint": resume_from_checkpoint,
         "checkpoint_dir": checkpoint_dir,
@@ -442,5 +465,6 @@ def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConf
     if isinstance(config_or_path, TrainingConfig):
         return config_or_path
     if isinstance(config_or_path, str | Path):
-        return TrainingConfig.from_mapping(load_config(config_or_path))
-    return TrainingConfig.from_mapping(config_or_path)
+        config_path = Path(config_or_path)
+        return TrainingConfig.from_mapping(_with_forward_model_config(load_config(config_path), config_path.parent))
+    return TrainingConfig.from_mapping(_with_forward_model_config(config_or_path))
