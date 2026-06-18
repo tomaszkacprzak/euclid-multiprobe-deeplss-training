@@ -21,7 +21,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        required=True,
         help="Path to the configuration file.",
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -32,6 +31,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     info_parser.set_defaults(func=_run_info)
 
+    train_parser = subparsers.add_parser(
+        "train",
+        help="Run training from the configuration file.",
+    )
+    train_parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help="Checkpoint path to resume training from.",
+    )
+    train_parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        help="Directory where training checkpoints are written.",
+    )
+    train_parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Maximum number of training steps to run.",
+    )
+    train_parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Torch device to train on, such as 'cpu' or 'cuda'.",
+    )
+    train_parser.add_argument(
+        "--wandb-mode",
+        type=str,
+        default=None,
+        choices=("online", "offline", "disabled"),
+        help="Weights & Biases mode for this training run.",
+    )
+    train_parser.set_defaults(func=_run_train)
+
     parser.set_defaults(func=_run_info)
     return parser
 
@@ -39,6 +75,24 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_info(_args: argparse.Namespace) -> int:
     """Print basic package information."""
     print(f"euclid-multiprobe-deeplss-training {__version__}")
+    return 0
+
+
+def _run_train(args: argparse.Namespace) -> int:
+    """Run training from the parsed command line arguments."""
+    if args.config is None:
+        raise ValueError("The train command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.training import train_from_config
+
+    train_from_config(
+        args.config,
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        checkpoint_dir=args.checkpoint_dir,
+        max_steps=args.max_steps,
+        device=args.device,
+        wandb_mode=args.wandb_mode,
+    )
     return 0
 
 

@@ -337,6 +337,31 @@ def train(
     return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
 
+def train_from_config(
+    config_path: str | Path,
+    *,
+    resume_from_checkpoint: str | None = None,
+    checkpoint_dir: str | None = None,
+    max_steps: int | None = None,
+    device: torch.device | str | None = None,
+    wandb_mode: str | None = None,
+) -> dict[str, Any]:
+    """Train from a YAML config file with optional CLI-style overrides."""
+    if wandb_mode is not None:
+        import os
+
+        os.environ["WANDB_MODE"] = wandb_mode
+
+    raw_config = load_config(config_path)
+    overrides = {
+        "resume_from_checkpoint": resume_from_checkpoint,
+        "checkpoint_dir": checkpoint_dir,
+        "max_steps": max_steps,
+    }
+    raw_config.update({key: value for key, value in overrides.items() if value is not None})
+    return train(raw_config, device=device)
+
+
 def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> TrainingConfig:
     if isinstance(config_or_path, TrainingConfig):
         return config_or_path
