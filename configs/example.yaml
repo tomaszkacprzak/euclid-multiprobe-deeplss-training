@@ -1,1 +1,28 @@
+# Glob pattern for the WebDataset record shards used for training.
 records_pattern: "webdataset_EuclidDR1F/EuclidDR1F_grid_dmb_*.tar"
+
+# Training settings.
+batch_size: 32
+num_workers: 4
+max_steps: 10000
+validation_fraction: 0.1
+learning_rate: 0.0001
+seed: 42
+device: "cuda"
+
+# Model architecture settings.
+in_channels: 3
+num_targets: 1
+hidden_channels: 64
+num_blocks: 4
+dropout: 0.1
+
+# Checkpointing settings.
+checkpoint_dir: "checkpoints"
+checkpoint_every_steps: 1000
+resume_from_checkpoint: null
+
+# Weights & Biases logging settings.
+wandb_project: "euclid-multiprobe-deeplss-training"
+wandb_run_name: "example-run"
+wandb_mode: "offline"
