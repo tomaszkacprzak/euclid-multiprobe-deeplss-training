@@ -253,8 +253,8 @@ def load_checkpoint(
 
     Iterable dataset stream position is not exactly restored during resume.
     Until a future dataset implementation supports deterministic seeking,
-    restarting from a checkpoint restores only model state, optimizer state,
-    and global-step/loss-history bookkeeping.
+    for now restarting from a checkpoint restores model state, optimizer
+    state, and global-step/loss-history bookkeeping.
     """
     checkpoint = torch.load(Path(path), map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -276,7 +276,8 @@ def train(
     Resuming from a checkpoint restores the model, optimizer, and global-step
     state before the main loop starts.  Iterable dataset stream position is not
     exactly restored unless a future dataset implementation supports
-    deterministic seeking.
+    deterministic seeking; for now, restarts resume model/optimizer/global-step
+    state rather than seeking to the prior stream item.
     """
     config = _coerce_config(config_or_path)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
