@@ -4,10 +4,10 @@ Euclid multiprobe DeepLSS pipeline training of neural networks.
 
 ## Installation
 
-Install the package in editable mode for local development:
+Install the package and development dependencies with uv:
 
 ```bash
-python -m pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## Command line interface
@@ -15,13 +15,13 @@ python -m pip install -e ".[dev]"
 The package exposes the `euclid-deeplss-training` console script:
 
 ```bash
-euclid-deeplss-training info
+uv run euclid-deeplss-training info
 ```
 
 Show the installed version with:
 
 ```bash
-euclid-deeplss-training --version
+uv run euclid-deeplss-training --version
 ```
 
 ## Development
@@ -29,11 +29,11 @@ euclid-deeplss-training --version
 Run the test suite with:
 
 ```bash
-pytest
+uv run pytest
 ```
 
 Run linting with:
 
 ```bash
-ruff check .
+uv run ruff check .
 ```
