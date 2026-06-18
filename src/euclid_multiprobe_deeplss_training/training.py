@@ -104,6 +104,7 @@ def build_records_dataset(records_pattern: str, config: Mapping[str, Any]) -> It
     ``(pixels, channels)``, if that becomes the final convention).  The
     ``target_tensor`` should contain ``float32`` regression target data.
     """
+
     raise NotImplementedError("Provide a project-specific records dataset builder.")
 
 
