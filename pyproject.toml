@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.26"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "euclid-multiprobe-deeplss-training"
@@ -24,12 +24,27 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Astronomy",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = [
+  "torch",
+  "webdataset",
+  "numpy",
+  "scipy",
+  "healpy",
+  "scikit-learn",
+  "h5py",
+  "pyyaml",
+  "wandb",
+  "cuHPX",
+  "deepsphere @git+https://github.com/tomaszkacprzak/deepsphere-cosmo-pytorch.git",
+]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
   "ruff>=0.5",
+  "ipython",
+  "jupyter",
+  "matplotlib",
 ]
 
 [project.scripts]
@@ -45,7 +60,7 @@ addopts = "--strict-markers --strict-config"
 pythonpath = ["src"]
 
 [tool.ruff]
-line-length = 88
+line-length = 149
 target-version = "py310"
 src = ["src", "tests"]
 
