@@ -18,7 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
-
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the configuration file.",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     info_parser = subparsers.add_parser(
