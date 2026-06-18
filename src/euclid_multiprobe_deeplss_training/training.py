@@ -126,8 +126,9 @@ def build_records_dataset(records_pattern: str, config: Mapping[str, Any]) -> It
     ``(pixels, channels)``, if that becomes the final convention).  The
     ``target_tensor`` should contain ``float32`` regression target data.
     """
-
-    raise NotImplementedError("Provide a project-specific records dataset builder.")
+    from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
+    dataset = OntheflyPhysicsModelLinear(config["forward_model"]).get_dataset(records_pattern)
+    return dataset
 
 
 class StreamSplitDataset(IterableDataset):
