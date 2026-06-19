@@ -15,6 +15,10 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
+from .utils.logger import get_logger
+
+LOGGER = get_logger(__file__)
+
 
 @dataclass(slots=True)
 class TrainingConfig:
@@ -177,9 +181,9 @@ def split_iterable_dataset(
     seed: int = 0,
 ) -> tuple[IterableDataset, IterableDataset]:
     """Return disjoint train and validation iterable streams."""
-    train_dataset = StreamSplitDataset(dataset, validation_fraction, seed, "train")
+    training_dataset = StreamSplitDataset(dataset, validation_fraction, seed, "train")
     validation_dataset = StreamSplitDataset(dataset, validation_fraction, seed, "validation")
-    return train_dataset, validation_dataset
+    return training_dataset, validation_dataset
 
 
 def make_dataloader(dataset: IterableDataset, config: TrainingConfig, *, drop_last: bool | None = None) -> DataLoader:
@@ -219,13 +223,19 @@ def train_one_step(
     """Run one optimization step and return the scalar loss."""
     model.train()
     maps, labels = batch
+    LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+    LOGGER.debug(f'Labels shape={labels.shape}')
     maps = maps.to(device)
     labels = labels.to(device=device, dtype=torch.float32)
 
     optimizer.zero_grad(set_to_none=True)
+    LOGGER.debug(f'Running forward pass')
     predictions = model(maps)
+    LOGGER.debug('Running loss')
     loss = loss_fn(predictions, labels)
+    LOGGER.debug(f'Running backward pass')
     loss.backward()
+    LOGGER.debug(f'Running optimizer step')
     optimizer.step()
     return float(loss.detach().cpu())
 
@@ -334,11 +344,17 @@ def train(
     config = _coerce_config(config_or_path)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
+    LOGGER.info(f"Training on {device} with config: {config}")
+
     # Data streams.
     dataset = build_records_dataset(config.records_pattern, config.extra | {"config": config, "forward_model": config.forward_model})
-    train_dataset, validation_dataset = split_iterable_dataset(dataset, config.validation_fraction, config.seed)
-    train_loader = make_dataloader(train_dataset, config, drop_last=config.drop_last)
+    training_dataset, validation_dataset = split_iterable_dataset(dataset, config.validation_fraction, config.seed)
+    training_loader = make_dataloader(training_dataset, config, drop_last=config.drop_last)
     validation_loader = make_dataloader(validation_dataset, config, drop_last=False)
+
+    LOGGER.info(f"Training loader: {training_loader}")
+    LOGGER.info(f"Validation loader: {validation_loader}")
+
 
     # Model and optimizer.
     model = model or SmallRegressionNet(config)
@@ -357,15 +373,23 @@ def train(
             device,
         )
 
+    LOGGER.info(f'Model: {model}')
+
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0
 
     # Training loop.
+    LOGGER.info(f'Training loop starting')
     for _epoch in range(config.num_epochs or 10**12):
-        for batch in train_loader:
+        for batch in training_loader:
             step += 1
+
+            # Main magic - update model
             train_loss = train_one_step(model, batch, optimizer, loss_fn, device)
+            LOGGER.debug(f'Train loss epoch={_epoch:>3d} {step:>5d} {train_loss: .6e}')
+
+
             train_losses.append(train_loss)
             maps, _labels = batch
             examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
