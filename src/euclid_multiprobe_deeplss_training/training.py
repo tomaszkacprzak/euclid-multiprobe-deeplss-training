@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 import torch
 import wandb
-import yaml
 from torch import nn
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data import DataLoader
 
+from .utils.config import load_config, with_forward_model_config
+from .utils.data import build_records_dataset, make_dataloader, split_iterable_dataset
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -92,108 +92,9 @@ class TrainingConfig:
             raise ValueError("checkpoint_every_steps must be non-negative.")
 
 
-def load_config(path: str | Path) -> dict[str, Any]:
-    """Load a YAML configuration file with ``yaml.safe_load``."""
-    with Path(path).open("r", encoding="utf-8") as handle:
-        loaded = yaml.safe_load(handle) or {}
-    if not isinstance(loaded, dict):
-        raise TypeError("The YAML training config must load to a mapping.")
-    return loaded
 
-
-def _load_forward_model_config(path: str | Path) -> dict[str, Any]:
-    """Load the forward-model YAML configuration file."""
-    loaded = load_config(path)
-    return loaded
-
-
-def _with_forward_model_config(raw_config: Mapping[str, Any], base_dir: Path | None = None) -> dict[str, Any]:
-    """Return a copy of ``raw_config`` with ``forward_model`` loaded when configured."""
-    config = dict(raw_config)
-    forward_model_path = config.get("config_forward_model")
-    if forward_model_path is None:
-        return config
-
-    path = Path(forward_model_path)
-    if not path.is_absolute() and base_dir is not None:
-        path = base_dir / path
-    config["forward_model"] = _load_forward_model_config(path)
-    return config
-
-
-def build_records_dataset(records_pattern: str, config: Mapping[str, Any]) -> IterableDataset:
-    """Build the user-supplied iterable records dataset.
-
-    Implement this project-specific hook to read ``records_pattern`` and yield
-    samples shaped like ``(map_tensor, target_tensor)``.  ``map_tensor`` should
-    be a part-sky Healpix map with shape similar to ``(channels, pixels)`` (or
-    ``(pixels, channels)``, if that becomes the final convention).  The
-    ``target_tensor`` should contain ``float32`` regression target data.
-    """
-    from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-    dataset = OntheflyPhysicsModelLinear(config["forward_model"]).get_dataset(records_pattern)
-    return dataset
-
-
-class StreamSplitDataset(IterableDataset):
-    """Deterministically keep either the training or validation part of a stream."""
-
-    def __init__(self, dataset: Iterable, validation_fraction: float, seed: int, split: str) -> None:
-        self.dataset = dataset
-        self.validation_fraction = validation_fraction
-        self.seed = seed
-        self.split = split
-
-    def __iter__(self):
-        for index, sample in enumerate(self.dataset):
-            is_validation = _index_goes_to_validation(index, self.validation_fraction, self.seed)
-            if (self.split == "validation") == is_validation:
-                yield sample
-
-
-class WorkerShardDataset(IterableDataset):
-    """Shard an iterable stream across DataLoader workers."""
-
-    def __init__(self, dataset: Iterable) -> None:
-        self.dataset = dataset
-
-    def __iter__(self):
-        worker = get_worker_info()
-        if worker is None:
-            yield from self.dataset
-            return
-        for index, sample in enumerate(self.dataset):
-            if index % worker.num_workers == worker.id:
-                yield sample
-
-
-def _index_goes_to_validation(index: int, validation_fraction: float, seed: int) -> bool:
-    if validation_fraction <= 0.0:
-        return False
-    digest = hashlib.blake2b(f"{seed}:{index}".encode(), digest_size=8).digest()
-    unit_interval = int.from_bytes(digest, "big") / float(2**64)
-    return unit_interval < validation_fraction
-
-
-def split_iterable_dataset(
-    dataset: IterableDataset,
-    validation_fraction: float,
-    seed: int = 0,
-) -> tuple[IterableDataset, IterableDataset]:
-    """Return disjoint train and validation iterable streams."""
-    training_dataset = StreamSplitDataset(dataset, validation_fraction, seed, "train")
-    validation_dataset = StreamSplitDataset(dataset, validation_fraction, seed, "validation")
-    return training_dataset, validation_dataset
-
-
-def make_dataloader(dataset: IterableDataset, config: TrainingConfig, *, drop_last: bool | None = None) -> DataLoader:
-    """Create a worker-sharded DataLoader for an iterable dataset."""
-    return DataLoader(
-        WorkerShardDataset(dataset),
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        drop_last=config.drop_last if drop_last is None else drop_last,
-    )
+# Re-export shared helpers for callers and tests that import them from this module.
+_with_forward_model_config = with_forward_model_config
 
 
 class SmallRegressionNet(nn.Module):
@@ -229,13 +130,13 @@ def train_one_step(
     labels = labels.to(device=device, dtype=torch.float32)
 
     optimizer.zero_grad(set_to_none=True)
-    LOGGER.debug(f'Running forward pass')
+    LOGGER.debug('Running forward pass')
     predictions = model(maps)
     LOGGER.debug('Running loss')
     loss = loss_fn(predictions, labels)
-    LOGGER.debug(f'Running backward pass')
+    LOGGER.debug('Running backward pass')
     loss.backward()
-    LOGGER.debug(f'Running optimizer step')
+    LOGGER.debug('Running optimizer step')
     optimizer.step()
     return float(loss.detach().cpu())
 
@@ -380,7 +281,7 @@ def train(
     examples_seen = 0
 
     # Training loop.
-    LOGGER.info(f'Training loop starting')
+    LOGGER.info('Training loop starting')
     for _epoch in range(config.num_epochs or 10**12):
         for batch in training_loader:
             step += 1
@@ -475,7 +376,7 @@ def train_from_config(
 ) -> dict[str, Any]:
     """Train from a YAML config file with optional CLI-style overrides."""
     config_path = Path(config_path)
-    raw_config = _with_forward_model_config(load_config(config_path), config_path.parent)
+    raw_config = with_forward_model_config(load_config(config_path), config_path.parent)
     overrides = {
         "resume_from_checkpoint": resume_from_checkpoint,
         "checkpoint_dir": checkpoint_dir,
@@ -491,5 +392,5 @@ def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConf
         return config_or_path
     if isinstance(config_or_path, str | Path):
         config_path = Path(config_or_path)
-        return TrainingConfig.from_mapping(_with_forward_model_config(load_config(config_path), config_path.parent))
-    return TrainingConfig.from_mapping(_with_forward_model_config(config_or_path))
+        return TrainingConfig.from_mapping(with_forward_model_config(load_config(config_path), config_path.parent))
+    return TrainingConfig.from_mapping(with_forward_model_config(config_or_path))

@@ -134,3 +134,25 @@ def test_train_passes_forward_model_to_records_dataset(monkeypatch) -> None:
     assert calls[0][0] == "records/*.tar"
     assert calls[0][1]["forward_model"] == {"survey": "euclid"}
     assert calls[0][1]["config"].forward_model == {"survey": "euclid"}
+
+
+def test_datastats_command_requires_config() -> None:
+    with pytest.raises(ValueError, match="datastats command requires --config"):
+        main(["datastats"])
+
+
+def test_datastats_command_passes_config(monkeypatch) -> None:
+    calls = []
+    fake_datastats = types.ModuleType("euclid_multiprobe_deeplss_training.datastats")
+
+    def fake_datastats_from_config(config_path):
+        calls.append(config_path)
+        return []
+
+    fake_datastats.datastats_from_config = fake_datastats_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.datastats", fake_datastats)
+
+    exit_code = main(["--config", "configs/example.yaml", "datastats"])
+
+    assert exit_code == 0
+    assert calls == ["configs/example.yaml"]
