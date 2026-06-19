@@ -8,7 +8,7 @@ from typing import Any
 
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from msfm.onthefly_pipeline import OntheflyPipeline
-from msfm.onthefly_physics.onthefly_base import OntheflyPhysicsModel
+# from msfm.onthefly_physics.onthefly_base import OntheflyPhysicsModel
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 
 
@@ -78,17 +78,11 @@ def split_iterable_dataset(
     return training_dataset, validation_dataset
 
 
-def make_dataloader(dataset: IterableDataset, config, *, drop_last: bool | None = None) -> DataLoader:
+def make_dataloader(dataset: IterableDataset, config: Mapping[str, Any]) -> DataLoader:
     """Create a worker-sharded DataLoader for an iterable dataset."""
     return DataLoader(
         WorkerShardDataset(dataset),
         batch_size=config.batch_size,
         num_workers=config.num_workers,
-        drop_last=config.drop_last if drop_last is None else drop_last,
+        drop_last=True,
     )
-
-def make_physics_dataloader(loader: IterableDataset, config: Mapping[str, Any], seed_offset: int = 0, device: torch.device | str | None = None) -> OntheflyPhysicsModel:
-    """Build the physics loader from the given loader and config."""
-
-    model = OntheflyPhysicsModelLinear(loader, config.forward_model, seed_offset=seed_offset, device=device)
-    return model

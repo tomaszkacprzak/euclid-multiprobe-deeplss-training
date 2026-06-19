@@ -14,8 +14,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .utils.config import load_config, with_forward_model_config
-from .utils.data import build_records_dataset, make_dataloader, split_iterable_dataset, make_physics_dataloader
+# from .utils.data import build_records_dataset, make_dataloader, split_iterable_dataset, make_physics_dataloader
 from .utils.logger import get_logger
+
+from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
+from msfm.onthefly_pipeline import OntheflyPipeline
 
 LOGGER = get_logger(__file__)
 
@@ -247,17 +250,8 @@ def train(
 
     LOGGER.info(f"Training on {device} with config: {config}")
 
-    # Data streams.
-    dataset = build_records_dataset(config.records_pattern, config.extra | {"config": config, "forward_model": config.forward_model})
-    training_dataset, validation_dataset = split_iterable_dataset(dataset, config.validation_fraction, config.seed)
-    training_loader = make_dataloader(training_dataset, config, drop_last=config.drop_last)
-    validation_loader = make_dataloader(validation_dataset, config, drop_last=False)
-    training_physics_loader = make_physics_dataloader(training_loader, config, seed_offset=config.seed, device=device)
-    validation_physics_loader = make_physics_dataloader(validation_loader, config, seed_offset=config.seed, device=device)
-
-
-    LOGGER.info(f"Training loader: {training_loader}")
-    LOGGER.info(f"Validation loader: {validation_loader}")
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model)
+    loader = OntheflyPipeline(config.records_pattern, physics_model, batch_size=config.batch_size, num_workers=config.num_workers)
 
 
     # Model and optimizer.
@@ -286,7 +280,7 @@ def train(
     # Training loop.
     LOGGER.info('Training loop starting')
     for _epoch in range(config.num_epochs or 10**12):
-        for batch in training_physics_loader:
+        for batch in loader:
             step += 1
 
             # Main magic - update model
@@ -330,7 +324,7 @@ def train(
             if config.max_steps is not None and step >= config.max_steps:
                 break
 
-        validation_loss = evaluate(model, validation_physics_loader, loss_fn, device)
+        validation_loss = evaluate(model, loader, loss_fn, device)
         if validation_loss is not None:
             validation_losses.append(validation_loss)
             if run is not None:
