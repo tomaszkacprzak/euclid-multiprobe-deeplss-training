@@ -11,8 +11,10 @@ import torch
 
 from .training import TrainingConfig
 from .utils.config import load_config, with_forward_model_config
-from .utils.data import build_records_dataset, make_dataloader, split_iterable_dataset
+from .utils.data import build_records_dataset, make_dataloader, split_iterable_dataset, make_physics_dataloader
+from .utils.logger import get_logger
 
+LOGGER = get_logger(__file__)
 
 @dataclass(slots=True)
 class BatchChannelStats:
@@ -28,15 +30,18 @@ class BatchChannelStats:
 
 def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> list[BatchChannelStats]:
     """Print per-channel input-map statistics for one full train/validation epoch."""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     config = _coerce_config(config_or_path)
     dataset = build_records_dataset(config.records_pattern, config.extra | {"config": config, "forward_model": config.forward_model})
     training_dataset, validation_dataset = split_iterable_dataset(dataset, config.validation_fraction, config.seed)
     training_loader = make_dataloader(training_dataset, config, drop_last=config.drop_last)
     validation_loader = make_dataloader(validation_dataset, config, drop_last=False)
+    training_physics_loader = make_physics_dataloader(training_loader, config, device=device)
+    validation_physics_loader = make_physics_dataloader(validation_loader, config, device=device)
 
     batch_stats: list[BatchChannelStats] = []
-    batch_stats.extend(_collect_loader_stats(training_loader, split="train"))
-    batch_stats.extend(_collect_loader_stats(validation_loader, split="validation"))
+    batch_stats.extend(_collect_loader_stats(training_physics_loader, split="train"))
+    batch_stats.extend(_collect_loader_stats(validation_physics_loader, split="validation"))
 
     _print_channel_stats(_combine_batch_stats(batch_stats))
     return batch_stats
@@ -51,8 +56,13 @@ def datastats_from_config(config_path: str | Path) -> list[BatchChannelStats]:
 
 def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChannelStats]:
     stats = []
+    batch_count = 0
     for maps, _labels in dataloader:
+
+        LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+
         stats.append(_summarize_maps(maps, split=split))
+        batch_count += 1
     return stats
 
 

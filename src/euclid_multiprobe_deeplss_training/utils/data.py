@@ -7,6 +7,11 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from msfm.onthefly_pipeline import OntheflyPipeline
+from msfm.onthefly_physics.onthefly_base import OntheflyPhysicsModel
+from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
+
+
 
 
 def build_records_dataset(records_pattern: str, config: Mapping[str, Any]) -> IterableDataset:
@@ -18,9 +23,7 @@ def build_records_dataset(records_pattern: str, config: Mapping[str, Any]) -> It
     ``(pixels, channels)``, if that becomes the final convention).  The
     ``target_tensor`` should contain ``float32`` regression target data.
     """
-    from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-
-    dataset = OntheflyPhysicsModelLinear(config["forward_model"]).get_dataset(records_pattern)
+    dataset = OntheflyPipeline(records_pattern).get_dataset()
     return dataset
 
 
@@ -83,3 +86,9 @@ def make_dataloader(dataset: IterableDataset, config, *, drop_last: bool | None 
         num_workers=config.num_workers,
         drop_last=config.drop_last if drop_last is None else drop_last,
     )
+
+def make_physics_dataloader(loader: IterableDataset, config: Mapping[str, Any], seed_offset: int = 0, device: torch.device | str | None = None) -> OntheflyPhysicsModel:
+    """Build the physics loader from the given loader and config."""
+
+    model = OntheflyPhysicsModelLinear(loader, config.forward_model, seed_offset=seed_offset, device=device)
+    return model

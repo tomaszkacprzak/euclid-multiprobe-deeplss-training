@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from .utils import logger
 
 from euclid_multiprobe_deeplss_training import __version__
+
+LOGGER = logger.get_logger(__file__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +25,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=str,
         help="Path to the configuration file.",
+    )
+    parser.add_argument(
+        "--verbosity",
+        type=str,
+        default="info",
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="Verbosity level.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -115,8 +125,15 @@ def _run_datastats(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the command line interface."""
+
+    # Command line arguments
     parser = build_parser()
     args = parser.parse_args(argv)
+    
+    # Set logger
+    logger.set_all_loggers_level(args.verbosity)
+
+    # Run the command
     return args.func(args)
 
 

@@ -3,7 +3,7 @@ records_pattern: "webdataset_EuclidDR1F/EuclidDR1F_grid_dmb_*.tar"
 config_forward_model: "config_msfm_EuclidDR1F_onthefly.yaml"
 
 # Training settings.
-batch_size: 32
+batch_size: 4
 num_workers: 4
 max_steps: 10000
 validation_fraction: 0.1
