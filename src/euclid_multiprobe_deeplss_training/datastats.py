@@ -115,11 +115,63 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
             torch.cuda.synchronize()
             prof.step()
 
-    print(prof.key_averages().table(sort_by='self_cuda_time_total', row_limit=100, max_name_column_width=200, max_src_column_width=30))
+    print_profiler_stats(prof)
+    
     return stats
 
     
+def print_profiler_stats(prof: profiler.Profile, num_rows=20):
 
+    events = prof.key_averages()
+
+    def ms(us):
+        return us / 1000.0
+
+
+    def event_attr(evt, name, default=0):
+        return getattr(evt, name, default)
+
+    events = list(prof.key_averages())
+
+    events = sorted(
+        events,
+        key=lambda e: event_attr(e, "self_device_time_total", 0),
+        reverse=True,
+    )
+
+    total_self_device = sum(
+        event_attr(e, "self_device_time_total", 0)
+        for e in events
+    )
+
+    for i, evt in enumerate(events[:num_rows], start=1):
+        self_device = event_attr(evt, "self_device_time_total", 0)
+        device_total = event_attr(evt, "device_time_total", 0)
+
+        pct = (
+            100.0 * self_device / total_self_device
+            if total_self_device > 0
+            else 0.0
+        )
+
+        
+
+        print(f"\n================================================================ Event #{i}")
+        print(f"Name: {event_attr(evt, 'key', '<unknown>')}")
+        print()
+        print(f"Self device: {ms(self_device):.3f} ms")
+        print(f"Self device %: {pct:.2f}%")
+        print(f"Device total: {ms(device_total):.3f} ms")
+        print(f"CPU total: {ms(event_attr(evt, 'cpu_time_total', 0)):.3f} ms")
+        print(f"Self CPU: {ms(event_attr(evt, 'self_cpu_time_total', 0)):.3f} ms")
+        print(f"Calls: {event_attr(evt, 'count', 0)}")
+        print(f"CPU mem: {event_attr(evt, 'cpu_memory_usage', 0) / 1024**2:.2f} MB")
+        print(f"Self CPU mem: {event_attr(evt, 'self_cpu_memory_usage', 0) / 1024**2:.2f} MB")
+        print(f"Device mem: {event_attr(evt, 'device_memory_usage', 0) / 1024**2:.2f} MB")
+        print(f"Self device mem: {event_attr(evt, 'self_device_memory_usage', 0) / 1024**2:.2f} MB")
+
+    print()
+    
 
 def _summarize_maps(maps: torch.Tensor, *, split: str) -> BatchChannelStats:
 
