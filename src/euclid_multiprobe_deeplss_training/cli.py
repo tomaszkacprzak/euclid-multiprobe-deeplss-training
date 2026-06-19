@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.set_defaults(func=_run_train)
 
+    datastats_parser = subparsers.add_parser(
+        "datastats",
+        help="Print per-channel statistics for input dataset batches.",
+    )
+    datastats_parser.set_defaults(func=_run_datastats)
+
     parser.set_defaults(func=_run_info)
     return parser
 
@@ -93,6 +99,17 @@ def _run_train(args: argparse.Namespace) -> int:
         device=args.device,
         wandb_mode=args.wandb_mode,
     )
+    return 0
+
+
+def _run_datastats(args: argparse.Namespace) -> int:
+    """Print dataset input-map statistics from the parsed command line arguments."""
+    if args.config is None:
+        raise ValueError("The datastats command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.datastats import datastats_from_config
+
+    datastats_from_config(args.config)
     return 0
 
 
