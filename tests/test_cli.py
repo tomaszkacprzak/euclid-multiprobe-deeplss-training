@@ -98,24 +98,27 @@ def test_train_from_config_loads_forward_model_config(tmp_path, monkeypatch) -> 
     assert captured["config"]["forward_model"] == {"survey": "euclid", "params": {"omega_m": 0.3}}
 
 
-def test_train_passes_forward_model_to_records_dataset(monkeypatch) -> None:
+def test_train_passes_forward_model_to_onthefly_pipeline(monkeypatch) -> None:
     torch = pytest.importorskip("torch")
     pytest.importorskip("wandb")
-    from torch.utils.data import IterableDataset
 
     from euclid_multiprobe_deeplss_training import training
 
     calls = []
 
-    class OneSampleDataset(IterableDataset):
+    class FakePhysicsModel:
+        def __init__(self, forward_model):
+            self.forward_model = forward_model
+
+    class FakePipeline:
+        def __init__(self, records_pattern, physics_model, *, batch_size, num_workers):
+            calls.append((records_pattern, physics_model.forward_model, batch_size, num_workers))
+
         def __iter__(self):
             yield torch.tensor([[1.0, 2.0]]), torch.tensor([[0.5]])
 
-    def fake_build_records_dataset(records_pattern, config):
-        calls.append((records_pattern, config))
-        return OneSampleDataset()
-
-    monkeypatch.setattr(training, "build_records_dataset", fake_build_records_dataset)
+    monkeypatch.setattr(training, "OntheflyPhysicsModelLinear", FakePhysicsModel)
+    monkeypatch.setattr(training, "OntheflyPipeline", FakePipeline)
 
     training.train(
         {
@@ -131,9 +134,7 @@ def test_train_passes_forward_model_to_records_dataset(monkeypatch) -> None:
         device="cpu",
     )
 
-    assert calls[0][0] == "records/*.tar"
-    assert calls[0][1]["forward_model"] == {"survey": "euclid"}
-    assert calls[0][1]["config"].forward_model == {"survey": "euclid"}
+    assert calls == [("records/*.tar", {"survey": "euclid"}, 32, 0)]
 
 
 def test_datastats_command_requires_config() -> None:
