@@ -67,23 +67,23 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
 
     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
 
-    for maps, _labels in dataloader:
+    data_iter = iter(dataloader)
+    try:
+        maps, _labels = next(data_iter)
+    except StopIteration:
+        return stats
 
-        LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+    LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
 
-        stats.append(_summarize_maps(maps, split=split))
-        batch_count += 1
+    stats.append(_summarize_maps(maps, split=split))
+    batch_count += 1
 
-        print('maps.device =', maps.device)
-        print('_labels.device =', _labels.device)
+    print('maps.device =', maps.device)
+    print('_labels.device =', _labels.device)
 
-        fname = 'maps_batch_1.npy'
-        np.save(fname, maps.detach().cpu().numpy())
-        LOGGER.info(f'Saved maps to {fname}')
-
-        break
-
-
+    fname = 'maps_batch_1.npy'
+    np.save(fname, maps.detach().cpu().numpy())
+    LOGGER.info(f'Saved maps to {fname}')
 
     prof_schedule = schedule(
         wait=2,
@@ -105,7 +105,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
         with_stack=True,
     ) as prof:
 
-        for maps, _labels in dataloader:
+        for maps, _labels in data_iter:
 
             LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
 
