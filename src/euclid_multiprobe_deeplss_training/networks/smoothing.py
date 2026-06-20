@@ -1,0 +1,64 @@
+import torch.nn as nn
+import torch
+import healpy as hp
+
+class HealpyDownsampling(nn.Module):
+    """
+    A layer that downsamples a Healpix map to a lower resolution.
+    """
+
+    def __init__(self, nside, nside_base, nside_lower, dim, operator="sum"):
+        """
+        Args:
+            nside: The healpy nside of the input.
+            nside_base: The healpy nside of the base resolution.
+            nside_lower: The healpy nside of the lower resolution.
+            operator: The operator to use for the downsampling (sum or mean).
+        """
+
+        super().__init__()
+        self.nside = nside
+        self.nside_base = nside_base
+        self.nside_lower = nside_lower
+        if operator == 'sum':
+            self.operator = torch.sum
+        elif operator == 'mean':
+            self.operator = torch.mean
+        else:
+            raise ValueError(f"Invalid operator: {operator}")
+
+    def forward(self, x):
+        
+        nord = hp.nside2order(self.nside)
+        nord_base = hp.nside2order(self.nside_base)
+        npix_base = hp.nside2npix(self.nside)//hp.nside2npix(self.nside_base) # only some pixels at nside_base are used
+        nord_lower = torch.tensor([hp.nside2order(nside) for nside in self.nside_lower])
+        batch_size = x.shape[0]
+        num_channels = x.shape[-1]
+
+
+        # each channel is lowered to a different nside
+        assert x.shape[-1] == len(self.nside_lower)
+
+        shape = [batch_size,npix_base] + [4]*(nord-nord_base)
+
+        # loop over channels
+        list_channels_lower = []
+        for i in range(num_channels):
+
+            nord_lower_ = nord_lower[i]
+            dims_sum = tuple(range(1+nord_lower-nord_base+1, 1+nord-nord_base+1)) # 1+ because of the batch dimension
+
+
+            x_channel = x[..., i].reshape(shape)
+            
+            if self.operator == "sum":
+                x_channel_lower = self.operator(x_channel, dim=dims_sum, keepdim=True).expand_as(x_channel)
+            elif self.operator == "mean":
+                x_channel_lower = self.operator(x_channel, dim=dims_sum, keepdim=True).expand_as(x_channel)
+
+            list_channels_lower.append(x_channel_lower)
+
+        x_lower = torch.stack(list_channels_lower, dim=-1)
+
+        return x_lower
