@@ -1,6 +1,7 @@
-import torch.nn as nn
-import torch
 import healpy as hp
+import torch
+import torch.nn as nn
+
 
 class HealpyDownsampling(nn.Module):
     """
@@ -20,12 +21,11 @@ class HealpyDownsampling(nn.Module):
         self.nside = nside
         self.nside_base = nside_base
         self.nside_lower = nside_lower
-        if operator == 'sum':
-            self.operator = torch.sum
-        elif operator == 'mean':
-            self.operator = torch.mean
-        else:
-            raise ValueError(f"Invalid operator: {operator}")
+        operators = {"sum": torch.sum, "mean": torch.mean}
+        try:
+            self.operator = operators[operator]
+        except KeyError as exc:
+            raise ValueError(f"Invalid operator: {operator}") from exc
 
     def forward(self, x):
         
@@ -46,19 +46,16 @@ class HealpyDownsampling(nn.Module):
         list_channels_lower = []
         for i in range(num_channels):
 
-            nord_lower_ = nord_lower[i]
-            dims_sum = tuple(range(1+nord_lower-nord_base+1, 1+nord-nord_base+1)) # 1+ because of the batch dimension
+            nord_lower_ = int(nord_lower[i].item())
+            dims_sum = tuple(range(1 + nord_lower_ - nord_base + 1, 1 + nord - nord_base + 1)) # 1+ because of the batch dimension
 
 
             x_channel = x[..., i].reshape(shape)
-            
-            if self.operator == "sum":
+            if dims_sum:
                 x_channel_lower = self.operator(x_channel, dim=dims_sum, keepdim=True).expand_as(x_channel)
-            elif self.operator == "mean":
-                x_channel_lower = self.operator(x_channel, dim=dims_sum, keepdim=True).expand_as(x_channel)
+            else:
+                x_channel_lower = x_channel
 
-            list_channels_lower.append(x_channel_lower)
+            list_channels_lower.append(x_channel_lower.reshape(batch_size, -1))
 
-        x_lower = torch.stack(list_channels_lower, dim=-1)
-
-        return x_lower
+        return torch.stack(list_channels_lower, dim=-1)
