@@ -92,8 +92,12 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
         repeat=1,
     )
 
+    profiler_activities = [ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        profiler_activities.append(ProfilerActivity.CUDA)
+
     with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        activities=profiler_activities,
         schedule=prof_schedule,
         on_trace_ready=tensorboard_trace_handler("./torch_profiler_logs"),
         record_shapes=True,
@@ -111,7 +115,8 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
             if batch_count == 10:
                 break
 
-            torch.cuda.synchronize()
+            if maps.is_cuda:
+                torch.cuda.synchronize()
             prof.step()
 
     print_profiler_stats(prof)

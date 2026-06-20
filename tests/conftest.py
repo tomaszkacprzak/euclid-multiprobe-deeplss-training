@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.machinery
 import sys
 import types
 
@@ -10,6 +11,7 @@ if "tqdm" not in sys.modules:
         return collection
 
     tqdm_module.tqdm = _tqdm
+    tqdm_module.__spec__ = importlib.machinery.ModuleSpec("tqdm", loader=None)
     sys.modules["tqdm"] = tqdm_module
 
 
@@ -24,6 +26,7 @@ if "wandb" not in sys.modules:
 
     wandb_module.init = _wandb_init
     wandb_module.log = _wandb_log
+    wandb_module.__spec__ = importlib.machinery.ModuleSpec("wandb", loader=None)
     sys.modules["wandb"] = wandb_module
 
 
@@ -39,6 +42,11 @@ if "msfm" not in sys.modules:
 
     physics_linear.OntheflyPhysicsModelLinear = _MissingOptionalDependency
     pipeline_module.OntheflyPipeline = _MissingOptionalDependency
+
+    msfm_module.__spec__ = importlib.machinery.ModuleSpec("msfm", loader=None, is_package=True)
+    physics_pkg.__spec__ = importlib.machinery.ModuleSpec("msfm.onthefly_physics", loader=None, is_package=True)
+    physics_linear.__spec__ = importlib.machinery.ModuleSpec("msfm.onthefly_physics.onthefly_linear", loader=None)
+    pipeline_module.__spec__ = importlib.machinery.ModuleSpec("msfm.onthefly_pipeline", loader=None)
 
     sys.modules["msfm"] = msfm_module
     sys.modules["msfm.onthefly_physics"] = physics_pkg
@@ -60,4 +68,5 @@ if "psutil" not in sys.modules:
             return _MemoryInfo()
 
     psutil_module.Process = _Process
+    psutil_module.__spec__ = importlib.machinery.ModuleSpec("psutil", loader=None)
     sys.modules["psutil"] = psutil_module
