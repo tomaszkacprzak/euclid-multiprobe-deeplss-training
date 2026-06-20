@@ -44,6 +44,30 @@ def test_healpy_downsampling_mean_averages_to_lower_nside() -> None:
     assert torch.equal(y, expected)
 
 
+def test_healpy_downsampling_mean_matches_healpy_ud_grade() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    hp = pytest.importorskip("healpy")
+
+    from euclid_multiprobe_deeplss_training.networks.smoothing import HealpyDownsampling
+
+    nside = 64
+    nside_base = 4
+    nside_lower = 16
+    input_map = np.arange(hp.nside2npix(nside), dtype=np.float64)
+    x = torch.from_numpy(input_map).reshape(1, -1, 1)
+
+    downsample = HealpyDownsampling(nside=nside, nside_base=nside_base, nside_lower=[nside_lower], dim=-1, operator="mean")
+
+    y = downsample(x)
+
+    ud_grade_lower = hp.ud_grade(input_map, nside_out=nside_lower, order_in="NESTED", order_out="NESTED", power=0)
+    expected = hp.ud_grade(ud_grade_lower, nside_out=nside, order_in="NESTED", order_out="NESTED", power=0)
+    expected = torch.from_numpy(expected).reshape(1, -1, 1)
+
+    assert torch.allclose(y, expected)
+
+
 def test_healpy_downsampling_rejects_unknown_operator() -> None:
     pytest.importorskip("torch")
     pytest.importorskip("healpy")

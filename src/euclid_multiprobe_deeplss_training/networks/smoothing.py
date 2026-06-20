@@ -28,27 +28,24 @@ class HealpyDownsampling(nn.Module):
             raise ValueError(f"Invalid operator: {operator}") from exc
 
     def forward(self, x):
-        
+
         nord = hp.nside2order(self.nside)
         nord_base = hp.nside2order(self.nside_base)
-        npix_base = hp.nside2npix(self.nside)//hp.nside2npix(self.nside_base) # only some pixels at nside_base are used
+        npix_base = hp.nside2npix(self.nside_base)
         nord_lower = torch.tensor([hp.nside2order(nside) for nside in self.nside_lower])
         batch_size = x.shape[0]
         num_channels = x.shape[-1]
 
-
         # each channel is lowered to a different nside
         assert x.shape[-1] == len(self.nside_lower)
 
-        shape = [batch_size,npix_base] + [4]*(nord-nord_base)
+        shape = [batch_size, npix_base] + [4] * (nord - nord_base)
 
         # loop over channels
         list_channels_lower = []
         for i in range(num_channels):
-
             nord_lower_ = int(nord_lower[i].item())
-            dims_sum = tuple(range(1 + nord_lower_ - nord_base + 1, 1 + nord - nord_base + 1)) # 1+ because of the batch dimension
-
+            dims_sum = tuple(range(1 + nord_lower_ - nord_base + 1, 1 + nord - nord_base + 1))  # 1+ because of the batch dimension
 
             x_channel = x[..., i].reshape(shape)
             if dims_sum:
