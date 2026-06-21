@@ -2,11 +2,9 @@ from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
-def build_model(config : dict[str, Any], 
+def build_model(model_name: str,
                 num_channels: int,
                 num_targets: int):
-
-    model_name = config["network"]["name"]
 
     if model_name == "nested_transformer":
 
