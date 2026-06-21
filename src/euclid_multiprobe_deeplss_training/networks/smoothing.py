@@ -8,7 +8,7 @@ class HealpyDownsampling(nn.Module):
     A layer that downsamples a Healpix map to a lower resolution.
     """
 
-    def __init__(self, nside, nside_base, nside_lower, dim, operator="sum"):
+    def __init__(self, nside, nside_base, nside_lower, operator="sum"):
         """
         Args:
             nside: The healpy nside of the input.
@@ -29,12 +29,11 @@ class HealpyDownsampling(nn.Module):
 
     def forward(self, x):
 
+        batch_size, npix, num_channels = x.shape
         nord = hp.nside2order(self.nside)
         nord_base = hp.nside2order(self.nside_base)
-        npix_base = hp.nside2npix(self.nside_base)
+        npix_base = npix // ( hp.nside2npix(self.nside) // hp.nside2npix(self.nside_base)) 
         nord_lower = torch.tensor([hp.nside2order(nside) for nside in self.nside_lower])
-        batch_size = x.shape[0]
-        num_channels = x.shape[-1]
 
         # each channel is lowered to a different nside
         assert x.shape[-1] == len(self.nside_lower)

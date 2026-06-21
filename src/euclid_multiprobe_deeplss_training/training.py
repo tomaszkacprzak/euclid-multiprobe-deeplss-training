@@ -99,21 +99,7 @@ class TrainingConfig:
 _with_forward_model_config = with_forward_model_config
 
 
-class SmallRegressionNet(nn.Module):
-    """Minimal fallback regression model used when callers do not pass one."""
 
-    def __init__(self, config: TrainingConfig) -> None:
-        super().__init__()
-        layers: list[nn.Module] = [nn.Flatten(), nn.LazyLinear(config.hidden_channels), nn.ReLU()]
-        for _ in range(max(config.num_blocks - 1, 0)):
-            layers.extend([nn.Linear(config.hidden_channels, config.hidden_channels), nn.ReLU()])
-            if config.dropout > 0.0:
-                layers.append(nn.Dropout(config.dropout))
-        layers.append(nn.Linear(config.hidden_channels, config.num_targets))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
 
 
 def train_one_step(

@@ -35,7 +35,8 @@ dependencies = [
   "pyyaml",
   "wandb",
   "cuHPX",
-  "deepsphere @git+https://github.com/tomaszkacprzak/deepsphere-cosmo-pytorch.git",
+  #"deepsphere @git+https://github.com/tomaszkacprzak/deepsphere-cosmo-pytorch.git",
+  #"heal-swin @git+https://github.com/tomaszkacprzak/HEAL-SWIN.git"
 ]
 
 [project.optional-dependencies]

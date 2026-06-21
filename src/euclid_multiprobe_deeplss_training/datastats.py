@@ -16,6 +16,7 @@ from .utils.logger import get_logger
 
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
+from euclid_multiprobe_deeplss_training.networks.smoothing import HealpyDownsampling
 
 
 LOGGER = get_logger(__file__)
@@ -38,9 +39,14 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
     LOGGER.info(f'Using device: {device}')
     config = _coerce_config(config_or_path)
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, device=device).to(device)
+    smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
+                                         nside_base=config.forward_model["analysis"]["n_side_down"], 
+                                         nside_lower=[512]*24, 
+                                         operator="mean").to(device)
     
     loader = OntheflyPipeline(config.records_pattern, 
                               physics_model, 
+                              smoothing_model,
                               batch_size=config.batch_size, 
                               num_workers=config.num_workers,
                               pin_memory=True,
