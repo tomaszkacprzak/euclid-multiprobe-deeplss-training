@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import shutil
 import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
@@ -50,6 +51,7 @@ class TrainingConfig:
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
     resume_from_checkpoint: str | None = None
+    tag: str = "test-run"
     wandb_project: str | None = None
     wandb_run_name: str | None = None
     wandb_mode: str | None = None
@@ -197,6 +199,24 @@ def save_checkpoint(
         },
         path,
     )
+
+
+def _prepare_checkpoint_dir(config: TrainingConfig) -> Path | None:
+    """Return the run-specific checkpoint directory after clearing old contents."""
+    if not config.checkpoint_dir:
+        return None
+
+    checkpoint_dir = Path(config.checkpoint_dir) / config.tag
+    if checkpoint_dir.exists():
+        if not checkpoint_dir.is_dir():
+            raise NotADirectoryError(f"Checkpoint path exists and is not a directory: {checkpoint_dir}")
+        for child in checkpoint_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return checkpoint_dir
 
 
 def load_checkpoint(
@@ -477,6 +497,7 @@ def train(
             optimizer,
             device,
         )
+    checkpoint_dir = _prepare_checkpoint_dir(config)
 
     # Housekeeping
     training_batches = _print_initial_model_summary(model, loader, device)
@@ -573,7 +594,7 @@ def train(
 
             # checkpoint management
             if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                checkpoint_path = Path(config.checkpoint_dir) / f"checkpoint-step-{step}.pt"
+                checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
                 save_checkpoint(
                     checkpoint_path,
                     model,
@@ -613,8 +634,8 @@ def train(
         if config.max_steps is not None and step >= config.max_steps:
             break
 
-    if config.checkpoint_dir:
-        final_checkpoint_path = Path(config.checkpoint_dir) / "checkpoint-final.pt"
+    if checkpoint_dir:
+        final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
         save_checkpoint(
             final_checkpoint_path,
             model,
@@ -643,6 +664,7 @@ def train_from_config(
     max_steps: int | None = None,
     device: torch.device | str | None = None,
     wandb_mode: str | None = None,
+    tag: str | None = None,
 ) -> dict[str, Any]:
     """Train from a YAML config file with optional CLI-style overrides."""
     config_path = Path(config_path)
@@ -652,6 +674,7 @@ def train_from_config(
         "checkpoint_dir": checkpoint_dir,
         "max_steps": max_steps,
         "wandb_mode": wandb_mode,
+        "tag": tag,
     }
     raw_config.update({key: value for key, value in overrides.items() if value is not None})
     return train(raw_config, device=device)

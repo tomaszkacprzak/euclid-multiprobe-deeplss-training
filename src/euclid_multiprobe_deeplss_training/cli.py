@@ -121,6 +121,7 @@ def _run_train(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         device=args.device,
         wandb_mode=args.wandb_mode,
+        tag=args.tag,
     )
     return 0
 
