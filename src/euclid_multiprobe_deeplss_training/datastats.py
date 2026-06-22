@@ -117,7 +117,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
             stats.append(_summarize_maps(maps, split=split))
             batch_count += 1
 
-            if batch_count == 10:
+            if batch_count == 100:
                 break
 
             if maps.is_cuda:

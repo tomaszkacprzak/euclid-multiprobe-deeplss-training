@@ -296,7 +296,8 @@ def train(
 
             # Main magic - update model
             train_loss = train_one_step(model, batch, optimizer, loss_fn, device)
-            LOGGER.debug(f'Train loss epoch={_epoch:>3d} {step:>5d} {train_loss: .6e}')
+            if step % 10 == 0:
+                LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
 
 
             train_losses.append(train_loss)
