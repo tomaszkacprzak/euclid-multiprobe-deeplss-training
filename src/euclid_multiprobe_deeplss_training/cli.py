@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("online", "offline", "disabled"),
         help="Weights & Biases mode for this training run.",
     )
+    train_parser.add_argument(
+        "--tag",
+        type=str,
+        default='test-run',
+        help="Tag for this training run.",
+    )
     train_parser.set_defaults(func=_run_train)
 
     datastats_parser = subparsers.add_parser(

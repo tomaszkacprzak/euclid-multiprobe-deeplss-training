@@ -168,7 +168,7 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any]):
 
     return wandb.init(
         project=wandb_project,
-        name=config_dict.get("wandb_run_name"),
+        name=config_dict.get("tag"),
         mode=wandb_mode or "offline",
         config=config_dict,
     )
