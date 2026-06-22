@@ -18,6 +18,7 @@ from torch.nn.utils import clip_grad_norm_
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
 from .networks.builder import build_model
+from .losses.builder import build_loss
 from .networks.smoothing import NestChannelDownsampler, NestDownsampler
 
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
@@ -39,6 +40,7 @@ class TrainingConfig:
     model_name: str = "nested_transformer"
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
+    loss_function: str = "mse"
     batch_size: int = 32
     num_epochs: int | None = 1
     max_steps: int | None = None
@@ -107,41 +109,6 @@ _with_forward_model_config = with_forward_model_config
 
 
 
-def train_one_step(
-    model: nn.Module,
-    batch: tuple[torch.Tensor, torch.Tensor],
-    optimizer: torch.optim.Optimizer,
-    loss_fn: nn.Module,
-    device: torch.device | str,
-) -> float:
-    """Run one optimization step and return the scalar loss."""
-    model.train()
-    maps, labels = batch
-    LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-    LOGGER.debug(f'Labels shape={labels.shape}')
-    maps = maps.to(device=device, dtype=torch.float32)
-    labels = labels.to(device=device, dtype=torch.float32)
-
-    optimizer.zero_grad(set_to_none=True)
-    LOGGER.debug('Running forward pass')
-    predictions = model(maps)
-    LOGGER.debug('Running loss')
-    loss = loss_fn(predictions, labels)
-    if not loss.requires_grad:
-        raise RuntimeError(
-            "The training loss is detached from the model parameters; "
-            "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
-        )
-
-    LOGGER.debug('Running backward pass')
-    loss.backward()
-
-    LOGGER.debug('Clipping gradients')
-    clip_grad_norm_(model.parameters(), 1.0)
-
-    LOGGER.debug('Running optimizer step')
-    optimizer.step()
-    return float(loss.detach().cpu())
 
 
 @torch.no_grad()
@@ -289,6 +256,7 @@ def _print_initial_model_summary(
         model.train(was_training)
 
     _print_model_specification_table(model, rows)
+    print()
     return itertools.chain([first_batch], iterator)
 
 import torch
@@ -388,6 +356,45 @@ def get_gradient_stats(model, log_per_parameter=False):
     return logs
 
 
+
+
+def train_one_step(
+    model: nn.Module,
+    batch: tuple[torch.Tensor, torch.Tensor],
+    optimizer: torch.optim.Optimizer,
+    loss_fn: nn.Module,
+    device: torch.device | str,
+) -> float:
+    """Run one optimization step and return the scalar loss."""
+    model.train()
+    maps, labels = batch
+    LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+    LOGGER.debug(f'Labels shape={labels.shape}')
+    maps = maps.to(device=device, dtype=torch.float32)
+    labels = labels.to(device=device, dtype=torch.float32)
+
+    optimizer.zero_grad(set_to_none=True)
+    LOGGER.debug('Running forward pass')
+    predictions = model(maps)
+    LOGGER.debug('Running loss')
+    loss = loss_fn(predictions, labels)
+    if not loss.requires_grad:
+        raise RuntimeError(
+            "The training loss is detached from the model parameters; "
+            "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
+        )
+
+    LOGGER.debug('Running backward pass')
+    loss.backward()
+
+    LOGGER.debug('Clipping gradients')
+    clip_grad_norm_(model.parameters(), 1.0)
+
+    LOGGER.debug('Running optimizer step')
+    optimizer.step()
+    return float(loss.detach().cpu())
+
+
 def train(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
     model: nn.Module | None = None,
@@ -447,20 +454,20 @@ def train(
     print(model)
     print()
 
+    # Loss function 
+    loss_fn = build_loss(config.loss_function, model, num_targets=physics_model.num_targets)
+    loss_fn = loss_fn.to(device)
+    LOGGER.info(f'Loss function: {loss_fn}')
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    loss_fn = nn.MSELoss()
     step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
-    
     print()
     LOGGER.info(f'Optimizer:')
     print(optimizer)
     print()
-
-
 
     # Checkpoints
     if config.resume_from_checkpoint:
@@ -471,8 +478,8 @@ def train(
             device,
         )
 
+    # Housekeeping
     training_batches = _print_initial_model_summary(model, loader, device)
-
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0
@@ -519,7 +526,7 @@ def train(
                 if step % 100 == 0:
                     grad_logs = get_gradient_stats(model, log_per_parameter=False)
                     grad_hist = log_selected_gradient_histograms(model)
-                    wandb.log(**grad_logs, **grad_hist, step=step)
+                    wandb.log({**grad_logs, **grad_hist}, step=step)
                     
 
             # checkpoint management
