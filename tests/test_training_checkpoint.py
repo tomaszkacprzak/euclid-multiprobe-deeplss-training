@@ -86,3 +86,31 @@ def test_prepare_checkpoint_dir_uses_tag_and_clears_existing_contents(tmp_path) 
     assert run_dir.is_dir()
     assert list(run_dir.iterdir()) == []
     assert (other_run_dir / "checkpoint.pt").read_text(encoding="utf-8") == "keep"
+
+
+def test_write_reproducibility_config_to_checkpoint_dir(tmp_path) -> None:
+    pytest.importorskip("torch")
+    yaml = pytest.importorskip("yaml")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, _write_reproducibility_config
+
+    checkpoint_dir = tmp_path / "checkpoints" / "experiment-a"
+    checkpoint_dir.mkdir(parents=True)
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        tag="experiment-a",
+        forward_model={"analysis": {"n_side": 512, "n_side_down": 64}},
+        max_steps=5,
+        use_wandb=False,
+    )
+
+    config_path = _write_reproducibility_config(checkpoint_dir, config)
+
+    assert config_path == checkpoint_dir / "config.yaml"
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved_config["records_pattern"] == "records/*.tar"
+    assert saved_config["checkpoint_dir"] == str(tmp_path / "checkpoints")
+    assert saved_config["tag"] == "experiment-a"
+    assert saved_config["forward_model"] == {"analysis": {"n_side": 512, "n_side_down": 64}}
+    assert saved_config["max_steps"] == 5
