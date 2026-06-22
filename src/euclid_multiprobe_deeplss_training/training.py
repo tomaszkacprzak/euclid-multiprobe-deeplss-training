@@ -236,40 +236,40 @@ def train(
     config = _coerce_config(config_or_path)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
+    nside_training = 256
+
     LOGGER.info(f"Training on {device} with config: {config}")
 
-    physics_model_hires = OntheflyPhysicsModelLinear(config.forward_model, 
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
                         device=device).to(device)
 
-    # It would be faster to do this at the level of the webdataset loader
-    physics_model_lowres = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+    # Downsample all maps to the same nside
+    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
                             nside_base=config.forward_model["analysis"]["n_side_down"], 
-                            nside_lower=256, 
+                            nside_lower=nside_training, 
                             operator="mean").to(device)
-
-    physics_model = torch.nn.Sequential(physics_model_hires, physics_model_lowres).to(device)
-
-    smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-                        nside_base=config.forward_model["analysis"]["n_side_down"], 
-                        nside_lower=[512]*24, 
-                        operator="mean").to(device)
     
+    # Downsample each channel to a different nside
+    # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+    #                     nside_base=config.forward_model["analysis"]["n_side_down"], 
+    #                     nside_lower=[nside_training]*24, 
+    #                     operator="mean").to(device)
+                            
     loader = OntheflyPipeline(config.records_pattern, 
                               physics_model, 
-                              smoothing_model,
+                              smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
                               num_workers=config.num_workers,
                               pin_memory=True,
                               device=device)
-
 
     # Model 
     model = build_model(config.model_name, 
                     num_channels=physics_model.num_channels,
                     num_targets=physics_model.num_targets,
                     num_pixels=loader.num_pixels,
-                    nside=int(config.forward_model["analysis"]["n_side"]),
+                    nside=nside_training,
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
                     )
     model.to(device)

@@ -25,13 +25,12 @@ class NestDownsampler(nn.Module):
         nord = hp.nside2order(self.nside)
         nord_base = hp.nside2order(self.nside_base)
         npix_base = npix // ( hp.nside2npix(self.nside) // hp.nside2npix(self.nside_base)) 
-        nord_lower = torch.tensor([hp.nside2order(nside) for nside in self.nside_lower])
+        nord_lower = hp.nside2order(self.nside_lower)
 
-        shape = [batch_size, npix_base] + [4] * (nord - nord_base)
-
+        shape = [batch_size, npix_base] + [4] * (nord - nord_base) + [num_channels]
         dims_sum = tuple(range(1 + nord_lower - nord_base + 1, 1 + nord - nord_base + 1))  # 1+ because of the batch dimension
-        x_lower = self.operator(x, dim=dims_sum, keepdims=False)
-
+        x_lower = self.operator(x.reshape(shape), dim=dims_sum, keepdims=False)
+                
         return x_lower.reshape(batch_size, -1, num_channels)
         
 

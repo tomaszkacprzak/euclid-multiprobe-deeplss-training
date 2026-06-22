@@ -19,7 +19,7 @@ class HealpixNestedHierarchicalLocalWindowTransformer(NestedHierarchicalLocalWin
        
         # get the number of top-level healpix pixels present in the map, at nside_down
         num_pixels_per_top_level_token = hp.nside2npix(nside) // hp.nside2npix(nside_down)
-        assert self.num_pixels % num_pixels_per_top_level_token ==0, f"Cannot split {num_pixels} pixels into {num_top_level_tokens} top-level tokens"
+        assert self.num_pixels % num_pixels_per_top_level_token ==0, f"Cannot split {num_pixels} pixels into {num_pixels_per_top_level_token} top-level tokens"
         num_top_level_tokens = num_pixels // num_pixels_per_top_level_token
         
         # get the number of nested levels of each top-level pixel
