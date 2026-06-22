@@ -12,7 +12,7 @@ from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
 
 from euclid_multiprobe_deeplss_training.networks.builder import build_model
-from euclid_multiprobe_deeplss_training.networks.smoothing import HealpyDownsampling
+from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 
 from .datastats import print_profiler_stats
 from .training import TrainingConfig
@@ -28,11 +28,14 @@ def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig
     LOGGER.info(f"Using device: {device}")
     config = _coerce_config(config_or_path)
 
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, device=device).to(device)
-    smoothing_model = HealpyDownsampling(
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
+                        scalers=True,
+                        device=device).to(device)
+
+    smoothing_model = NestChannelDownsampler(
         nside=config.forward_model["analysis"]["n_side"],
         nside_base=config.forward_model["analysis"]["n_side_down"],
-        nside_lower=[512] * 24,
+        nside_lower=[1024] * 24,
         operator="mean",
     ).to(device)
 
@@ -48,8 +51,9 @@ def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig
 
     model = build_model(
         "nested_transformer",
-        num_channels=config.in_channels,
-        num_targets=config.num_targets,
+        num_channels=physics_model.num_channels,
+        num_targets=physics_model.num_targets,
+        num_pixels=loader.num_pixels,
         nside=int(config.forward_model["analysis"]["n_side"]),
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
     ).to(device)
@@ -206,8 +210,6 @@ def _prepare_transformer_batch(maps: torch.Tensor, *, config: TrainingConfig) ->
 
     batch_size, num_pixels, num_channels = maps.shape
     print(f"maps.shape: {maps.shape}")
-    if num_channels != config.in_channels:
-        raise ValueError(f"Expected {config.in_channels} input channels, got {num_channels}")
 
     num_top_level_tokens = _calculate_num_top_level_tokens(config, num_pixels)
     if num_pixels % num_top_level_tokens != 0:

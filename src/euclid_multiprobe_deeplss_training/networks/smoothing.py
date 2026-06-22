@@ -2,8 +2,40 @@ import healpy as hp
 import torch
 import torch.nn as nn
 
+class NestDownsampler(nn.Module):
+    """
+    A layer that manipulates the nest resolution of a Healpix map.
+    """
 
-class HealpyDownsampling(nn.Module):
+    def __init__(self, nside, nside_base, nside_lower, operator="sum"):
+        super().__init__()
+        self.nside = int(nside)
+        self.nside_base = int(nside_base)
+        self.nside_lower = int(nside_lower)
+        operators = {"sum": torch.sum, "mean": torch.mean}
+
+        try:
+            self.operator = operators[operator]
+        except KeyError as exc:
+            raise ValueError(f"Invalid operator: {operator}") from exc
+
+    def forward(self, x):
+
+        batch_size, npix, num_channels = x.shape
+        nord = hp.nside2order(self.nside)
+        nord_base = hp.nside2order(self.nside_base)
+        npix_base = npix // ( hp.nside2npix(self.nside) // hp.nside2npix(self.nside_base)) 
+        nord_lower = torch.tensor([hp.nside2order(nside) for nside in self.nside_lower])
+
+        shape = [batch_size, npix_base] + [4] * (nord - nord_base)
+
+        dims_sum = tuple(range(1 + nord_lower - nord_base + 1, 1 + nord - nord_base + 1))  # 1+ because of the batch dimension
+        x_lower = self.operator(x, dim=dims_sum, keepdims=False)
+
+        return x_lower.reshape(batch_size, -1, num_channels)
+        
+
+class NestChannelDownsampler(nn.Module):
     """
     A layer that downsamples a Healpix map to a lower resolution.
     """

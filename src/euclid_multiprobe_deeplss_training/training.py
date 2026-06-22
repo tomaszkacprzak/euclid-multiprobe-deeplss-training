@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
 from .networks.builder import build_model
-from .networks.smoothing import HealpyDownsampling
+from .networks.smoothing import NestChannelDownsampler, NestDownsampler
 
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
@@ -238,11 +238,22 @@ def train(
 
     LOGGER.info(f"Training on {device} with config: {config}")
 
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, device=device).to(device)
-    smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
-                                         nside_base=config.forward_model["analysis"]["n_side_down"], 
-                                         nside_lower=[512]*24, 
-                                         operator="mean").to(device)
+    physics_model_hires = OntheflyPhysicsModelLinear(config.forward_model, 
+                        scalers=True,
+                        device=device).to(device)
+
+    # It would be faster to do this at the level of the webdataset loader
+    physics_model_lowres = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+                            nside_base=config.forward_model["analysis"]["n_side_down"], 
+                            nside_lower=256, 
+                            operator="mean").to(device)
+
+    physics_model = torch.nn.Sequential(physics_model_hires, physics_model_lowres).to(device)
+
+    smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+                        nside_base=config.forward_model["analysis"]["n_side_down"], 
+                        nside_lower=[512]*24, 
+                        operator="mean").to(device)
     
     loader = OntheflyPipeline(config.records_pattern, 
                               physics_model, 

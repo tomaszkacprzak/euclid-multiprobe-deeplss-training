@@ -12,7 +12,7 @@ import torch
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
 
-from euclid_multiprobe_deeplss_training.networks.smoothing import HealpyDownsampling
+from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 
 from .training import TrainingConfig
 from .utils.config import load_config, with_forward_model_config
@@ -42,7 +42,7 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
                         scalers=False,
                         device=device).to(device)
 
-    smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
+    smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
                         nside_base=config.forward_model["analysis"]["n_side_down"], 
                         nside_lower=[512]*24, 
                         operator="mean").to(device)
@@ -127,6 +127,9 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
 
             LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
             LOGGER.debug(f'Batch {batch_count} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
+
+            if batch_count % 10 == 0:
+                LOGGER.info(f'Batch {batch_count}')
 
             map_stats.append(_summarize_maps(maps, split=split))
             label_stats.append(_summarize_labels(labels, split=split))
