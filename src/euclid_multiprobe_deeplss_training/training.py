@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
+from .networks.builder import build_model
+from .networks.smoothing import HealpyDownsampling
 
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
@@ -235,13 +237,31 @@ def train(
 
     LOGGER.info(f"Training on {device} with config: {config}")
 
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model)
-    loader = OntheflyPipeline(config.records_pattern, physics_model, batch_size=config.batch_size, num_workers=config.num_workers)
+    # Inputs
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
+                        scalers=True,
+                        device=device)
+
+    smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
+                        nside_base=config.forward_model["analysis"]["n_side_down"], 
+                        nside_lower=[512]*24, 
+                        operator="mean",
+                        device=device)
+
+    loader = OntheflyPipeline(config.records_pattern, 
+                physics_model, 
+                smoothing_model=smoothing_model,
+                batch_size=config.batch_size, 
+                num_workers=config.num_workers)
 
 
-    # Model and optimizer.
-    model = model or SmallRegressionNet(config)
-    model.to(device)
+    # Model
+    model = build_model(config.model_name,
+                config.in_channels, 
+                config.num_targets).to(device)
+    LOGGER.info(f'Build model {config.model_name}')
+
+    # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     loss_fn = nn.MSELoss()
     step = 0
@@ -256,8 +276,7 @@ def train(
             device,
         )
 
-    LOGGER.info(f'Model: {model}')
-
+    # Housekeeping
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0

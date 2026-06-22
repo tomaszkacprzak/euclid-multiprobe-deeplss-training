@@ -37,11 +37,15 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOGGER.info(f'Using device: {device}')
     config = _coerce_config(config_or_path)
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, device=device).to(device)
+    
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
+                        scalers=False,
+                        device=device).to(device)
+
     smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
-                                         nside_base=config.forward_model["analysis"]["n_side_down"], 
-                                         nside_lower=[512]*24, 
-                                         operator="mean").to(device)
+                        nside_base=config.forward_model["analysis"]["n_side_down"], 
+                        nside_lower=[512]*24, 
+                        operator="mean").to(device)
     
     loader = OntheflyPipeline(config.records_pattern, 
                               physics_model, 
