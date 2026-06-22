@@ -517,7 +517,7 @@ def train(
     for i in range(torch.cuda.device_count()):
         LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
     
-    nside_training = 256
+    nside_training = 512
 
     LOGGER.info(f"\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
@@ -562,7 +562,7 @@ def train(
     print()
 
     # Loss function 
-    loss_fn = build_loss(config.loss_function, model, num_targets=physics_model.num_targets)
+    loss_fn = build_loss(config.loss_function, num_targets=physics_model.num_targets)
     loss_fn = loss_fn.to(device)
     LOGGER.info(f'Loss function: {loss_fn}')
 
