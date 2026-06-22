@@ -112,6 +112,7 @@ def train_one_step(
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
     device: torch.device | str,
+    validate: bool = False,
 ) -> float:
     """Run one optimization step and return the scalar loss."""
     model.train()
@@ -134,7 +135,8 @@ def train_one_step(
 
     LOGGER.debug('Running backward pass')
     loss.backward()
-    _validate_gradient_flow(model)
+    if validate:
+        _validate_gradient_flow(model)
     LOGGER.debug('Running optimizer step')
     optimizer.step()
     return float(loss.detach().cpu())
@@ -354,7 +356,15 @@ def train(
     step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
+    
+    print()
+    LOGGER.info(f'Optimizer: {optimizer}')
+    print(optimizer)
+    print()
 
+
+
+    # Checkpoints
     if config.resume_from_checkpoint:
         step, train_losses, validation_losses = load_checkpoint(
             config.resume_from_checkpoint,
@@ -377,7 +387,7 @@ def train(
             step += 1
 
             # Main magic - update model
-            train_loss = train_one_step(model, batch, optimizer, loss_fn, device)
+            train_loss = train_one_step(model, batch, optimizer, loss_fn, device, validate=step<10) # validate only for the first 10 steps
             if step % 10 == 0:
                 LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
 
