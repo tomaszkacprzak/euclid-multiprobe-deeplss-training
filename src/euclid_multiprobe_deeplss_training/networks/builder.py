@@ -1,4 +1,4 @@
-from .utils.logger import get_logger
+from ..utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
@@ -8,7 +8,7 @@ def build_model(model_name: str,
 
     if model_name == "nested_transformer":
 
-        from .networks.nested_transfomer import NestedHierarchicalLocalWindowTransformer
+        from .nested_transfomer import NestedHierarchicalLocalWindowTransformer
         model = NestedHierarchicalLocalWindowTransformer(
                     in_channels=num_channels,
                     num_outputs=num_targets,

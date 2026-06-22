@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
+import healpy as hp
 
 import torch
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
@@ -115,36 +116,60 @@ def _prepare_transformer_batch(maps: torch.Tensor, *, config: TrainingConfig) ->
         raise ValueError(f"Expected maps with shape (batch, pixels, channels), got {tuple(maps.shape)}")
 
     batch_size, num_pixels, num_channels = maps.shape
+    print(f"maps.shape: {maps.shape}")
     if num_channels != config.in_channels:
         raise ValueError(f"Expected {config.in_channels} input channels, got {num_channels}")
 
-    top_level_tokens = _top_level_tokens(config, num_pixels)
-    if num_pixels % top_level_tokens != 0:
-        raise ValueError(f"Cannot split {num_pixels} pixels into {top_level_tokens} top-level tokens")
+    num_top_level_tokens = _calculate_num_top_level_tokens(config, num_pixels)
+    if num_pixels % num_top_level_tokens != 0:
+        raise ValueError(f"Cannot split {num_pixels} pixels into {num_top_level_tokens} top-level tokens")
 
-    nested_factor = num_pixels // top_level_tokens
+    nested_factor = num_pixels // num_top_level_tokens
     nested_levels = 0
     while nested_factor > 1 and nested_factor % 4 == 0:
         nested_levels += 1
         nested_factor //= 4
 
     if nested_factor != 1:
-        raise ValueError(f"Pixel ratio {num_pixels // top_level_tokens} is not a power of 4")
+        raise ValueError(f"Pixel ratio {num_pixels // num_top_level_tokens} is not a power of 4")
 
     nested_shape = (4,) * nested_levels
-    return maps.movedim(2, 1).contiguous().reshape(batch_size, num_channels, top_level_tokens, *nested_shape)
+    return maps.movedim(2, 1).contiguous().reshape(batch_size, num_channels, num_top_level_tokens, *nested_shape)
 
 
-def _top_level_tokens(config: TrainingConfig, num_pixels: int) -> int:
+def _calculate_num_top_level_tokens(config: TrainingConfig, num_pixels: int) -> int:
+    """Calculate the number of top-level tokens for the nested transformer."""
+    """
+    Calculate the number of top-level tokens for the nested transformer.
+
+    Args:
+        config: The training configuration.
+        num_pixels: The number of pixels in the map.
+
+    Returns:
+        The number of top-level tokens.
+    """
+
     analysis_config = config.forward_model.get("analysis", {}) if isinstance(config.forward_model, Mapping) else {}
     nside_down = analysis_config.get("n_side_down")
-    if nside_down is not None:
-        return 12 * int(nside_down) ** 2
+    nside = analysis_config.get("n_side")
+    assert nside_down is not None
+    assert nside is not None
 
-    top_level_tokens = num_pixels
-    while top_level_tokens % 4 == 0 and top_level_tokens > 1:
-        top_level_tokens //= 4
-    return top_level_tokens
+    num_pixels_nside = hp.nside2npix(nside)
+    num_pixels_nside_down = hp.nside2npix(nside_down)
+
+    print("nside_down:", nside_down, "num_pixels:", num_pixels)
+   
+
+    num_pixels_per_top_level_token = num_pixels_nside //num_pixels_nside_down
+    print("num_pixels_per_top_level_token:", num_pixels_per_top_level_token)
+
+    num_top_level_tokens = num_pixels // num_pixels_per_top_level_token
+    print("num_top_level_tokens:", num_top_level_tokens)
+      
+
+    return num_top_level_tokens
 
 
 def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> TrainingConfig:
