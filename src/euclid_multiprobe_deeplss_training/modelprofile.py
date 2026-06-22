@@ -128,11 +128,12 @@ def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
     def format_row(cells: Sequence[str]) -> str:
         return " | ".join(cell.ljust(width) for cell, width in zip(cells, widths))
 
-    print("Neural network model specifications:")
+    print("\nNeural network model specifications:")
     print(format_row(headers))
     print("-+-".join("-" * width for width in widths))
     for row in rows:
         print(format_row(row))
+    print()
 
 
 def modelprofile_from_config(config_path: str | Path) -> list[torch.Tensor]:
