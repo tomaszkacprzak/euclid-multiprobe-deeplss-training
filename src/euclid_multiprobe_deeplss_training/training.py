@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
@@ -220,6 +221,43 @@ def load_checkpoint(
     )
 
 
+def _print_initial_model_summary(
+    model: nn.Module,
+    dataloader: Any,
+    device: torch.device | str,
+) -> Any:
+    """Print architecture and trainable-parameter table before training.
+
+    The summary needs one forward pass to collect layer input/output shapes.
+    The sampled batch is chained back onto the returned iterator so the first
+    training epoch still sees the same data item.
+    """
+    from .modelprofile import _print_model_specification_table, _register_model_specification_hooks
+
+    iterator = iter(dataloader)
+    try:
+        first_batch = next(iterator)
+    except StopIteration:
+        LOGGER.warning("Skipping model parameter table because the training dataloader produced no batches.")
+        _print_model_specification_table(model, [])
+        return iter(())
+
+    rows, hooks = _register_model_specification_hooks(model)
+    was_training = model.training
+    model.eval()
+    try:
+        maps, _labels = first_batch
+        with torch.no_grad():
+            model(maps.to(device))
+    finally:
+        for handle in hooks:
+            handle.remove()
+        model.train(was_training)
+
+    _print_model_specification_table(model, rows)
+    return itertools.chain([first_batch], iterator)
+
+
 def train(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
     model: nn.Module | None = None,
@@ -295,6 +333,8 @@ def train(
             device,
         )
 
+    training_batches = _print_initial_model_summary(model, loader, device)
+
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0
@@ -302,7 +342,8 @@ def train(
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
     for _epoch in range(config.num_epochs or 10**12):
-        for batch in loader:
+        epoch_batches = training_batches if _epoch == 0 else loader
+        for batch in epoch_batches:
             step += 1
 
             # Main magic - update model
