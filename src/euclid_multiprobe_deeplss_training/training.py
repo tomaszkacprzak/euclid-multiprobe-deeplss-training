@@ -298,6 +298,25 @@ def safe_name(name):
     return name.replace(".", "_").replace("/", "_")
 
 
+def log_selected_gradient_histograms(model):
+
+    logs = {}
+
+    for name, p in model.named_parameters():
+        if p.grad is None:
+            continue
+
+        # Example: only log attention and head gradients
+        if "attn" not in name and "head" not in name:
+            continue
+
+        g = p.grad.detach().float().cpu().flatten()
+
+        if torch.isfinite(g).all():
+            logs[f"grad_hist_{safe_name(name)}"] = wandb.Histogram(g.numpy())
+
+    return logs
+
 def get_gradient_stats(model, log_per_parameter=False):
     """
     Collect gradient statistics after loss.backward()
@@ -494,7 +513,9 @@ def train(
 
                 if step % 100 == 0:
                     grad_logs = get_gradient_stats(model, log_per_parameter=False)
-                    wandb.log(grad_logs, step=step)
+                    grad_hist = log_selected_gradient_histograms(model)
+                    wandb.log(**grad_logs, **grad_hist, step=step)
+                    
 
             # checkpoint management
             if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
