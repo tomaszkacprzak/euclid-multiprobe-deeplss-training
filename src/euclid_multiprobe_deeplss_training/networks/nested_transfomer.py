@@ -261,7 +261,6 @@ class NestedPatchMerge4(nn.Module):
 
         return x
 
-
 class NestedHierarchicalLocalWindowTransformer(nn.Module):
     """
     Hierarchical Local Window Transformer for nested tensors.
@@ -491,44 +490,3 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
         x = self.head(x)
 
         return x
-
-
-if __name__ == "__main__":
-    # Example input:
-    #
-    # B = 2
-    # C = 3
-    # N = 16
-    # M = 4 nested levels
-    #
-    # x shape:
-    #   (B, C, N, 4, 4, 4, 4)
-
-    B = 2
-    C = 3
-    N = 16
-    M = 4
-
-    x = torch.randn(B, C, N, 4, 4, 4, 4)
-
-    model = NestedHierarchicalLocalWindowTransformerV2(
-        in_channels=3,
-        num_outputs=1,          # scalar regression; use K for K-class classification
-        num_nested_levels=M,
-        base_embed_dim=64,
-        growth="double",        # "constant", "double", or "full"
-        num_heads=4,
-        window_levels=3,        # local window has 4^3 = 64 tokens
-        local_blocks_per_level=1,
-        global_blocks=1,
-        mlp_ratio=4,
-    )
-
-    print("Channel dimensions:", model.channel_dims)
-    # For growth="double":
-    # [64, 128, 256, 512, 1024]
-
-    y = model(x)
-
-    print(y.shape)
-    # torch.Size([2, 1])

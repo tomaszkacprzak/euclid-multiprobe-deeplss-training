@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
+from .networks.builder import build_model
+from .networks.smoothing import HealpyDownsampling
 
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
@@ -30,8 +32,9 @@ class TrainingConfig:
     for the model fields.  This keeps small paper-code experiments convenient
     while still allowing the configuration file to grow later.
     """
-
+    
     records_pattern: str
+    model_name: str = "nested_transformer"
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 32
@@ -235,13 +238,38 @@ def train(
 
     LOGGER.info(f"Training on {device} with config: {config}")
 
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model)
-    loader = OntheflyPipeline(config.records_pattern, physics_model, batch_size=config.batch_size, num_workers=config.num_workers)
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model, device=device).to(device)
+    smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
+                                         nside_base=config.forward_model["analysis"]["n_side_down"], 
+                                         nside_lower=[512]*24, 
+                                         operator="mean").to(device)
+    
+    loader = OntheflyPipeline(config.records_pattern, 
+                              physics_model, 
+                              smoothing_model,
+                              batch_size=config.batch_size, 
+                              num_workers=config.num_workers,
+                              pin_memory=True,
+                              device=device)
 
 
-    # Model and optimizer.
-    model = model or SmallRegressionNet(config)
+    # Model 
+    model = build_model(config.model_name, 
+                    num_channels=physics_model.num_channels,
+                    num_targets=physics_model.num_targets,
+                    num_pixels=loader.num_pixels,
+                    nside=int(config.forward_model["analysis"]["n_side"]),
+                    nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+                    )
     model.to(device)
+
+    print()
+    LOGGER.info(f'Model: {config.model_name}')
+    print(model)
+    print()
+
+
+    # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     loss_fn = nn.MSELoss()
     step = 0
@@ -256,14 +284,12 @@ def train(
             device,
         )
 
-    LOGGER.info(f'Model: {model}')
-
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0
 
     # Training loop.
-    LOGGER.info('Training loop starting')
+    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
     for _epoch in range(config.num_epochs or 10**12):
         for batch in loader:
             step += 1
