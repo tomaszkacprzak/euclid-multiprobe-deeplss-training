@@ -8,6 +8,11 @@ class NestDownsampler(nn.Module):
     """
 
     def __init__(self, nside, nside_base, nside_lower, operator="sum"):
+
+        assert nside_> nside_base, "nside must be greater than nside_base"
+        assert nside > nside_lower, "nside must be greater than nside_lower"
+        assert nside_lower > nside_base, "nside_lower must be greater than nside_base"
+
         super().__init__()
         self.nside = int(nside)
         self.nside_base = int(nside_base)
