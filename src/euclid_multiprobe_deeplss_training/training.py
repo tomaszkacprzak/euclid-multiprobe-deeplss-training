@@ -503,6 +503,7 @@ def train(
 
     nside_training = 256
 
+    LOGGER.info(f"\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
 
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
