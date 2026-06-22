@@ -562,7 +562,7 @@ def train(
                     LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
                     train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
                     for key, value in train_loss_components.items():
-                        wandb.log({f"train/loss_component_{key}": value}, step=step)
+                        wandb.log({f"train/loss_component/{key}": value}, step=step)
                 
                 # infrequent metrics
                 if step % 100 == 0:
