@@ -14,7 +14,7 @@ def build_loss(loss_name: str,
     elif loss_name == "vimm":
 
         from .vimm import VIMMLoss
-        loss_fn = VIMMLoss(num_targets=num_targets, lambda_mi=0.1, dim=1)
+        loss_fn = VIMMLoss(num_targets=num_targets, lambda_mi=0.01, dim=1)
 
     else:
 

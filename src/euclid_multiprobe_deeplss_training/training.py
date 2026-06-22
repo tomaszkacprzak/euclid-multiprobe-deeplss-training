@@ -497,15 +497,41 @@ def train(
 
             step += 1
 
+            #
             # Main magic - update model
-            train_loss = train_one_step(model, batch, optimizer, loss_fn, device)
+            #
 
-            if step < 10:
-                _validate_gradient_flow(model)
+            model.train()
+            maps, labels = batch
+            LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+            LOGGER.debug(f'Labels shape={labels.shape}')
+            maps = maps.to(device=device, dtype=torch.float32)
+            labels = labels.to(device=device, dtype=torch.float32)
+            optimizer.zero_grad(set_to_none=True)
+            LOGGER.debug('Running forward pass')
+            predictions = model(maps)
+            LOGGER.debug('Running loss')
+            train_loss = loss_fn(predictions, labels)
+            if not train_loss.requires_grad:
+                raise RuntimeError(
+                    "The training loss is detached from the model parameters; "
+                    "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
+                )
 
-            # logging
-            if step % 10 == 0:
-                LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
+            LOGGER.debug('Running backward pass')
+            train_loss.backward()
+
+            LOGGER.debug('Clipping gradients')
+            clip_grad_norm_(model.parameters(), 1.0)
+
+            LOGGER.debug('Running optimizer step')
+            optimizer.step()
+            
+            train_loss = train_loss.detach().cpu()
+
+            #
+            # Step housekeeping
+            # 
 
             train_losses.append(train_loss)
             maps, _labels = batch
@@ -513,6 +539,8 @@ def train(
             elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
             current_learning_rate = optimizer.param_groups[0]["lr"]
             if run is not None:
+
+                # log metrics every step
                 wandb.log(
                     {
                         "train/loss": train_loss,
@@ -523,11 +551,25 @@ def train(
                     step=step,
                 )
 
+                # warm-up checks
+                if step < 10:
+
+                    _validate_gradient_flow(model)
+
+                # frequent metrics
+                if step % 10 == 0:
+                    
+                    LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
+                    train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
+                    for key, value in train_loss_components.items():
+                        wandb.log({f"train/loss_component_{key}": value}, step=step)
+                
+                # infrequent metrics
                 if step % 100 == 0:
+
                     grad_logs = get_gradient_stats(model, log_per_parameter=False)
                     grad_hist = log_selected_gradient_histograms(model)
                     wandb.log({**grad_logs, **grad_hist}, step=step)
-                    
 
             # checkpoint management
             if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
@@ -549,6 +591,11 @@ def train(
 
             if config.max_steps is not None and step >= config.max_steps:
                 break
+
+
+        #
+        # Validatio after each epoch
+        #
 
         validation_loss = evaluate(model, loader, loss_fn, device)
         if validation_loss is not None:

@@ -1,5 +1,15 @@
 import torch
 from torch import nn
+from ..utils.logger import get_logger
+LOGGER = get_logger(__file__)
+
+def mlp(in_dim, out_dim, hidden_dim):
+
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, out_dim),
+    )
 
 def gaussian_nll(y, mu, logvar, dim=1):
 
@@ -26,8 +36,8 @@ class VIMMLoss(nn.Module):
         self.dim = dim
         self.num_targets = num_targets
         self.loss_mse = nn.MSELoss()
-        self.mi_mu_head = nn.Linear(self.num_targets, self.num_targets)
-        self.mi_logvar_head = nn.Linear(self.num_targets, self.num_targets)
+        self.mi_mu_head = mlp(self.num_targets, self.num_targets, hidden_dim=128)
+        self.mi_logvar_head = mlp(self.num_targets, self.num_targets, hidden_dim=128)
 
     def loss_components(self, inputs, targets):
 
@@ -35,16 +45,18 @@ class VIMMLoss(nn.Module):
         logvar = self.mi_logvar_head(inputs)
         logvar = torch.clamp(logvar, min=-10.0, max=5.0)
         mse_  = self.loss_mse(inputs, targets)
-        nll_ = gaussian_nll(targets, mu, logvar)
-
-        return mse_, nll_
+        nll_ = self.lambda_mi * gaussian_nll(targets, mu, logvar)
+        LOGGER.debug(f'VIMM loss: inputs.shape={inputs.shape} targets.shape={targets.shape} mu.shape={mu.shape} logvar.shape={logvar.shape}')
+        return {'mse': mse_, 'nll': nll_}
         
 
     def forward(self, inputs, targets):
 
-        mse_, nll_ = self.loss_components(inputs, targets)
-        total_loss = mse_ + self.lambda_mi * nll_
+        components_ = self.loss_components(inputs, targets)
+        total_loss = components_['mse'] + components_['nll']
 
         return total_loss
+
+
 
     
