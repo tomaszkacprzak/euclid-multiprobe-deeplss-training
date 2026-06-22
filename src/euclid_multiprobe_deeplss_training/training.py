@@ -238,31 +238,6 @@ def train(
 
     LOGGER.info(f"Training on {device} with config: {config}")
 
-<<<<<<< HEAD
-    # Inputs
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
-                        scalers=True,
-                        device=device)
-
-    smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
-                        nside_base=config.forward_model["analysis"]["n_side_down"], 
-                        nside_lower=[512]*24, 
-                        operator="mean",
-                        device=device)
-
-    loader = OntheflyPipeline(config.records_pattern, 
-                physics_model, 
-                smoothing_model=smoothing_model,
-                batch_size=config.batch_size, 
-                num_workers=config.num_workers)
-
-
-    # Model
-    model = build_model(config.model_name,
-                config.in_channels, 
-                config.num_targets).to(device)
-    LOGGER.info(f'Build model {config.model_name}')
-=======
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, device=device).to(device)
     smoothing_model = HealpyDownsampling(nside=config.forward_model["analysis"]["n_side"], 
                                          nside_base=config.forward_model["analysis"]["n_side_down"], 
@@ -293,7 +268,6 @@ def train(
     print(model)
     print()
 
->>>>>>> codex/add-model-summary-table-printout
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -310,10 +284,6 @@ def train(
             device,
         )
 
-<<<<<<< HEAD
-    # Housekeeping
-=======
->>>>>>> codex/add-model-summary-table-printout
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0
