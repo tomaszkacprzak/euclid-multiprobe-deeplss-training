@@ -118,7 +118,7 @@ def train_one_step(
     maps, labels = batch
     LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
     LOGGER.debug(f'Labels shape={labels.shape}')
-    maps = maps.to(device)
+    maps = maps.to(device=device, dtype=torch.float32)
     labels = labels.to(device=device, dtype=torch.float32)
 
     optimizer.zero_grad(set_to_none=True)
@@ -126,8 +126,15 @@ def train_one_step(
     predictions = model(maps)
     LOGGER.debug('Running loss')
     loss = loss_fn(predictions, labels)
+    if not loss.requires_grad:
+        raise RuntimeError(
+            "The training loss is detached from the model parameters; "
+            "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
+        )
+
     LOGGER.debug('Running backward pass')
     loss.backward()
+    _validate_gradient_flow(model)
     LOGGER.debug('Running optimizer step')
     optimizer.step()
     return float(loss.detach().cpu())
@@ -139,13 +146,36 @@ def evaluate(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, devic
     model.eval()
     losses: list[float] = []
     for maps, labels in dataloader:
-        maps = maps.to(device)
+        maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
         predictions = model(maps)
         losses.append(float(loss_fn(predictions, labels).detach().cpu()))
     if not losses:
         return None
     return sum(losses) / len(losses)
+
+
+def _validate_gradient_flow(model: nn.Module) -> None:
+    """Fail fast when backpropagation produced no usable trainable gradients."""
+    trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not trainable_parameters:
+        raise RuntimeError("The model has no trainable parameters with requires_grad=True.")
+
+    gradients = [parameter.grad for parameter in trainable_parameters if parameter.grad is not None]
+    if not gradients:
+        raise RuntimeError(
+            "No gradients were produced for any trainable model parameter; "
+            "the loss is not connected to the model output."
+        )
+
+    finite_gradient_count = sum(int(torch.isfinite(gradient).all().item()) for gradient in gradients)
+    nonzero_gradient_count = sum(int(torch.any(gradient != 0).item()) for gradient in gradients)
+    if finite_gradient_count != len(gradients):
+        raise RuntimeError("Non-finite gradients were produced during backpropagation.")
+    if nonzero_gradient_count == 0:
+        raise RuntimeError(
+            "All produced gradients are exactly zero; the optimizer step cannot update the model."
+        )
 
 
 def init_wandb(config: TrainingConfig | Mapping[str, Any]):
