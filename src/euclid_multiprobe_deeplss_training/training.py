@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 import wandb
+import yaml
 from torch import nn
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
@@ -266,6 +267,17 @@ def _prepare_checkpoint_dir(config: TrainingConfig) -> Path | None:
                 child.unlink()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return checkpoint_dir
+
+
+def _write_reproducibility_config(checkpoint_dir: Path | None, config: TrainingConfig) -> Path | None:
+    """Write the resolved training configuration into the run checkpoint directory."""
+    if checkpoint_dir is None:
+        return None
+
+    config_path = checkpoint_dir / "config.yaml"
+    with config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(asdict(config), handle, sort_keys=False)
+    return config_path
 
 
 def load_checkpoint(
@@ -569,6 +581,7 @@ def train(
             device,
         )
     checkpoint_dir = _prepare_checkpoint_dir(config)
+    _write_reproducibility_config(checkpoint_dir, config)
 
     # Housekeeping
     training_batches = _print_initial_model_summary(model, loader, device)
