@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 import healpy as hp
@@ -57,6 +57,85 @@ def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig
     return _profile_loader_forward_passes(loader, model, config=config)
 
 
+def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tuple[str, str, str, str, int]], list[Any]]:
+    """Register hooks that collect a layer-by-layer model specification."""
+    rows: list[tuple[str, str, str, str, int]] = []
+    module_names = {module: name for name, module in model.named_modules()}
+    hooks: list[Any] = []
+
+    def should_summarize(module: torch.nn.Module) -> bool:
+        if module is model or isinstance(module, (torch.nn.ModuleList, torch.nn.Sequential)):
+            return False
+        return any(parameter.requires_grad for parameter in module.parameters(recurse=False))
+
+    def make_hook(module: torch.nn.Module):
+        def hook(_module: torch.nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
+            rows.append(
+                (
+                    module_names.get(module, module.__class__.__name__),
+                    module.__class__.__name__,
+                    _format_tensor_shapes(inputs),
+                    _format_tensor_shapes(output),
+                    sum(parameter.numel() for parameter in module.parameters(recurse=False) if parameter.requires_grad),
+                )
+            )
+
+        return hook
+
+    for module in model.modules():
+        if should_summarize(module):
+            hooks.append(module.register_forward_hook(make_hook(module)))
+
+    return rows, hooks
+
+
+def _print_model_specification_table(model: torch.nn.Module, rows: list[tuple[str, str, str, str, int]]) -> None:
+    """Print the collected layer-by-layer model specification table."""
+    total_trainable_parameters = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    _print_table(
+        ["Layer", "Operation", "Input shape(s)", "Output shape(s)", "Trainable params"],
+        [(*row[:4], f"{row[4]:,}") for row in rows],
+    )
+    print(f"Total trainable parameters: {total_trainable_parameters:,}")
+
+
+def _format_tensor_shapes(value: Any) -> str:
+    if isinstance(value, torch.Tensor):
+        return str(tuple(value.shape))
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{key}: {_format_tensor_shapes(item)}" for key, item in value.items()) + "}"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        shapes = [_format_tensor_shapes(item) for item in value if _contains_tensor(item)]
+        return ", ".join(shapes) if shapes else type(value).__name__
+    return type(value).__name__
+
+
+def _contains_tensor(value: Any) -> bool:
+    if isinstance(value, torch.Tensor):
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_tensor(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return any(_contains_tensor(item) for item in value)
+    return False
+
+
+def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
+    widths = [len(header) for header in headers]
+    for row in rows:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+
+    def format_row(cells: Sequence[str]) -> str:
+        return " | ".join(cell.ljust(width) for cell, width in zip(cells, widths))
+
+    print("\nNeural network model specifications:")
+    print(format_row(headers))
+    print("-+-".join("-" * width for width in widths))
+    for row in rows:
+        print(format_row(row))
+    print()
+
+
 def modelprofile_from_config(config_path: str | Path) -> list[torch.Tensor]:
     """Run modelprofile from a YAML config file."""
     config_path = Path(config_path)
@@ -79,6 +158,9 @@ def _profile_loader_forward_passes(
     if torch.cuda.is_available():
         profiler_activities.append(ProfilerActivity.CUDA)
 
+    specification_rows, specification_hooks = _register_model_specification_hooks(model)
+    should_print_specification = True
+
     with profile(
         activities=profiler_activities,
         schedule=prof_schedule,
@@ -97,6 +179,11 @@ def _profile_loader_forward_passes(
                     transformer_batch.numel() * transformer_batch.itemsize / 1024**2,
                 )
                 output = model(transformer_batch)
+                if should_print_specification:
+                    for handle in specification_hooks:
+                        handle.remove()
+                    _print_model_specification_table(model, specification_rows)
+                    should_print_specification = False
                 outputs.append(output.detach().cpu())
 
                 if transformer_batch.is_cuda:
