@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import shutil
 import time
 from collections.abc import Mapping
@@ -14,6 +15,7 @@ import torch
 import wandb
 import yaml
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -37,7 +39,7 @@ class TrainingConfig:
     for the model fields.  This keeps small paper-code experiments convenient
     while still allowing the configuration file to grow later.
     """
-    
+
     records_pattern: str
     model_name: str = "nested_transformer"
     config_forward_model: str | None = None
@@ -240,7 +242,7 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": _unwrap_model(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "step": step,
             "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
@@ -301,6 +303,45 @@ def load_checkpoint(
         list(checkpoint.get("train_losses", [])),
         list(checkpoint.get("val_losses", checkpoint.get("validation_losses", []))),
     )
+
+
+def _distributed_context() -> dict[str, int | bool]:
+    """Initialize torch.distributed from torchrun environment variables when requested."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    distributed = world_size > 1
+
+    if distributed and not torch.distributed.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend=backend, init_method="env://")
+
+    return {
+        "distributed": distributed,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "is_main_process": rank == 0,
+    }
+
+
+def _resolve_training_device(
+    requested_device: torch.device | str | None,
+    distributed_context: Mapping[str, int | bool],
+) -> torch.device:
+    """Resolve the device for single-process or DistributedDataParallel training."""
+    if bool(distributed_context["distributed"]):
+        if torch.cuda.is_available():
+            local_rank = int(distributed_context["local_rank"])
+            torch.cuda.set_device(local_rank)
+            return torch.device("cuda", local_rank)
+        return torch.device("cpu")
+    return torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    """Return the underlying module when model is wrapped by DistributedDataParallel."""
+    return model.module if isinstance(model, DistributedDataParallel) else model
 
 
 def _print_initial_model_summary(
@@ -511,70 +552,86 @@ def train(
         NestDownsampler = _NestDownsampler
 
     config = _coerce_config(config_or_path)
-    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
-    LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
-    
+    ddp = _distributed_context()
+    device = _resolve_training_device(device, ddp)
+    is_main_process = bool(ddp["is_main_process"])
+    distributed = bool(ddp["distributed"])
+    LOGGER.info(f"Distributed training: {distributed}")
+    LOGGER.info(f"Rank: {ddp['rank']}/{ddp['world_size']} local_rank={ddp['local_rank']}")
+    if is_main_process:
+        LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
+        LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
+
     nside_training = 512
 
-    LOGGER.info(f"\nTag: {config.tag}\n")
-    LOGGER.info(f"Training on {device} with config: {config}")
+    if is_main_process:
+        LOGGER.info(f"\nTag: {config.tag}\n")
+        LOGGER.info(f"Training on {device} with config: {config}")
 
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model,
                         scalers=True,
                         device=device).to(device)
 
     # Downsample all maps to the same nside
-    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-                            nside_base=config.forward_model["analysis"]["n_side_down"], 
-                            nside_lower=nside_training, 
+    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"],
+                            nside_base=config.forward_model["analysis"]["n_side_down"],
+                            nside_lower=nside_training,
                             operator="mean").to(device)
-    
+
     # Downsample each channel to a different nside
-    # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-    #                     nside_base=config.forward_model["analysis"]["n_side_down"], 
-    #                     nside_lower=[nside_training]*24, 
+    # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"],
+    #                     nside_base=config.forward_model["analysis"]["n_side_down"],
+    #                     nside_lower=[nside_training]*24,
     #                     operator="mean").to(device)
-                            
-    loader = OntheflyPipeline(config.records_pattern, 
-                              physics_model, 
+
+    loader = OntheflyPipeline(config.records_pattern,
+                              physics_model,
                               smoothing_model=smoothing_model,
-                              batch_size=config.batch_size, 
+                              batch_size=config.batch_size,
                               num_workers=config.num_workers,
                               pin_memory=True,
                               device=device)
 
-    # Model 
-    model = build_model(config.model_name, 
-                    num_channels=physics_model.num_channels,
-                    num_targets=physics_model.num_targets,
-                    num_pixels=loader.num_pixels,
-                    nside=nside_training,
-                    nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                    )
+    # Model
+    if model is None:
+        model = build_model(config.model_name,
+                        num_channels=physics_model.num_channels,
+                        num_targets=physics_model.num_targets,
+                        num_pixels=loader.num_pixels,
+                        nside=nside_training,
+                        nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+                        )
     model.to(device)
+    if distributed:
+        ddp_kwargs = {}
+        if device.type == "cuda":
+            ddp_kwargs = {"device_ids": [int(ddp["local_rank"])], "output_device": int(ddp["local_rank"])}
+        model = DistributedDataParallel(model, **ddp_kwargs)
 
-    print()
-    LOGGER.info(f'Model: {config.model_name}')
-    print(model)
-    print()
+    if is_main_process:
+        print()
+        LOGGER.info(f'Model: {config.model_name}')
+        print(model)
+        print()
 
-    # Loss function 
+    # Loss function
     loss_fn = build_loss(config.loss_function, num_targets=physics_model.num_targets)
     loss_fn = loss_fn.to(device)
-    LOGGER.info(f'Loss function: {loss_fn}')
+    if is_main_process:
+        LOGGER.info(f'Loss function: {loss_fn}')
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
-    print()
-    LOGGER.info('Optimizer:')
-    print(optimizer)
-    print()
+    if is_main_process:
+        print()
+        LOGGER.info('Optimizer:')
+        print(optimizer)
+        print()
 
     # Checkpoints
     if config.resume_from_checkpoint:
@@ -584,18 +641,21 @@ def train(
             optimizer,
             device,
         )
-    checkpoint_dir = _prepare_checkpoint_dir(config)
+    checkpoint_dir = _prepare_checkpoint_dir(config) if is_main_process else None
     _write_reproducibility_config(checkpoint_dir, config)
+    if distributed:
+        torch.distributed.barrier()
 
     # Housekeeping
-    training_batches = _print_initial_model_summary(model, loader, device)
-    run = init_wandb(config)
+    training_batches = _print_initial_model_summary(model, loader, device) if is_main_process else iter(loader)
+    run = init_wandb(config) if is_main_process else None
     train_start_time = time.perf_counter()
     examples_seen = 0
 
     # Training loop.
-    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
-    
+    if is_main_process:
+        LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
+
     for _epoch in range(config.num_epochs or 10**12):
         epoch_batches = training_batches if _epoch == 0 else loader
 
@@ -637,12 +697,12 @@ def train(
 
             LOGGER.debug('Running optimizer step')
             optimizer.step()
-            
+
             train_loss = train_loss.detach().cpu()
 
             #
             # Step housekeeping
-            # 
+            #
 
             train_losses.append(train_loss)
             maps, _labels = batch
@@ -669,14 +729,18 @@ def train(
 
                 # frequent metrics
                 if step % 10 == 0:
-                    
-                    LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+
+                    if is_main_process:
+                        LOGGER.info(
+                            f'Train loss epoch={_epoch:>3d} step={step:>5d} '
+                            f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}'
+                        )
                     LOGGER.timer.reset("10steps")
                     train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
                     for key, value in train_loss_components.items():
                         value = float(value.detach().cpu())
                         wandb.log({f"train/loss_component/{key}": value}, step=step)
-                
+
                 # infrequent metrics
                 if step % 100 == 0:
 
@@ -685,7 +749,12 @@ def train(
                     wandb.log({**grad_logs, **grad_hist}, step=step)
 
             # checkpoint management
-            if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+            if (
+                is_main_process
+                and config.checkpoint_dir
+                and config.checkpoint_every_steps
+                and step % config.checkpoint_every_steps == 0
+            ):
                 checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
                 save_checkpoint(
                     checkpoint_path,
@@ -710,24 +779,27 @@ def train(
         # Validatio after each epoch
         #
 
-        validation_predictions_path = _evaluation_predictions_path(config, _epoch)
-        validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
-        if validation_loss is not None:
-            validation_losses.append(validation_loss)
-            if run is not None:
-                wandb.log(
-                    {
-                        "validation/loss": validation_loss,
-                        "step": step,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    },
-                    step=step,
-                )
+        if is_main_process:
+            validation_predictions_path = _evaluation_predictions_path(config, _epoch)
+            validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
+            if validation_loss is not None:
+                validation_losses.append(validation_loss)
+                if run is not None:
+                    wandb.log(
+                        {
+                            "validation/loss": validation_loss,
+                            "step": step,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        },
+                        step=step,
+                    )
+        if distributed:
+            torch.distributed.barrier()
 
         if config.max_steps is not None and step >= config.max_steps:
             break
 
-    if checkpoint_dir:
+    if is_main_process and checkpoint_dir:
         final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
         save_checkpoint(
             final_checkpoint_path,
@@ -745,6 +817,9 @@ def train(
             )
     if run is not None:
         run.finish()
+
+    if distributed and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
     return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
