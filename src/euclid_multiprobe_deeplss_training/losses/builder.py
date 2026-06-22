@@ -4,7 +4,6 @@ from torch import nn
 LOGGER = get_logger(__file__)
     
 def build_loss(loss_name: str,
-               model: nn.Module,
                num_targets: int):
 
     if loss_name == "mse":

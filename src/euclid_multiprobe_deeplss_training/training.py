@@ -512,7 +512,11 @@ def train(
 
     config = _coerce_config(config_or_path)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-
+    LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
+    LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
+    for i in range(torch.cuda.device_count()):
+        LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
+    
     nside_training = 256
 
     LOGGER.info(f"\nTag: {config.tag}\n")
@@ -591,9 +595,11 @@ def train(
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
+    
     for _epoch in range(config.num_epochs or 10**12):
         epoch_batches = training_batches if _epoch == 0 else loader
 
+        LOGGER.timer.start("10steps")
         for batch in epoch_batches:
 
         # overfit on a single batch
@@ -664,9 +670,11 @@ def train(
                 # frequent metrics
                 if step % 10 == 0:
                     
-                    LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
+                    LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+                    LOGGER.timer.reset("10steps")
                     train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
                     for key, value in train_loss_components.items():
+                        value = float(value.detach().cpu())
                         wandb.log({f"train/loss_component/{key}": value}, step=step)
                 
                 # infrequent metrics
