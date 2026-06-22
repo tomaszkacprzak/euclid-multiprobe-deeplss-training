@@ -7,17 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 import numpy as np
+import torch
+from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
+from msfm.onthefly_pipeline import OntheflyPipeline
+
+from euclid_multiprobe_deeplss_training.networks.smoothing import HealpyDownsampling
 
 from .training import TrainingConfig
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
-
-from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-from msfm.onthefly_pipeline import OntheflyPipeline
-from euclid_multiprobe_deeplss_training.networks.smoothing import HealpyDownsampling
-
 
 LOGGER = get_logger(__file__)
 
@@ -53,7 +52,7 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
                               device=device)
 
     batch_stats: list[BatchChannelStats] = []
-    LOGGER.info(f'Collecting stats for training loader')
+    LOGGER.info('Collecting stats for training loader')
     batch_stats.extend(_collect_loader_stats(loader, split="train"))
     _print_channel_stats(_combine_batch_stats(batch_stats))
 
@@ -71,7 +70,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
     stats = []
     batch_count = 0
 
-    from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
+    from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 
     data_iter = iter(dataloader)
     try:
@@ -130,7 +129,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
     return stats
 
     
-def print_profiler_stats(prof: profiler.Profile, num_rows=20):
+def print_profiler_stats(prof: Any, num_rows=20):
 
     events = prof.key_averages()
 

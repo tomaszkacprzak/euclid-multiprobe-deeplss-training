@@ -21,7 +21,7 @@ def build_model(model_name: str,
                 )
 
         LOGGER.info(f"Built NestedHierarchicalLocalWindowTransformer {model_name}")
-        LOGGER.info(f"  num_pixels: {num_pixels}, num_channels: {num_channels}, num_targets: {num_targets}")
+        LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
 
 
     else:

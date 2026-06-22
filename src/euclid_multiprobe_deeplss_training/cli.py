@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from .utils import logger
 
 from euclid_multiprobe_deeplss_training import __version__
+
+from .utils import logger
 
 LOGGER = logger.get_logger(__file__)
 
@@ -84,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     datastats_parser.set_defaults(func=_run_datastats)
 
+    modelprofile_parser = subparsers.add_parser(
+        "modelprofile",
+        help="Profile nested-transformer forward passes on input dataset batches.",
+    )
+    modelprofile_parser.set_defaults(func=_run_modelprofile)
+
     parser.set_defaults(func=_run_info)
     return parser
 
@@ -120,6 +127,17 @@ def _run_datastats(args: argparse.Namespace) -> int:
     from euclid_multiprobe_deeplss_training.datastats import datastats_from_config
 
     datastats_from_config(args.config)
+    return 0
+
+
+def _run_modelprofile(args: argparse.Namespace) -> int:
+    """Profile transformer forward passes from the parsed command line arguments."""
+    if args.config is None:
+        raise ValueError("The modelprofile command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.modelprofile import modelprofile_from_config
+
+    modelprofile_from_config(args.config)
     return 0
 
 
