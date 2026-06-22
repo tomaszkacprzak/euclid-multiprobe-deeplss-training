@@ -132,7 +132,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
             label_stats.append(_summarize_labels(labels, split=split))
             batch_count += 1
 
-            if batch_count == 10:
+            if batch_count == 100:
                 break
 
             if maps.is_cuda:

@@ -3,6 +3,42 @@ import torch
 import torch.nn as nn
 
 
+def make_channel_dims(base_embed_dim, num_nested_levels, growth):
+    """
+    Returns the channel dimension at each resolution level.
+
+    There are M nested levels, so there are M merges.
+
+    Example with M = 4 and base_embed_dim = 64:
+
+        constant:
+            [64, 64, 64, 64, 64]
+
+        double:
+            [64, 128, 256, 512, 1024]
+
+        full:
+            [64, 256, 1024, 4096, 16384]
+    """
+    if growth == "constant":
+        factor = 1
+    elif growth == "double":
+        factor = 2
+    elif growth == "full":
+        factor = 4
+    else:
+        raise ValueError(
+            "growth must be one of: 'constant', 'double', 'full'"
+        )
+
+    dims = [base_embed_dim]
+
+    for _ in range(num_nested_levels):
+        dims.append(dims[-1] * factor)
+
+    return dims
+
+
 class MLP(nn.Module):
     def __init__(self, dim, mlp_ratio=4):
         super().__init__()
@@ -24,12 +60,12 @@ class TransformerBlock(nn.Module):
     Standard transformer block over a sequence.
 
     Input:
-        x: (B, S, D)
+        x: (B_like, S, D)
 
     where:
-        B = batch-like dimension
-        S = sequence length
-        D = embedding dimension
+        B_like = any batch-like dimension
+        S      = sequence length
+        D      = feature/channel dimension
     """
 
     def __init__(self, dim, num_heads, mlp_ratio=4):
@@ -71,20 +107,24 @@ class NestedLocalWindowBlock(nn.Module):
     Input:
         x: (B, N, 4, 4, ..., 4, D)
 
-    Example with M = 4 and window_levels = 3:
+    Example:
 
         x: (B, N, 4, 4, 4, 4, D)
 
-    The block applies attention over the last 3 nested dimensions:
+    If window_levels = 3, attention is applied over:
 
         4 × 4 × 4 = 64 tokens
 
-    So internally it becomes:
+    Internally:
 
+        (B, N, 4, 4, 4, 4, D)
+            ↓
         (B * N * 4, 64, D)
+            ↓ attention
+        (B, N, 4, 4, 4, 4, D)
 
-    This is analogous to an 8 × 8 local attention window in a 2D image,
-    because 8 × 8 = 64.
+    This does not reshape the data into a 2D image.
+    It only flattens local nested windows into sequences.
     """
 
     def __init__(
@@ -95,6 +135,9 @@ class NestedLocalWindowBlock(nn.Module):
         mlp_ratio=4,
     ):
         super().__init__()
+
+        if window_levels < 1:
+            raise ValueError("window_levels must be >= 1")
 
         self.window_levels = window_levels
 
@@ -115,42 +158,36 @@ class NestedLocalWindowBlock(nn.Module):
                 "NestedLocalWindowBlock needs at least one nested resolution dimension."
             )
 
-        # Use at most self.window_levels, but if fewer levels remain,
-        # attend over all remaining nested levels.
         levels_used = min(self.window_levels, num_nested_levels)
 
         original_shape = x.shape
         D = x.shape[-1]
 
-        # The local attention window is made from the last levels_used
-        # nested dimensions, each of size 4.
+        # Shape of the local nested window.
         #
         # Example:
-        #   x shape = (B, N, 4, 4, 4, 4, D)
+        #   x: (B, N, 4, 4, 4, 4, D)
         #   levels_used = 3
         #   window_shape = (4, 4, 4)
-        #   sequence length = 4 * 4 * 4 = 64
+        #   sequence_length = 64
         window_shape = x.shape[-levels_used - 1 : -1]
 
         for size in window_shape:
-            assert size == 4, "Every nested resolution dimension must have size 4."
+            if size != 4:
+                raise ValueError(
+                    "Every nested resolution dimension must have size 4."
+                )
 
         sequence_length = math.prod(window_shape)
 
-        # Flatten every local nested window into a sequence.
+        # Flatten local nested window into a sequence:
         #
-        # Example:
-        #   (B, N, 4, 4, 4, 4, D)
-        #       ->
-        #   (B * N * 4, 64, D)
-        #
-        # This is not reshaping to an image-like representation.
-        # It only creates local sequences for attention.
-        x = x.reshape(-1, sequence_length, D)
+        #   (..., 4, 4, 4, D) -> (..., 64, D)
+        x = x.contiguous().reshape(-1, sequence_length, D)
 
         x = self.block(x)
 
-        # Restore the nested tensor shape.
+        # Restore nested tensor shape.
         x = x.reshape(original_shape)
 
         return x
@@ -158,104 +195,112 @@ class NestedLocalWindowBlock(nn.Module):
 
 class NestedPatchMerge4(nn.Module):
     """
-    Merges the last nested resolution dimension.
+    Merge the last nested resolution dimension.
 
     Input:
-        x: (B, N, 4, 4, ..., 4, D)
+        x: (B, N, 4, 4, ..., 4, in_dim)
 
     Output:
-        x: (B, N, 4, 4, ..., D)
+        x: (B, N, 4, 4, ..., out_dim)
 
-    The last nested dimension has size 4.
+    The final nested dimension has size 4.
 
-    For each parent token, we concatenate its 4 child tokens:
+    For each parent token:
 
-        4 children × D channels = 4D channels
+        4 child tokens × in_dim features = 4 * in_dim features
 
-    Then we project:
+    Then:
 
-        4D -> D
+        4 * in_dim -> out_dim
 
-    This removes one nested resolution level.
+    The value of out_dim depends on the channel growth strategy.
     """
 
-    def __init__(self, dim):
+    def __init__(self, in_dim, out_dim):
         super().__init__()
 
-        self.norm = nn.LayerNorm(4 * dim)
-        self.reduction = nn.Linear(4 * dim, dim)
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+
+        self.norm = nn.LayerNorm(4 * in_dim)
+        self.reduction = nn.Linear(4 * in_dim, out_dim)
 
     def forward(self, x):
         """
-        x: (B, N, 4, 4, ..., 4, D)
+        x: (B, N, 4, 4, ..., 4, in_dim)
         """
         if x.ndim < 4:
             raise ValueError(
                 "NestedPatchMerge4 needs at least one nested resolution dimension."
             )
 
-        assert x.shape[-2] == 4, "The last nested dimension must have size 4."
+        if x.shape[-2] != 4:
+            raise ValueError("The last nested dimension must have size 4.")
 
-        D = x.shape[-1]
+        if x.shape[-1] != self.in_dim:
+            raise ValueError(
+                f"Expected last dimension {self.in_dim}, got {x.shape[-1]}."
+            )
 
         # Everything except the final nested dimension and channel dimension.
         #
         # Example:
-        #   x:      (B, N, 4, 4, 4, D)
-        #   prefix: (B, N, 4, 4)
+        #   x:            (B, N, 4, 4, 4, D)
+        #   prefix_shape: (B, N, 4, 4)
         prefix_shape = x.shape[:-2]
 
-        # Concatenate the 4 children into the channel dimension.
+        # Concatenate the 4 children into the channel dimension:
         #
         #   (B, N, 4, 4, 4, D)
         #       ->
         #   (B, N, 4, 4, 4D)
-        x = x.reshape(*prefix_shape, 4 * D)
+        x = x.contiguous().reshape(*prefix_shape, 4 * self.in_dim)
 
         x = self.norm(x)
         x = self.reduction(x)
 
         return x
 
-
 class NestedHierarchicalLocalWindowTransformer(nn.Module):
     """
     Hierarchical Local Window Transformer for nested tensors.
 
-    Expected input:
-
+    Input:
         x: (B, C, N, 4, 4, ..., 4)
 
     where:
         B = batch size
         C = input channels
         N = number of top-level/basic patches
-        M = number of nested resolution levels
+        M = num_nested_levels
+        each nested resolution dimension has size 4
 
-    The model internally uses:
-
+    Internal representation:
         x: (B, N, 4, 4, ..., 4, D)
 
     Processing:
-
-        nested local attention
-        -> merge last nested level
-        -> nested local attention
-        -> merge last nested level
+        input projection
+        -> local nested attention
+        -> patch merge
+        -> local nested attention
+        -> patch merge
         -> ...
-        -> final tensor of shape (B, N, D)
+        -> final tensor of shape (B, N, D_final)
         -> global attention over N tokens
-        -> pooling
-        -> head
+        -> pooling over N
+        -> prediction head
 
-    The final global attention has an N × N attention matrix internally.
+    The final global attention operates over N tokens, so internally it has
+    an N × N attention matrix per head.
     """
 
     def __init__(
         self,
         in_channels,
         num_outputs,
-        embed_dim=128,
+        num_nested_levels,
+        base_embed_dim=128,
+        growth="constant",
         num_heads=4,
         window_levels=3,
         local_blocks_per_level=1,
@@ -264,39 +309,96 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
     ):
         super().__init__()
 
-        assert embed_dim % num_heads == 0
+        if num_nested_levels < 0:
+            raise ValueError("num_nested_levels must be >= 0")
+
+        if local_blocks_per_level < 0:
+            raise ValueError("local_blocks_per_level must be >= 0")
+
+        if global_blocks < 1:
+            raise ValueError("global_blocks must be >= 1")
 
         self.in_channels = in_channels
-        self.embed_dim = embed_dim
+        self.num_nested_levels = num_nested_levels
+        self.base_embed_dim = base_embed_dim
+        self.growth = growth
+        self.num_heads = num_heads
         self.window_levels = window_levels
 
-        # Projects input channels C -> D.
-        # This is applied independently to every nested token.
-        self.input_proj = nn.Linear(in_channels, embed_dim)
-
-        # Shared local blocks.
-        # These are reused at every nested resolution level.
-        self.local_blocks = nn.ModuleList(
-            [
-                NestedLocalWindowBlock(
-                    dim=embed_dim,
-                    num_heads=num_heads,
-                    window_levels=window_levels,
-                    mlp_ratio=mlp_ratio,
-                )
-                for _ in range(local_blocks_per_level)
-            ]
+        # Channel dimensions at each resolution level.
+        #
+        # Length is num_nested_levels + 1.
+        #
+        # Example with M = 4:
+        #   channel_dims[0] = channels after input projection
+        #   channel_dims[1] = channels after merge 1
+        #   channel_dims[2] = channels after merge 2
+        #   channel_dims[3] = channels after merge 3
+        #   channel_dims[4] = channels after merge 4
+        self.channel_dims = make_channel_dims(
+            base_embed_dim=base_embed_dim,
+            num_nested_levels=num_nested_levels,
+            growth=growth,
         )
 
-        # Shared patch merge.
-        # This is reused until all nested dimensions are removed.
-        self.patch_merge = NestedPatchMerge4(embed_dim)
+        for dim in self.channel_dims:
+            if dim % num_heads != 0:
+                raise ValueError(
+                    f"Channel dimension {dim} must be divisible by num_heads={num_heads}."
+                )
 
-        # Final attention over the N top-level tokens.
+        # Project input channels C -> base_embed_dim.
+        #
+        # Applied independently to every fine nested token.
+        self.input_proj = nn.Linear(in_channels, self.channel_dims[0])
+
+        # One local stage per nested resolution level.
+        #
+        # Stage i operates before merge i.
+        # Its channel dimension is channel_dims[i].
+        self.local_stages = nn.ModuleList()
+
+        for level in range(num_nested_levels):
+            dim = self.channel_dims[level]
+
+            blocks = nn.ModuleList(
+                [
+                    NestedLocalWindowBlock(
+                        dim=dim,
+                        num_heads=num_heads,
+                        window_levels=window_levels,
+                        mlp_ratio=mlp_ratio,
+                    )
+                    for _ in range(local_blocks_per_level)
+                ]
+            )
+
+            self.local_stages.append(blocks)
+
+        # One patch merge per nested level.
+        #
+        # Merge i maps:
+        #   channel_dims[i] -> channel_dims[i + 1]
+        self.patch_merges = nn.ModuleList()
+
+        for level in range(num_nested_levels):
+            in_dim = self.channel_dims[level]
+            out_dim = self.channel_dims[level + 1]
+
+            self.patch_merges.append(
+                NestedPatchMerge4(
+                    in_dim=in_dim,
+                    out_dim=out_dim,
+                )
+            )
+
+        # Final global attention over the N basic-patch tokens.
+        final_dim = self.channel_dims[-1]
+
         self.global_blocks = nn.ModuleList(
             [
                 TransformerBlock(
-                    dim=embed_dim,
+                    dim=final_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                 )
@@ -304,8 +406,8 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
             ]
         )
 
-        self.norm = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, num_outputs)
+        self.norm = nn.LayerNorm(final_dim)
+        self.head = nn.Linear(final_dim, num_outputs)
 
     def forward(self, x):
         """
@@ -315,18 +417,26 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
         Output:
             y: (B, num_outputs)
         """
-        if x.ndim < 3:
+        expected_ndim = 3 + self.num_nested_levels
+
+        if x.ndim != expected_ndim:
             raise ValueError(
-                "Expected input with shape (B, C, N, 4, 4, ..., 4)."
+                f"Expected input with {expected_ndim} dims: "
+                f"(B, C, N, 4, ..., 4), got shape {tuple(x.shape)}."
             )
 
         B, C, N = x.shape[:3]
-        nested_shape = x.shape[3:]
 
-        assert C == self.in_channels
+        if C != self.in_channels:
+            raise ValueError(
+                f"Expected {self.in_channels} input channels, got {C}."
+            )
 
-        for size in nested_shape:
-            assert size == 4, "Every nested resolution dimension must have size 4."
+        for size in x.shape[3:]:
+            if size != 4:
+                raise ValueError(
+                    "Every nested resolution dimension must have size 4."
+                )
 
         # Move channels to the end:
         #
@@ -335,30 +445,35 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
         #   (B, N, 4, 4, ..., 4, C)
         x = x.movedim(1, -1).contiguous()
 
-        # Project C -> D:
+        # Project C -> base_embed_dim:
         #
         #   (B, N, 4, 4, ..., 4, C)
         #       ->
-        #   (B, N, 4, 4, ..., 4, D)
+        #   (B, N, 4, 4, ..., 4, D0)
         x = self.input_proj(x)
 
-        # Repeatedly:
-        #   1. apply local nested attention
-        #   2. merge away the last nested resolution level
+        # Hierarchical local processing.
         #
-        # Stop when the tensor is:
-        #   (B, N, D)
-        while x.ndim > 3:
-            for block in self.local_blocks:
+        # At level i:
+        #
+        #   x has shape:
+        #       (B, N, 4, ..., 4, channel_dims[i])
+        #
+        #   local attention keeps the same shape.
+        #
+        #   patch merge removes one nested dimension and changes channels:
+        #       channel_dims[i] -> channel_dims[i + 1]
+        for level in range(self.num_nested_levels):
+            for block in self.local_stages[level]:
                 x = block(x)
 
-            x = self.patch_merge(x)
+            x = self.patch_merges[level](x)
 
-        # Now:
+        # After all merges:
         #
-        #   x: (B, N, D)
+        #   x: (B, N, final_dim)
         #
-        # Apply final global attention over the N basic-patch tokens.
+        # Apply final global attention over N tokens.
         for block in self.global_blocks:
             x = block(x)
 
@@ -366,45 +481,12 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
 
         # Pool over the N basic patches:
         #
-        #   (B, N, D) -> (B, D)
+        #   (B, N, final_dim) -> (B, final_dim)
         x = x.mean(dim=1)
 
         # Classification or regression head:
         #
-        #   (B, D) -> (B, num_outputs)
+        #   (B, final_dim) -> (B, num_outputs)
         x = self.head(x)
 
         return x
-
-
-if __name__ == "__main__":
-    # Example:
-    #
-    # B = 2
-    # C = 3 input channels
-    # N = 16 top-level/basic patches
-    # M = 4 nested resolution levels
-    #
-    # Input shape:
-    #   (B, C, N, 4, 4, 4, 4)
-    #
-    # Total number of fine tokens per sample:
-    #   N * 4^M = 16 * 4^4 = 4096
-
-    model = NestedHierarchicalLocalWindowTransformer(
-        in_channels=3,
-        num_outputs=1,          # 1 for scalar regression; use K for K-class classification
-        embed_dim=128,
-        num_heads=4,
-        window_levels=3,        # 4^3 = 64-token local attention window
-        local_blocks_per_level=1,
-        global_blocks=1,
-        mlp_ratio=4,
-    )
-
-    x = torch.randn(2, 3, 16, 4, 4, 4, 4)
-
-    y = model(x)
-
-    print(y.shape)
-    # torch.Size([2, 1])

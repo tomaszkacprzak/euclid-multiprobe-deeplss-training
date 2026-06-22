@@ -50,6 +50,8 @@ def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig
         "nested_transformer",
         num_channels=config.in_channels,
         num_targets=config.num_targets,
+        nside=int(config.forward_model["analysis"]["n_side"]),
+        nside_down=int(config.forward_model["analysis"]["n_side_down"]),
     ).to(device)
     model.eval()
     LOGGER.info(f"Profiling model: {model.__class__.__name__}")
@@ -190,7 +192,7 @@ def _profile_loader_forward_passes(
                     torch.cuda.synchronize()
                 prof.step()
 
-                if batch_count + 1 == 10:
+                if batch_count + 1 == 20:
                     break
 
     print_profiler_stats(prof)
