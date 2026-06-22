@@ -13,6 +13,7 @@ import torch
 import wandb
 from torch import nn
 from torch.utils.data import DataLoader
+from torch.nn.utils import clip_grad_norm_
 
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
@@ -134,6 +135,10 @@ def train_one_step(
 
     LOGGER.debug('Running backward pass')
     loss.backward()
+
+    LOGGER.debug('Clipping gradients')
+    clip_grad_norm_(model.parameters(), 1.0)
+
     LOGGER.debug('Running optimizer step')
     optimizer.step()
     return float(loss.detach().cpu())
