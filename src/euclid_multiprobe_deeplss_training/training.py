@@ -12,19 +12,19 @@ from typing import Any
 import torch
 import wandb
 from torch import nn
-from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader
 
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
-from .networks.builder import build_model
-from .losses.builder import build_loss
-from .networks.smoothing import NestChannelDownsampler, NestDownsampler
-
-from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-from msfm.onthefly_pipeline import OntheflyPipeline
 
 LOGGER = get_logger(__file__)
+
+OntheflyPhysicsModelLinear = None
+OntheflyPipeline = None
+build_loss = None
+build_model = None
+NestDownsampler = None
 
 
 @dataclass(slots=True)
@@ -49,6 +49,7 @@ class TrainingConfig:
     num_workers: int = 1
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
+    evaluation_predictions_dir: str | None = None
     resume_from_checkpoint: str | None = None
     wandb_project: str | None = None
     wandb_run_name: str | None = None
@@ -112,18 +113,66 @@ _with_forward_model_config = with_forward_model_config
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, dataloader: DataLoader, loss_fn: nn.Module, device: torch.device | str) -> float | None:
-    """Evaluate one full validation stream pass and return the mean MSE."""
+def evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device | str,
+    predictions_path: str | Path | None = None,
+) -> float | None:
+    """Evaluate one full validation stream pass and optionally save targets/predictions."""
     model.eval()
     losses: list[float] = []
+    target_batches: list[torch.Tensor] = []
+    prediction_batches: list[torch.Tensor] = []
     for maps, labels in dataloader:
         maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
         predictions = model(maps)
         losses.append(float(loss_fn(predictions, labels).detach().cpu()))
+        if predictions_path is not None:
+            target_batches.append(labels.detach().cpu())
+            prediction_batches.append(predictions.detach().cpu())
     if not losses:
         return None
+    if predictions_path is not None:
+        _save_evaluation_predictions(predictions_path, target_batches, prediction_batches)
     return sum(losses) / len(losses)
+
+
+def _save_evaluation_predictions(
+    path: str | Path,
+    target_batches: list[torch.Tensor],
+    prediction_batches: list[torch.Tensor],
+) -> None:
+    """Save concatenated evaluation targets and predictions to an HDF5 file."""
+    if len(target_batches) != len(prediction_batches):
+        raise ValueError("Targets and predictions must have the same number of batches.")
+    if not target_batches:
+        return
+
+    targets = torch.cat(target_batches, dim=0).numpy()
+    predictions = torch.cat(prediction_batches, dim=0).numpy()
+    if targets.shape != predictions.shape:
+        raise ValueError(
+            f"Targets and predictions must have the same shape, got {targets.shape} and {predictions.shape}."
+        )
+
+    import h5py
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("targets", data=targets)
+        handle.create_dataset("predictions", data=predictions)
+
+
+def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
+    """Return the HDF5 output path for per-epoch evaluation arrays, if enabled."""
+    output_dir = config.evaluation_predictions_dir or config.checkpoint_dir
+    if output_dir is None:
+        return None
+    return Path(output_dir) / f"evaluation-epoch-{epoch + 1:04d}.h5"
 
 
 def _validate_gradient_flow(model: nn.Module) -> None:
@@ -259,8 +308,6 @@ def _print_initial_model_summary(
     print()
     return itertools.chain([first_batch], iterator)
 
-import torch
-import wandb
 
 
 def safe_name(name):
@@ -408,6 +455,29 @@ def train(
     deterministic seeking; for now, restarts resume model/optimizer/global-step
     state rather than seeking to the prior stream item.
     """
+    global NestDownsampler, OntheflyPhysicsModelLinear, OntheflyPipeline, build_loss, build_model
+
+    if OntheflyPhysicsModelLinear is None:
+        from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear as _OntheflyPhysicsModelLinear
+
+        OntheflyPhysicsModelLinear = _OntheflyPhysicsModelLinear
+    if OntheflyPipeline is None:
+        from msfm.onthefly_pipeline import OntheflyPipeline as _OntheflyPipeline
+
+        OntheflyPipeline = _OntheflyPipeline
+    if build_loss is None:
+        from .losses.builder import build_loss as _build_loss
+
+        build_loss = _build_loss
+    if build_model is None:
+        from .networks.builder import build_model as _build_model
+
+        build_model = _build_model
+    if NestDownsampler is None:
+        from .networks.smoothing import NestDownsampler as _NestDownsampler
+
+        NestDownsampler = _NestDownsampler
+
     config = _coerce_config(config_or_path)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
@@ -465,7 +535,7 @@ def train(
     train_losses: list[float] = []
     validation_losses: list[float] = []
     print()
-    LOGGER.info(f'Optimizer:')
+    LOGGER.info('Optimizer:')
     print(optimizer)
     print()
 
@@ -597,7 +667,8 @@ def train(
         # Validatio after each epoch
         #
 
-        validation_loss = evaluate(model, loader, loss_fn, device)
+        validation_predictions_path = _evaluation_predictions_path(config, _epoch)
+        validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
         if validation_loss is not None:
             validation_losses.append(validation_loss)
             if run is not None:
