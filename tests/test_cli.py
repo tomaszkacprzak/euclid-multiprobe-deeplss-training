@@ -157,3 +157,25 @@ def test_datastats_command_passes_config(monkeypatch) -> None:
 
     assert exit_code == 0
     assert calls == ["configs/example.yaml"]
+
+
+def test_modelprofile_command_requires_config() -> None:
+    with pytest.raises(ValueError, match="modelprofile command requires --config"):
+        main(["modelprofile"])
+
+
+def test_modelprofile_command_passes_config(monkeypatch) -> None:
+    calls = []
+    fake_modelprofile = types.ModuleType("euclid_multiprobe_deeplss_training.modelprofile")
+
+    def fake_modelprofile_from_config(config_path):
+        calls.append(config_path)
+        return []
+
+    fake_modelprofile.modelprofile_from_config = fake_modelprofile_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.modelprofile", fake_modelprofile)
+
+    exit_code = main(["--config", "configs/example.yaml", "modelprofile"])
+
+    assert exit_code == 0
+    assert calls == ["configs/example.yaml"]
