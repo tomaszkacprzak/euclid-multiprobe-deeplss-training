@@ -56,3 +56,33 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     assert restored_val_losses == val_losses
     assert torch.equal(model.weight, saved_weight)
     assert torch.equal(model.bias, saved_bias)
+
+
+def test_prepare_checkpoint_dir_uses_tag_and_clears_existing_contents(tmp_path) -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, _prepare_checkpoint_dir
+
+    checkpoint_root = tmp_path / "checkpoints"
+    run_dir = checkpoint_root / "experiment-a"
+    nested_dir = run_dir / "old-subdir"
+    nested_dir.mkdir(parents=True)
+    (run_dir / "old-checkpoint.pt").write_text("old", encoding="utf-8")
+    (nested_dir / "old-nested-checkpoint.pt").write_text("old", encoding="utf-8")
+    other_run_dir = checkpoint_root / "experiment-b"
+    other_run_dir.mkdir()
+    (other_run_dir / "checkpoint.pt").write_text("keep", encoding="utf-8")
+
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        max_steps=1,
+        checkpoint_dir=str(checkpoint_root),
+        tag="experiment-a",
+    )
+
+    prepared_dir = _prepare_checkpoint_dir(config)
+
+    assert prepared_dir == run_dir
+    assert run_dir.is_dir()
+    assert list(run_dir.iterdir()) == []
+    assert (other_run_dir / "checkpoint.pt").read_text(encoding="utf-8") == "keep"
