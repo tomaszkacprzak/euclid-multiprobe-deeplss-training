@@ -22,7 +22,7 @@ LOGGER = get_logger(__file__)
 
 @dataclass(slots=True)
 class BatchChannelStats:
-    """Per-channel summary values for one input batch."""
+    """Per-feature summary values for one input batch."""
 
     split: str
     count: torch.Tensor
@@ -33,7 +33,7 @@ class BatchChannelStats:
 
 
 def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> list[BatchChannelStats]:
-    """Print per-channel input-map statistics for one full train/validation epoch."""
+    """Print per-channel input-map and per-label statistics for one full training epoch."""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOGGER.info(f'Using device: {device}')
     config = _coerce_config(config_or_path)
@@ -52,9 +52,15 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
                               device=device)
 
     batch_stats: list[BatchChannelStats] = []
+    batch_label_stats: list[BatchChannelStats] = []
     LOGGER.info('Collecting stats for training loader')
-    batch_stats.extend(_collect_loader_stats(loader, split="train"))
-    _print_channel_stats(_combine_batch_stats(batch_stats))
+    map_stats, label_stats = _collect_loader_stats(loader, split="train")
+    batch_stats.extend(map_stats)
+    batch_label_stats.extend(label_stats)
+    print("Map channel statistics:")
+    _print_feature_stats(_combine_batch_stats(batch_stats), feature_name="channel")
+    print("Label statistics:")
+    _print_feature_stats(_combine_batch_stats(batch_label_stats), feature_name="label")
 
     return batch_stats
 
@@ -66,25 +72,28 @@ def datastats_from_config(config_path: str | Path) -> list[BatchChannelStats]:
     return datastats(raw_config)
 
 
-def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChannelStats]:
-    stats = []
+def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[BatchChannelStats], list[BatchChannelStats]]:
+    map_stats = []
+    label_stats = []
     batch_count = 0
 
     from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 
     data_iter = iter(dataloader)
     try:
-        maps, _labels = next(data_iter)
+        maps, labels = next(data_iter)
     except StopIteration:
-        return stats
+        return map_stats, label_stats
 
     LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+    LOGGER.debug(f'Batch {batch_count} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
 
-    stats.append(_summarize_maps(maps, split=split))
+    map_stats.append(_summarize_maps(maps, split=split))
+    label_stats.append(_summarize_labels(labels, split=split))
     batch_count += 1
 
     print('maps.device =', maps.device)
-    print('_labels.device =', _labels.device)
+    print('labels.device =', labels.device)
 
     fname = 'maps_batch_1.npy'
     np.save(fname, maps.detach().cpu().numpy())
@@ -110,11 +119,13 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
         with_stack=True,
     ) as prof:
 
-        for maps, _labels in data_iter:
+        for maps, labels in data_iter:
 
             LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+            LOGGER.debug(f'Batch {batch_count} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
 
-            stats.append(_summarize_maps(maps, split=split))
+            map_stats.append(_summarize_maps(maps, split=split))
+            label_stats.append(_summarize_labels(labels, split=split))
             batch_count += 1
 
             if batch_count == 10:
@@ -126,7 +137,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> list[BatchChan
 
     print_profiler_stats(prof)
     
-    return stats
+    return map_stats, label_stats
 
     
 def print_profiler_stats(prof: Any, num_rows=20):
@@ -185,27 +196,47 @@ def print_profiler_stats(prof: Any, num_rows=20):
 def _summarize_maps(maps: torch.Tensor, *, split: str) -> BatchChannelStats:
 
     channel_values = _flatten_by_channel(maps)
-    channel_min = channel_values.min(dim=1).values.detach().cpu()
-    channel_max = channel_values.max(dim=1).values.detach().cpu()
-    channel_total = channel_values.sum(dim=1).detach().cpu()
-    channel_sum_squares = torch.sum(channel_values * channel_values, dim=1).detach().cpu()
-    channel_count = torch.full((channel_values.shape[0],), channel_values.shape[1], dtype=torch.float32)
+    return _summarize_feature_values(channel_values, split=split)
+
+
+def _summarize_labels(labels: torch.Tensor, *, split: str) -> BatchChannelStats:
+
+    label_values = _flatten_by_final_dimension(labels)
+    return _summarize_feature_values(label_values, split=split)
+
+
+def _summarize_feature_values(feature_values: torch.Tensor, *, split: str) -> BatchChannelStats:
+    if feature_values.shape[1] == 0:
+        raise ValueError("Cannot calculate statistics for empty feature vectors.")
+
+    values = feature_values.to(torch.float64)
+    feature_min = values.min(dim=1).values.detach().cpu()
+    feature_max = values.max(dim=1).values.detach().cpu()
+    feature_total = values.sum(dim=1).detach().cpu()
+    feature_sum_squares = torch.sum(values * values, dim=1).detach().cpu()
+    feature_count = torch.full((values.shape[0],), values.shape[1], dtype=torch.float64)
 
     return BatchChannelStats(
         split=split,
-        count=channel_count,
-        minimum=channel_min,
-        maximum=channel_max,
-        total=channel_total,
-        sum_squares=channel_sum_squares,
+        count=feature_count,
+        minimum=feature_min,
+        maximum=feature_max,
+        total=feature_total,
+        sum_squares=feature_sum_squares,
     )
+
+
+def _flatten_by_final_dimension(values: torch.Tensor) -> torch.Tensor:
+
+    assert values.ndim >= 1, f'Unsupported number of dimensions: {values.ndim}'
+    features_first = values.movedim(-1, 0)
+    return features_first.reshape(features_first.shape[0], -1)
 
 
 def _flatten_by_channel(maps: torch.Tensor) -> torch.Tensor:
 
     assert maps.ndim == 3, f'Unsupported number of dimensions: {maps.ndim}'
-    channels_first = maps.movedim(2, 0)
-    return channels_first.reshape(channels_first.shape[0], -1)
+    return _flatten_by_final_dimension(maps)
 
 
 def _combine_batch_stats(batch_stats: list[BatchChannelStats]) -> BatchChannelStats | None:
@@ -221,7 +252,7 @@ def _combine_batch_stats(batch_stats: list[BatchChannelStats]) -> BatchChannelSt
     )
 
 
-def _print_channel_stats(stats: BatchChannelStats | None) -> None:
+def _print_feature_stats(stats: BatchChannelStats | None, *, feature_name: str) -> None:
     if stats is None:
         print("No input batches found.")
         return
@@ -230,14 +261,18 @@ def _print_channel_stats(stats: BatchChannelStats | None) -> None:
     variance = (stats.sum_squares / stats.count) - (mean * mean)
     std = torch.sqrt(torch.clamp(variance, min=0.0))
 
-    for channel in range(stats.count.numel()):
+    for feature in range(stats.count.numel()):
         print(
-            f"channel={channel:>3d}, "
-            f"min ={stats.minimum[channel].item(): 10.10e}, "
-            f"max ={stats.maximum[channel].item(): 10.10e}, "
-            f"mean={mean[channel].item(): 10.10e}, "
-            f"std ={std[channel].item(): 10.10e}"
+            f"{feature_name}={feature:>3d}, "
+            f"min ={stats.minimum[feature].item(): 10.10e}, "
+            f"max ={stats.maximum[feature].item(): 10.10e}, "
+            f"mean={mean[feature].item(): 10.10e}, "
+            f"std ={std[feature].item(): 10.10e}"
         )
+
+
+def _print_channel_stats(stats: BatchChannelStats | None) -> None:
+    _print_feature_stats(stats, feature_name="channel")
 
 
 def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> TrainingConfig:
