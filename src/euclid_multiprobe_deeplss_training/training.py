@@ -43,7 +43,7 @@ class TrainingConfig:
     max_steps: int | None = None
     validation_fraction: float = 0.1
     learning_rate: float = 1.0e-3
-    num_workers: int = 0
+    num_workers: int = 1
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
     resume_from_checkpoint: str | None = None
@@ -112,7 +112,6 @@ def train_one_step(
     optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
     device: torch.device | str,
-    validate: bool = False,
 ) -> float:
     """Run one optimization step and return the scalar loss."""
     model.train()
@@ -135,8 +134,6 @@ def train_one_step(
 
     LOGGER.debug('Running backward pass')
     loss.backward()
-    if validate:
-        _validate_gradient_flow(model)
     LOGGER.debug('Running optimizer step')
     optimizer.step()
     return float(loss.detach().cpu())
@@ -289,6 +286,83 @@ def _print_initial_model_summary(
     _print_model_specification_table(model, rows)
     return itertools.chain([first_batch], iterator)
 
+import torch
+import wandb
+
+
+def safe_name(name):
+    """
+    W&B metric names are easier to work with when they avoid
+    dots and unusual characters.
+    """
+    return name.replace(".", "_").replace("/", "_")
+
+
+def get_gradient_stats(model, log_per_parameter=False):
+    """
+    Collect gradient statistics after loss.backward()
+    and before optimizer.step().
+
+    Returns a dictionary suitable for wandb.log().
+    """
+    logs = {}
+
+    total_sq_norm = 0.0
+    max_abs_grad = 0.0
+    mean_abs_grads = []
+
+    num_params_with_grad = 0
+    num_params_without_grad = 0
+    num_nonfinite_grads = 0
+
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+
+        if p.grad is None:
+            num_params_without_grad += 1
+            continue
+
+        g = p.grad.detach()
+
+        num_params_with_grad += 1
+
+        finite = torch.isfinite(g).all()
+        if not finite:
+            num_nonfinite_grads += 1
+            continue
+
+        grad_norm = g.norm(2)
+        grad_mean_abs = g.abs().mean()
+        grad_max_abs = g.abs().max()
+
+        total_sq_norm += grad_norm.item() ** 2
+        max_abs_grad = max(max_abs_grad, grad_max_abs.item())
+        mean_abs_grads.append(grad_mean_abs.item())
+
+        if log_per_parameter:
+            n = safe_name(name)
+
+            logs[f"grad_norm_{n}"] = grad_norm.item()
+            logs[f"grad_mean_abs_{n}"] = grad_mean_abs.item()
+            logs[f"grad_max_abs_{n}"] = grad_max_abs.item()
+
+    total_grad_norm = total_sq_norm ** 0.5
+
+    logs["grad_norm_total"] = total_grad_norm
+    logs["grad_max_abs_global"] = max_abs_grad
+
+    if mean_abs_grads:
+        logs["grad_mean_abs_average"] = sum(mean_abs_grads) / len(mean_abs_grads)
+    else:
+        logs["grad_mean_abs_average"] = 0.0
+
+    logs["grad_num_params_with_grad"] = num_params_with_grad
+    logs["grad_num_params_without_grad"] = num_params_without_grad
+    logs["grad_num_nonfinite"] = num_nonfinite_grads
+
+    return logs
+
 
 def train(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
@@ -358,7 +432,7 @@ def train(
     validation_losses: list[float] = []
     
     print()
-    LOGGER.info(f'Optimizer: {optimizer}')
+    LOGGER.info(f'Optimizer:')
     print(optimizer)
     print()
 
@@ -383,14 +457,24 @@ def train(
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
     for _epoch in range(config.num_epochs or 10**12):
         epoch_batches = training_batches if _epoch == 0 else loader
+
         for batch in epoch_batches:
+
+        # overfit on a single batch
+        # batch = next(iter(epoch_batches))
+        # for _ in range(10000):
+
             step += 1
 
             # Main magic - update model
-            train_loss = train_one_step(model, batch, optimizer, loss_fn, device, validate=step<10) # validate only for the first 10 steps
+            train_loss = train_one_step(model, batch, optimizer, loss_fn, device)
+
+            if step < 10:
+                _validate_gradient_flow(model)
+
+            # logging
             if step % 10 == 0:
                 LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e}')
-
 
             train_losses.append(train_loss)
             maps, _labels = batch
@@ -408,6 +492,11 @@ def train(
                     step=step,
                 )
 
+                if step % 100 == 0:
+                    grad_logs = get_gradient_stats(model, log_per_parameter=False)
+                    wandb.log(grad_logs, step=step)
+
+            # checkpoint management
             if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
                 checkpoint_path = Path(config.checkpoint_dir) / f"checkpoint-step-{step}.pt"
                 save_checkpoint(
