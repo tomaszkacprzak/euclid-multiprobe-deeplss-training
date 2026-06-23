@@ -123,3 +123,35 @@ def test_write_reproducibility_config_to_checkpoint_dir(tmp_path) -> None:
     assert saved_config["tag"] == "experiment-a"
     assert saved_config["forward_model"] == {"analysis": {"n_side": 512, "n_side_down": 64}}
     assert saved_config["max_steps"] == 5
+
+
+def test_evaluation_predictions_path_uses_run_checkpoint_dir(tmp_path) -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, _evaluation_predictions_path
+
+    checkpoint_root = tmp_path / "checkpoints"
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        max_steps=1,
+        checkpoint_dir=str(checkpoint_root),
+        evaluation_predictions_dir=str(tmp_path / "legacy-predictions"),
+        tag="experiment-a",
+    )
+
+    assert _evaluation_predictions_path(config, 2) == checkpoint_root / "experiment-a" / "evaluation-epoch-0003.h5"
+
+
+def test_evaluation_predictions_path_disabled_without_checkpoint_dir() -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, _evaluation_predictions_path
+
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        max_steps=1,
+        evaluation_predictions_dir="legacy-predictions",
+        tag="experiment-a",
+    )
+
+    assert _evaluation_predictions_path(config, 0) is None
