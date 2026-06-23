@@ -33,6 +33,7 @@ class AngularPowerSpectra(nn.Module):
     ) -> None:
         super().__init__()
         self.nside = int(nside)
+        self.npix = hp.nside2npix(self.nside)
         self.lmax = int(2 * nside + 1 if lmax is None else lmax)
         self.mmax = int(self.lmax if mmax is None else mmax)
         self.quad_weights = quad_weights
@@ -72,20 +73,20 @@ class AngularPowerSpectra(nn.Module):
         del _isht  # Created with SHTCUDA so callers get matching cuHPX transforms if needed later.
 
         spectra = []
-        full_shape = (hp.nside2npix(self.nside), num_channels)
+        full_shape = (self.npix, num_channels)
         pixel_indices = self.pixel_indices.to(device=maps.device)
         for example in maps:
             full_map = example.new_zeros(full_shape)
             full_map.index_copy_(0, pixel_indices, example)
 
             alms = [sht(full_map[:, channel]) for channel in range(num_channels)]
-            cls = []
+            cells = []
             for channel in range(num_channels):
-                cls.append(_alm_cross_power(alms[channel], alms[channel], self.lmax, self.mmax).real)
+                cells.append(_alm_cross_power(alms[channel], alms[channel], self.lmax, self.mmax).real)
             for first in range(num_channels):
                 for second in range(first + 1, num_channels):
-                    cls.append(_alm_cross_power(alms[first], alms[second], self.lmax, self.mmax).real)
-            spectra.append(torch.stack(cls, dim=-1))
+                    cells.append(_alm_cross_power(alms[first], alms[second], self.lmax, self.mmax).real)
+            spectra.append(torch.stack(cells, dim=-1))
 
         return torch.stack(spectra, dim=0)
 

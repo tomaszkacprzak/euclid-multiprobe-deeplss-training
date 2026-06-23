@@ -35,6 +35,19 @@ def build_model(model_name: str,
         LOGGER.info(f"Built HealpixNestedHierarchicalLocalWindowTransformer {model_name}")
         LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
 
+    elif model_name == "angular_power_spectra":
+        from .angular_power_spectra import AngularPowerSpectra
+        model = AngularPowerSpectra(
+            nside=nside,
+            pixel_file=pixel_file,
+            lmax=lmax,
+            mmax=mmax,
+            quad_weights=quad_weights,
+            pixel_dataset=pixel_dataset,
+        )
+        LOGGER.info(f"Built AngularPowerSpectra {model_name}")
+        LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
+
 
     else:
 
