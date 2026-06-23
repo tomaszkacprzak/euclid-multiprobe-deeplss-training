@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-import healpy as hp
 
+import healpy as hp
 import torch
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
@@ -22,8 +22,12 @@ from .utils.logger import get_logger
 LOGGER = get_logger(__file__)
 
 
-def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> list[torch.Tensor]:
-    """Profile untrained nested-transformer forward passes over pipeline batches."""
+def modelprofile(
+    config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
+    *,
+    model_name: str = "nested_transformer",
+) -> list[torch.Tensor]:
+    """Profile untrained model forward passes over pipeline batches."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     LOGGER.info(f"Using device: {device}")
     config = _coerce_config(config_or_path)
@@ -50,7 +54,7 @@ def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig
     )
 
     model = build_model(
-        "nested_transformer",
+        model_name,
         num_channels=physics_model.num_channels,
         num_targets=physics_model.num_targets,
         num_pixels=loader.num_pixels,
@@ -129,10 +133,10 @@ def _contains_tensor(value: Any) -> bool:
 def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
     widths = [len(header) for header in headers]
     for row in rows:
-        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row, strict=True)]
 
     def format_row(cells: Sequence[str]) -> str:
-        return " | ".join(cell.ljust(width) for cell, width in zip(cells, widths))
+        return " | ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True))
 
     print("\nNeural network model specifications:")
     print(format_row(headers))
@@ -142,11 +146,11 @@ def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
     print()
 
 
-def modelprofile_from_config(config_path: str | Path) -> list[torch.Tensor]:
+def modelprofile_from_config(config_path: str | Path, *, model_name: str = "nested_transformer") -> list[torch.Tensor]:
     """Run modelprofile from a YAML config file."""
     config_path = Path(config_path)
     raw_config = with_forward_model_config(load_config(config_path), config_path.parent)
-    return modelprofile(raw_config)
+    return modelprofile(raw_config, model_name=model_name)
 
 
 def _profile_loader_forward_passes(

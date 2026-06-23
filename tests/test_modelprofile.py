@@ -9,7 +9,11 @@ def test_modelprofile_profiles_nested_transformer_batches(monkeypatch) -> None:
     from euclid_multiprobe_deeplss_training import modelprofile
 
     class FakePhysicsModel:
-        def __init__(self, forward_model, *, device):
+        num_channels = 3
+        num_targets = 2
+
+        def __init__(self, forward_model, *, scalers, device):
+            assert scalers is True
             self.forward_model = forward_model
             self.device = device
 
@@ -26,6 +30,8 @@ def test_modelprofile_profiles_nested_transformer_batches(monkeypatch) -> None:
             return self
 
     class FakePipeline:
+        num_pixels = 48
+
         def __init__(self, records_pattern, physics_model, smoothing_model, *, batch_size, num_workers, pin_memory, device):
             assert records_pattern == "records/*.tar"
             assert physics_model.forward_model["analysis"]["n_side_down"] == 1
@@ -51,9 +57,19 @@ def test_modelprofile_profiles_nested_transformer_batches(monkeypatch) -> None:
 
     monkeypatch.setattr(modelprofile.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(modelprofile, "OntheflyPhysicsModelLinear", FakePhysicsModel)
-    monkeypatch.setattr(modelprofile, "HealpyDownsampling", FakeSmoothingModel)
+    monkeypatch.setattr(modelprofile, "NestChannelDownsampler", FakeSmoothingModel)
     monkeypatch.setattr(modelprofile, "OntheflyPipeline", FakePipeline)
-    monkeypatch.setattr(modelprofile, "build_model", lambda model_name, num_channels, num_targets: fake_model)
+
+    def fake_build_model(model_name, *, num_channels, num_targets, num_pixels, nside, nside_down):
+        assert model_name == "nested_transformer"
+        assert num_channels == 3
+        assert num_targets == 2
+        assert num_pixels == 48
+        assert nside == 2
+        assert nside_down == 1
+        return fake_model
+
+    monkeypatch.setattr(modelprofile, "build_model", fake_build_model)
     monkeypatch.setattr(modelprofile, "print_profiler_stats", lambda prof: None)
 
     outputs = modelprofile.modelprofile(

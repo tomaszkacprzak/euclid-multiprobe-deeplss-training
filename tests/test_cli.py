@@ -164,12 +164,12 @@ def test_modelprofile_command_requires_config() -> None:
         main(["modelprofile"])
 
 
-def test_modelprofile_command_passes_config(monkeypatch) -> None:
+def test_modelprofile_command_passes_config_and_default_model(monkeypatch) -> None:
     calls = []
     fake_modelprofile = types.ModuleType("euclid_multiprobe_deeplss_training.modelprofile")
 
-    def fake_modelprofile_from_config(config_path):
-        calls.append(config_path)
+    def fake_modelprofile_from_config(config_path, *, model_name):
+        calls.append((config_path, model_name))
         return []
 
     fake_modelprofile.modelprofile_from_config = fake_modelprofile_from_config
@@ -178,4 +178,21 @@ def test_modelprofile_command_passes_config(monkeypatch) -> None:
     exit_code = main(["--config", "configs/example.yaml", "modelprofile"])
 
     assert exit_code == 0
-    assert calls == ["configs/example.yaml"]
+    assert calls == [("configs/example.yaml", "nested_transformer")]
+
+
+def test_modelprofile_command_passes_selected_model(monkeypatch) -> None:
+    calls = []
+    fake_modelprofile = types.ModuleType("euclid_multiprobe_deeplss_training.modelprofile")
+
+    def fake_modelprofile_from_config(config_path, *, model_name):
+        calls.append((config_path, model_name))
+        return []
+
+    fake_modelprofile.modelprofile_from_config = fake_modelprofile_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.modelprofile", fake_modelprofile)
+
+    exit_code = main(["--config", "configs/example.yaml", "modelprofile", "--model", "resnet"])
+
+    assert exit_code == 0
+    assert calls == [("configs/example.yaml", "resnet")]

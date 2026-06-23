@@ -93,7 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     modelprofile_parser = subparsers.add_parser(
         "modelprofile",
-        help="Profile nested-transformer forward passes on input dataset batches.",
+        help="Profile model forward passes on input dataset batches.",
+    )
+    modelprofile_parser.add_argument(
+        "--model",
+        type=str,
+        default="nested_transformer",
+        help="Model architecture to profile (default: nested_transformer).",
     )
     modelprofile_parser.set_defaults(func=_run_modelprofile)
 
@@ -143,7 +149,7 @@ def _run_modelprofile(args: argparse.Namespace) -> int:
 
     from euclid_multiprobe_deeplss_training.modelprofile import modelprofile_from_config
 
-    modelprofile_from_config(args.config)
+    modelprofile_from_config(args.config, model_name=args.model)
     return 0
 
 
