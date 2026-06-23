@@ -655,14 +655,13 @@ def train(
             # Step housekeeping
             # 
 
+            # every step housekeeping
             train_losses.append(train_loss)
             maps, _labels = batch
             examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
             elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
             current_learning_rate = optimizer.param_groups[0]["lr"]
             if run is not None:
-
-                # log metrics every step
                 wandb.log(
                     {
                         "train/loss": train_loss,
@@ -673,43 +672,48 @@ def train(
                     step=step,
                 )
 
-                # warm-up checks
-                if step < 10:
+            # warm-up checks
+            if step < 10:
 
-                    _validate_gradient_flow(model)
+                _validate_gradient_flow(model)
 
-                # frequent metrics
-                if step % 10 == 0:
+            # frequent metrics
+            if step % 10 == 0:
 
-                    LOGGER.info(
-                        f'Train loss epoch={_epoch:>3d} step={step:>5d} '
-                        f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
-                    LOGGER.timer.reset("10steps")
+                LOGGER.info(
+                    f'Train loss epoch={_epoch:>3d} step={step:>5d} '
+                    f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+                LOGGER.timer.reset("10steps")
+                if run is not None:
                     train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
                     for key, value in train_loss_components.items():
                         value = float(value.detach().cpu())
                         wandb.log({f"train/loss_component/{key}": value}, step=step)
+            
+            # infrequent metrics
+            if step % 100 == 0:
                 
-                # infrequent metrics
-                if step % 100 == 0:
-
+                if run is not None:
                     grad_logs = get_gradient_stats(model, log_per_parameter=False)
                     grad_hist = log_selected_gradient_histograms(model)
                     wandb.log({**grad_logs, **grad_hist}, step=step)
 
-            # checkpoint management
-            if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
-                save_checkpoint(
-                    checkpoint_path,
-                    model,
-                    optimizer,
-                    step,
-                    config,
-                    train_losses,
-                    validation_losses,
-                    loss_fn,
-                )
+            # very infrequent, checkpoint management
+            if step % config.checkpoint_every_steps == 0:
+                
+                if config.checkpoint_dir and config.checkpoint_every_steps:
+                    checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
+                    save_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        step,
+                        config,
+                        train_losses,
+                        validation_losses,
+                        loss_fn,
+                    )
+                
                 if run is not None:
                     wandb.log(
                         {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
