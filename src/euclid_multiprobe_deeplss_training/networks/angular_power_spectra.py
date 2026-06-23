@@ -24,12 +24,11 @@ class AngularPowerSpectra(nn.Module):
     def __init__(
         self,
         nside: int,
-        pixel_file: str | Path | torch.Tensor | np.ndarray | list[int],
+        pixel_indices: np.ndarray | torch.Tensor | list[int],
         *,
         lmax: int | None = None,
         mmax: int | None = None,
         quad_weights: str = "ring",
-        pixel_dataset: str | None = None,
     ) -> None:
         super().__init__()
         self.nside = int(nside)
@@ -38,9 +37,9 @@ class AngularPowerSpectra(nn.Module):
         self.mmax = int(self.lmax if mmax is None else mmax)
         self.quad_weights = quad_weights
 
-        pixel_indices = torch.as_tensor(_load_pixel_indices(pixel_file, pixel_dataset), dtype=torch.long)
+        pixel_indices = torch.as_tensor(pixel_indices)
         if pixel_indices.ndim != 1:
-            raise ValueError("pixel_file must contain a one-dimensional list of HEALPix pixel indices")
+            raise ValueError("pixel_indices: l list of HEALPix pixel indices")
 
         npix_full = hp.nside2npix(self.nside)
         if torch.any(pixel_indices < 0) or torch.any(pixel_indices >= npix_full):
@@ -67,7 +66,7 @@ class AngularPowerSpectra(nn.Module):
 
         batch_size, num_pixels, num_channels = maps.shape
         if num_pixels != self.pixel_indices.numel():
-            raise ValueError(f"Input contains {num_pixels} pixels, but pixel_file contains {self.pixel_indices.numel()} indices")
+            raise ValueError(f"Input contains {num_pixels} pixels, but pixel_indices: {self.pixel_indices.numel()} indices")
 
         sht, _isht = self._transforms(maps.device)
         del _isht  # Created with SHTCUDA so callers get matching cuHPX transforms if needed later.
@@ -104,26 +103,6 @@ class AngularPowerSpectra(nn.Module):
         if hasattr(self._isht, "to"):
             self._isht = self._isht.to(device)
         return self._sht, self._isht
-
-
-def _load_pixel_indices(pixel_file: str | Path | torch.Tensor | np.ndarray | list[int], pixel_dataset: str | None) -> Any:
-    if isinstance(pixel_file, torch.Tensor | np.ndarray | list):
-        return pixel_file
-
-    path = Path(pixel_file)
-    suffix = path.suffix.lower()
-    if suffix == ".npy":
-        return np.load(path)
-    if suffix == ".npz":
-        loaded = np.load(path)
-        key = pixel_dataset or next(iter(loaded.files))
-        return loaded[key]
-    if suffix in {".h5", ".hdf5"}:
-        with h5py.File(path, "r") as handle:
-            key = pixel_dataset or next(iter(handle.keys()))
-            return handle[key][...]
-    return np.loadtxt(path, dtype=np.int64)
-
 
 def _alm_cross_power(first: torch.Tensor, second: torch.Tensor, lmax: int, mmax: int) -> torch.Tensor:
     if first.shape != second.shape:

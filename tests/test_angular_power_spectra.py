@@ -37,7 +37,7 @@ def test_angular_power_spectra_shape(monkeypatch):
 
     nside = 1
     pixel_indices = torch.tensor([0, 3, 7, hp.nside2npix(nside) - 1])
-    module = AngularPowerSpectra(nside=nside, pixel_file=pixel_indices, lmax=3, mmax=3)
+    module = AngularPowerSpectra(nside=nside, pixel_indices=pixel_indices, lmax=3, mmax=3)
     maps = torch.arange(2 * pixel_indices.numel() * 3, dtype=torch.float32).reshape(2, pixel_indices.numel(), 3)
 
     output = module(maps)
