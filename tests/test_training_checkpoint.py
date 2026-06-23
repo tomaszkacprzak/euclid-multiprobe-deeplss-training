@@ -9,11 +9,12 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     from euclid_multiprobe_deeplss_training.training import TrainingConfig, load_checkpoint, save_checkpoint
 
     model = torch.nn.Linear(2, 1)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    loss_fn = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.Adam([*model.parameters(), *loss_fn.parameters()], lr=0.01)
 
     inputs = torch.tensor([[1.0, 2.0]])
     targets = torch.tensor([[3.0]])
-    loss = torch.nn.MSELoss()(model(inputs), targets)
+    loss = torch.nn.MSELoss()(loss_fn(model(inputs)), targets)
     loss.backward()
     optimizer.step()
 
@@ -24,12 +25,15 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
 
     saved_weight = model.weight.detach().clone()
     saved_bias = model.bias.detach().clone()
-    save_checkpoint(checkpoint_path, model, optimizer, 2, config, train_losses, val_losses)
+    saved_loss_weight = loss_fn.weight.detach().clone()
+    saved_loss_bias = loss_fn.bias.detach().clone()
+    save_checkpoint(checkpoint_path, model, optimizer, 2, config, train_losses, val_losses, loss_fn)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     assert set(checkpoint) == {
         "model_state_dict",
         "optimizer_state_dict",
+        "loss_state_dict",
         "step",
         "config",
         "train_losses",
@@ -43,12 +47,15 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     with torch.no_grad():
         model.weight.fill_(0.0)
         model.bias.fill_(0.0)
+        loss_fn.weight.fill_(0.0)
+        loss_fn.bias.fill_(0.0)
 
     restored_step, restored_train_losses, restored_val_losses = load_checkpoint(
         checkpoint_path,
         model,
         optimizer,
         torch.device("cpu"),
+        loss_fn,
     )
 
     assert restored_step == 2
@@ -56,6 +63,8 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     assert restored_val_losses == val_losses
     assert torch.equal(model.weight, saved_weight)
     assert torch.equal(model.bias, saved_bias)
+    assert torch.equal(loss_fn.weight, saved_loss_weight)
+    assert torch.equal(loss_fn.bias, saved_loss_bias)
 
 
 def test_prepare_checkpoint_dir_uses_tag_and_clears_existing_contents(tmp_path) -> None:

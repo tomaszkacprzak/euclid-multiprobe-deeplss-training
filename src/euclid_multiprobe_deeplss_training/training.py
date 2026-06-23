@@ -234,21 +234,22 @@ def save_checkpoint(
     config: TrainingConfig | Mapping[str, Any],
     train_losses: list[float],
     val_losses: list[float],
+    loss_fn: nn.Module | None = None,
 ) -> None:
-    """Save model, optimizer, config, and loss-history state."""
+    """Save model, loss function, optimizer, config, and loss-history state."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "step": step,
-            "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
-            "train_losses": train_losses,
-            "val_losses": val_losses,
-        },
-        path,
-    )
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": step,
+        "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+    }
+    if loss_fn is not None:
+        checkpoint["loss_state_dict"] = loss_fn.state_dict()
+    torch.save(checkpoint, path)
 
 
 def _prepare_checkpoint_dir(config: TrainingConfig) -> Path | None:
@@ -285,16 +286,23 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device | str,
+    loss_fn: nn.Module | None = None,
 ) -> tuple[int, list[float], list[float]]:
-    """Restore model/optimizer state and return step plus loss histories.
+    """Restore model/loss/optimizer state and return step plus loss histories.
 
     Iterable dataset stream position is not exactly restored during resume.
     Until a future dataset implementation supports deterministic seeking,
-    for now restarting from a checkpoint restores model state, optimizer
-    state, and global-step/loss-history bookkeeping.
+    for now restarting from a checkpoint restores model state, loss-function
+    state, optimizer state, and global-step/loss-history bookkeeping.
     """
     checkpoint = torch.load(Path(path), map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
+    if loss_fn is not None:
+        loss_state_dict = checkpoint.get("loss_state_dict")
+        if loss_state_dict is None:
+            LOGGER.warning("Checkpoint does not contain loss_state_dict; using the initialized loss function state.")
+        else:
+            loss_fn.load_state_dict(loss_state_dict)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return (
         int(checkpoint["step"]),
@@ -467,7 +475,7 @@ def train_one_step(
     loss.backward()
 
     LOGGER.debug('Clipping gradients')
-    clip_grad_norm_(model.parameters(), 1.0)
+    clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
 
     LOGGER.debug('Running optimizer step')
     optimizer.step()
@@ -481,11 +489,11 @@ def train(
 ) -> dict[str, Any]:
     """Run a compact train/evaluate/checkpoint loop.
 
-    Resuming from a checkpoint restores the model, optimizer, and global-step
-    state before the main loop starts.  Iterable dataset stream position is not
-    exactly restored unless a future dataset implementation supports
-    deterministic seeking; for now, restarts resume model/optimizer/global-step
-    state rather than seeking to the prior stream item.
+    Resuming from a checkpoint restores the model, loss function, optimizer,
+    and global-step state before the main loop starts.  Iterable dataset stream
+    position is not exactly restored unless a future dataset implementation
+    supports deterministic seeking; for now, restarts resume model/loss/
+    optimizer/global-step state rather than seeking to the prior stream item.
     """
     global NestDownsampler, OntheflyPhysicsModelLinear, OntheflyPipeline, build_loss, build_model
 
@@ -567,7 +575,8 @@ def train(
     LOGGER.info(f'Loss function: {loss_fn}')
 
     # Optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+    trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
+    optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
     step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
@@ -583,6 +592,7 @@ def train(
             model,
             optimizer,
             device,
+            loss_fn,
         )
     checkpoint_dir = _prepare_checkpoint_dir(config)
     _write_reproducibility_config(checkpoint_dir, config)
@@ -633,7 +643,7 @@ def train(
             train_loss.backward()
 
             LOGGER.debug('Clipping gradients')
-            clip_grad_norm_(model.parameters(), 1.0)
+            clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
 
             LOGGER.debug('Running optimizer step')
             optimizer.step()
@@ -695,6 +705,7 @@ def train(
                     config,
                     train_losses,
                     validation_losses,
+                    loss_fn,
                 )
                 if run is not None:
                     wandb.log(
@@ -737,6 +748,7 @@ def train(
             config,
             train_losses,
             validation_losses,
+            loss_fn,
         )
         if run is not None:
             wandb.log(
