@@ -602,6 +602,7 @@ def train(
     run = init_wandb(config)
     train_start_time = time.perf_counter()
     examples_seen = 0
+    grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
@@ -631,9 +632,12 @@ def train(
             labels = labels.to(device=device, dtype=torch.float32)
             optimizer.zero_grad(set_to_none=True)
             LOGGER.debug('Running forward pass')
-            predictions = model(maps)
-            LOGGER.debug('Running loss')
-            train_loss = loss_fn(predictions, labels)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                predictions = model(maps)
+                LOGGER.debug('Running loss')
+                train_loss = loss_fn(predictions, labels)
+                train_loss = grad_scaler.scale(train_loss)
+
             if not train_loss.requires_grad:
                 raise RuntimeError(
                     "The training loss is detached from the model parameters; "
@@ -647,7 +651,8 @@ def train(
             clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
 
             LOGGER.debug('Running optimizer step')
-            optimizer.step()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
             
             train_loss = train_loss.detach().cpu()
 
