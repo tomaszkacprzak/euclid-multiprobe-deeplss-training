@@ -34,7 +34,8 @@ dependencies = [
   "h5py",
   "pyyaml",
   "wandb",
-  "cuHPX"
+  "cuHPX",
+  "torch-harmonics-cu128",
 ]
 
 [project.optional-dependencies]
@@ -65,3 +66,6 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.uv]
+torch-backend = "cu128"

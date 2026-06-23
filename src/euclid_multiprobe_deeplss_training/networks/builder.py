@@ -1,5 +1,7 @@
 from ..utils.logger import get_logger
 import healpy as hp
+import numpy as np
+import torch
 
 LOGGER = get_logger(__file__)
 
@@ -12,7 +14,8 @@ def build_model(model_name: str,
                 num_targets: int,
                 nside: int,
                 nside_down: int,
-                num_pixels: int):
+                num_pixels: int,
+                pixel_indices: np.ndarray | torch.Tensor | list[int] = None):
 
     if model_name == "nested_transformer":
 
@@ -36,15 +39,17 @@ def build_model(model_name: str,
         LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
 
     elif model_name == "angular_power_spectra":
+
         from .angular_power_spectra import AngularPowerSpectra
+        assert pixel_indices is not None, "pixel_indices must be provided for AngularPowerSpectra"
         model = AngularPowerSpectra(
             nside=nside,
-            pixel_file=pixel_file,
-            lmax=lmax,
-            mmax=mmax,
-            quad_weights=quad_weights,
-            pixel_dataset=pixel_dataset,
+            pixel_indices=pixel_indices,
+            lmax=3*nside+1,
+            mmax=3*nside+1,
+            quad_weights="ring",
         )
+
         LOGGER.info(f"Built AngularPowerSpectra {model_name}")
         LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
 

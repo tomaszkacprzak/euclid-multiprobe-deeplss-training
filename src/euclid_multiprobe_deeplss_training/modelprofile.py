@@ -8,6 +8,7 @@ from typing import Any
 
 import healpy as hp
 import torch
+import h5py
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
 from msfm.onthefly_pipeline import OntheflyPipeline
 
@@ -21,6 +22,12 @@ from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
+def _load_pixel_indices(config: str) -> np.ndarray:
+    pixel_file = config.forward_model["files"]["pixels"]
+    with h5py.File(pixel_file, "r") as f:
+        pixel_indices = f["data_vec"][:]
+    return pixel_indices
+
 
 def modelprofile(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
@@ -31,6 +38,7 @@ def modelprofile(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     LOGGER.info(f"Using device: {device}")
     config = _coerce_config(config_or_path)
+    pixel_indices = _load_pixel_indices(config)
 
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
@@ -58,6 +66,7 @@ def modelprofile(
         num_channels=physics_model.num_channels,
         num_targets=physics_model.num_targets,
         num_pixels=loader.num_pixels,
+        pixel_indices=pixel_indices,
         nside=int(config.forward_model["analysis"]["n_side"]),
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
     ).to(device)
@@ -181,14 +190,13 @@ def _profile_loader_forward_passes(
     ) as prof:
         with torch.no_grad():
             for batch_count, (maps, _labels) in enumerate(dataloader):
-                transformer_batch = _prepare_transformer_batch(maps, config=config)
                 LOGGER.debug(
                     "Batch %s transformer input shape=%s size=%.2f MB",
                     batch_count,
-                    tuple(transformer_batch.shape),
-                    transformer_batch.numel() * transformer_batch.itemsize / 1024**2,
+                    tuple(maps.shape),
+                    maps.numel() * maps.itemsize / 1024**2,
                 )
-                output = model(transformer_batch)
+                output = model(maps)
                 if should_print_specification:
                     for handle in specification_hooks:
                         handle.remove()
@@ -196,7 +204,7 @@ def _profile_loader_forward_passes(
                     should_print_specification = False
                 outputs.append(output.detach().cpu())
 
-                if transformer_batch.is_cuda:
+                if maps.is_cuda:
                     torch.cuda.synchronize()
                 prof.step()
 
