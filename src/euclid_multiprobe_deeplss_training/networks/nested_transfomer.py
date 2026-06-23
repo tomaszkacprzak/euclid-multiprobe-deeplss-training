@@ -21,20 +21,24 @@ def make_channel_dims(base_embed_dim, num_nested_levels, growth):
             [64, 256, 1024, 4096, 16384]
     """
     if growth == "constant":
-        factor = 1
+        factor, increase = 1, 0
     elif growth == "double":
-        factor = 2
+        factor, increase = 2, 0
     elif growth == "full":
-        factor = 4
+        factor, increase = 4, 0
+    elif growth == "full":
+        factor, increase = 4, 0
+    elif growth == "128":
+        factor, increase = 1, 128
     else:
         raise ValueError(
-            "growth must be one of: 'constant', 'double', 'full'"
+            "growth must be one of: 'constant', 'double', 'full', '128'"
         )
 
     dims = [base_embed_dim]
 
     for _ in range(num_nested_levels):
-        dims.append(dims[-1] * factor)
+        dims.append(dims[-1] * factor + increase)
 
     return dims
 

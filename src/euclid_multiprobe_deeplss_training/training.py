@@ -303,6 +303,7 @@ def load_checkpoint(
         else:
             loss_fn.load_state_dict(loss_state_dict)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    LOGGER.info(f"Loaded checkpoint from {path} with step {checkpoint['step']}")
     return (
         int(checkpoint["step"]),
         list(checkpoint.get("train_losses", [])),
@@ -526,7 +527,7 @@ def train(
     
     nside_training = 512
 
-    LOGGER.info(f"\nTag: {config.tag}\n")
+    LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
 
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
@@ -616,6 +617,7 @@ def train(
         # for _ in range(10000):
 
             step += 1
+            LOGGER.debug(f"====================================== step {step}")
 
             #
             # Main magic - update model
