@@ -171,11 +171,10 @@ def _save_evaluation_predictions(
 
 
 def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
-    """Return the HDF5 output path for per-epoch evaluation arrays, if enabled."""
-    output_dir = config.evaluation_predictions_dir or config.checkpoint_dir
-    if output_dir is None:
+    """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
+    if config.checkpoint_dir is None:
         return None
-    return Path(output_dir) / f"evaluation-epoch-{epoch + 1:04d}.h5"
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-epoch-{epoch + 1:04d}.h5"
 
 
 def _validate_gradient_flow(model: nn.Module) -> None:
@@ -679,8 +678,10 @@ def train(
 
                 # frequent metrics
                 if step % 10 == 0:
-                    
-                    LOGGER.info(f'Train loss epoch={_epoch:>3d} step={step:>5d} loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+
+                    LOGGER.info(
+                        f'Train loss epoch={_epoch:>3d} step={step:>5d} '
+                        f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
                     LOGGER.timer.reset("10steps")
                     train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
                     for key, value in train_loss_components.items():
