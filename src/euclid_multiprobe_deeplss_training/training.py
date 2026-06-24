@@ -595,7 +595,7 @@ def train(
                               physics_model, 
                               smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
-                              num_workers=12,
+                              num_workers=config.num_workers,
                               prefetch_factor=1,
                               device=device)
 
