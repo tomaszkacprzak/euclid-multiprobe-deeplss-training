@@ -595,7 +595,8 @@ def train(
                               physics_model, 
                               smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
-                              num_workers=config.num_workers,
+                              num_workers=12,
+                              prefetch_factor=1,
                               device=device)
 
     # Model 
@@ -737,14 +738,13 @@ def train(
 
                     wandb.log(
                         {
-                            "train/loss": train_loss,
+                            "Train/loss": train_loss,
                             "step": step,
                             "learning_rate": current_learning_rate,
-                            "runtime/examples_per_second": examples_seen / elapsed_seconds,
-                            "proc_tree_io/read_MB_s": d_read / dt / 1e6,
-                            "proc_tree_io/write_MB_s": d_write / dt / 1e6,
-                            "proc_tree_io/read_MB": d_read / 1e6,
-                            "proc_tree_io/write_MB": d_write / 1e6,
+                            "Runtime/examples_per_second": examples_seen / elapsed_seconds,
+                            **get_io_stats(d_read, d_write, dt),
+                            **get_tensor_stats(maps, "maps"),
+                            **get_tensor_stats(labels, "labels"),
                         },
                         step=step,
                     )
@@ -766,7 +766,7 @@ def train(
                         train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
                         for key, value in train_loss_components.items():
                             value = float(value.detach().cpu())
-                            wandb.log({f"train/loss_component/{key}": value}, step=step)
+                            wandb.log({f"Train/loss_component/{key}": value}, step=step)
                 
                 # infrequent metrics
                 if step % 100 == 0:
@@ -793,7 +793,7 @@ def train(
 
                     if run is not None:
                         wandb.log(
-                            {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
+                            {"Checkpoint/saved": 1, "Checkpoint/path": str(checkpoint_path), "step": step},
                             step=step,
                         )
 
@@ -812,7 +812,7 @@ def train(
                 if run is not None:
                     wandb.log(
                         {
-                            "validation/loss": validation_loss,
+                            "Validation/loss": validation_loss,
                             "step": step,
                             "learning_rate": optimizer.param_groups[0]["lr"],
                         },
@@ -837,7 +837,7 @@ def train(
             )
             if run is not None:
                 wandb.log(
-                    {"checkpoint/saved": 1, "checkpoint/path": str(final_checkpoint_path), "step": step},
+                    {"Checkpoint/saved": 1, "Checkpoint/path": str(final_checkpoint_path), "step": step},
                     step=step,
                 )
         if run is not None:
@@ -1062,3 +1062,24 @@ def tree_io_counters(root_pid=None):
             pass
 
     return read_bytes, write_bytes
+
+
+#
+# Helpers
+#
+def get_tensor_stats(x, name: str):
+
+    return {
+        f"Batch/{name}/mean": x.mean().detach().cpu(),
+        f"Batch/{name}/std": x.std().detach().cpu(),
+        f"Batch/{name}/min": x.min().detach().cpu(),
+        f"Batch/{name}/max": x.max().detach().cpu(),
+    }
+
+def get_io_stats(d_read, d_write, dt):
+    return {
+        "Proc_tree_io/read_MB_s": d_read / dt / 1e6,
+        "Proc_tree_io/write_MB_s": d_write / dt / 1e6,
+        "Proc_tree_io/read_MB": d_read / 1e6,
+        "Proc_tree_io/write_MB": d_write / 1e6,
+    }
