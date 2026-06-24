@@ -155,3 +155,49 @@ def test_evaluation_predictions_path_disabled_without_checkpoint_dir() -> None:
     )
 
     assert _evaluation_predictions_path(config, 0) is None
+
+
+def test_checkpoint_stores_and_loads_wandb_resume_metadata(tmp_path) -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import (
+        TrainingConfig,
+        _wandb_info_from_checkpoint,
+        save_checkpoint,
+    )
+
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    config = TrainingConfig(records_pattern="records/*.tar", max_steps=1, wandb_project="project")
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    wandb_info = {"id": "run-id", "project": "project", "entity": "entity", "name": "run-name"}
+
+    save_checkpoint(checkpoint_path, model, optimizer, 1, config, [0.5], [], wandb_info=wandb_info)
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    assert checkpoint["wandb"] == wandb_info
+    assert _wandb_info_from_checkpoint(checkpoint_path) == wandb_info
+
+
+def test_prepare_checkpoint_dir_preserves_existing_contents_when_requested(tmp_path) -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, _prepare_checkpoint_dir
+
+    checkpoint_root = tmp_path / "checkpoints"
+    run_dir = checkpoint_root / "experiment-a"
+    run_dir.mkdir(parents=True)
+    existing_checkpoint = run_dir / "checkpoint-step-1.pt"
+    existing_checkpoint.write_text("keep", encoding="utf-8")
+
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        max_steps=1,
+        checkpoint_dir=str(checkpoint_root),
+        tag="experiment-a",
+    )
+
+    prepared_dir = _prepare_checkpoint_dir(config, clear_existing=False)
+
+    assert prepared_dir == run_dir
+    assert existing_checkpoint.read_text(encoding="utf-8") == "keep"
