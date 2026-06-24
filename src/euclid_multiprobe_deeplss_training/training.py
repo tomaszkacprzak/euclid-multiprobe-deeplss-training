@@ -200,12 +200,40 @@ def _validate_gradient_flow(model: nn.Module) -> None:
         )
 
 
-def init_wandb(config: TrainingConfig | Mapping[str, Any]):
+def _wandb_info_from_run(run: Any | None) -> dict[str, Any] | None:
+    """Return checkpoint-safe metadata needed to resume a W&B run later."""
+    if run is None:
+        return None
+
+    info = {
+        "id": getattr(run, "id", None),
+        "project": getattr(run, "project", None),
+        "entity": getattr(run, "entity", None),
+        "name": getattr(run, "name", None),
+    }
+    return {key: value for key, value in info.items() if value is not None}
+
+
+def _wandb_info_from_checkpoint(path: str | Path | None) -> dict[str, Any] | None:
+    """Load W&B resume metadata from a checkpoint without restoring training state."""
+    if path is None:
+        return None
+
+    checkpoint = torch.load(Path(path), map_location="cpu")
+    wandb_info = checkpoint.get("wandb")
+    if isinstance(wandb_info, Mapping):
+        return dict(wandb_info)
+    return None
+
+
+def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[str, Any] | None = None):
     """Initialize a Weights & Biases run when enabled by configuration.
 
     Local training should not require network access, so runs default to
     ``offline`` mode unless ``wandb_mode`` explicitly requests another mode.
     Set ``wandb_mode: disabled`` or ``use_wandb: false`` to skip wandb entirely.
+    When checkpoint metadata contains a W&B run id, reuse it so resumed
+    training continues the same run.
     """
     config_dict = asdict(config) if isinstance(config, TrainingConfig) else dict(config)
     use_wandb = bool(config_dict.get("use_wandb", True))
@@ -213,16 +241,26 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any]):
     if not use_wandb or wandb_mode == "disabled":
         return None
 
-    wandb_project = config_dict.get("wandb_project")
+    wandb_info_dict = dict(wandb_info or {})
+    wandb_project = wandb_info_dict.get("project") or config_dict.get("wandb_project")
     if not wandb_project:
         return None
 
-    return wandb.init(
-        project=wandb_project,
-        name=config_dict.get("tag"),
-        mode=wandb_mode or "offline",
-        config=config_dict,
-    )
+    init_kwargs = {
+        "project": wandb_project,
+        "name": config_dict.get("wandb_run_name") or config_dict.get("tag"),
+        "mode": wandb_mode or "offline",
+        "config": config_dict,
+    }
+    if wandb_info_dict.get("entity") is not None:
+        init_kwargs["entity"] = wandb_info_dict["entity"]
+    if wandb_info_dict.get("id") is not None:
+        init_kwargs["id"] = wandb_info_dict["id"]
+        init_kwargs["resume"] = "allow"
+        if wandb_info_dict.get("name") is not None and config_dict.get("wandb_run_name") is None:
+            init_kwargs["name"] = wandb_info_dict["name"]
+
+    return wandb.init(**init_kwargs)
 
 
 def save_checkpoint(
@@ -234,8 +272,9 @@ def save_checkpoint(
     train_losses: list[float],
     val_losses: list[float],
     loss_fn: nn.Module | None = None,
+    wandb_info: Mapping[str, Any] | None = None,
 ) -> None:
-    """Save model, loss function, optimizer, config, and loss-history state."""
+    """Save model, loss function, optimizer, config, loss history, and W&B resume metadata."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -246,13 +285,15 @@ def save_checkpoint(
         "train_losses": train_losses,
         "val_losses": val_losses,
     }
+    if wandb_info is not None:
+        checkpoint["wandb"] = dict(wandb_info)
     if loss_fn is not None:
         checkpoint["loss_state_dict"] = loss_fn.state_dict()
     torch.save(checkpoint, path)
 
 
-def _prepare_checkpoint_dir(config: TrainingConfig) -> Path | None:
-    """Return the run-specific checkpoint directory after clearing old contents."""
+def _prepare_checkpoint_dir(config: TrainingConfig, *, clear_existing: bool = True) -> Path | None:
+    """Return the run-specific checkpoint directory, optionally clearing old contents."""
     if not config.checkpoint_dir:
         return None
 
@@ -260,11 +301,12 @@ def _prepare_checkpoint_dir(config: TrainingConfig) -> Path | None:
     if checkpoint_dir.exists():
         if not checkpoint_dir.is_dir():
             raise NotADirectoryError(f"Checkpoint path exists and is not a directory: {checkpoint_dir}")
-        for child in checkpoint_dir.iterdir():
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
+        if clear_existing:
+            for child in checkpoint_dir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return checkpoint_dir
 
@@ -586,6 +628,7 @@ def train(
     print()
 
     # Checkpoints
+    checkpoint_wandb_info = None
     if config.resume_from_checkpoint:
         step, train_losses, validation_losses = load_checkpoint(
             config.resume_from_checkpoint,
@@ -594,12 +637,14 @@ def train(
             device,
             loss_fn,
         )
-    checkpoint_dir = _prepare_checkpoint_dir(config)
+        checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
+    checkpoint_dir = _prepare_checkpoint_dir(config, clear_existing=not bool(config.resume_from_checkpoint))
     _write_reproducibility_config(checkpoint_dir, config)
 
     # Housekeeping
     training_batches = _print_initial_model_summary(model, loader, device)
-    run = init_wandb(config)
+    run = init_wandb(config, checkpoint_wandb_info)
+    active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_start_time = time.perf_counter()
     examples_seen = 0
     grad_scaler = torch.amp.GradScaler("cuda")
@@ -704,21 +749,20 @@ def train(
                     wandb.log({**grad_logs, **grad_hist}, step=step)
 
             # very infrequent, checkpoint management
-            if step % config.checkpoint_every_steps == 0:
-                
-                if config.checkpoint_dir and config.checkpoint_every_steps:
-                    checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
-                    save_checkpoint(
-                        checkpoint_path,
-                        model,
-                        optimizer,
-                        step,
-                        config,
-                        train_losses,
-                        validation_losses,
-                        loss_fn,
-                    )
-                
+            if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
+                save_checkpoint(
+                    checkpoint_path,
+                    model,
+                    optimizer,
+                    step,
+                    config,
+                    train_losses,
+                    validation_losses,
+                    loss_fn,
+                    active_wandb_info,
+                )
+
                 if run is not None:
                     wandb.log(
                         {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
@@ -761,6 +805,7 @@ def train(
             train_losses,
             validation_losses,
             loss_fn,
+            active_wandb_info,
         )
         if run is not None:
             wandb.log(
