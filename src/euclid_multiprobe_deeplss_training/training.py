@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
-
+import psutil
 import torch
 import wandb
 import yaml
@@ -596,7 +596,6 @@ def train(
                               smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
                               num_workers=config.num_workers,
-                              pin_memory=True,
                               device=device)
 
     # Model 
@@ -645,178 +644,204 @@ def train(
     _write_reproducibility_config(checkpoint_dir, config)
 
     # Housekeeping
+    # loader_prefetcher = CUDAPrefetcher(loader, device=device)
     training_batches = _print_initial_model_summary(model, loader, device)
     run = init_wandb(config, checkpoint_wandb_info)
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_start_time = time.perf_counter()
     examples_seen = 0
-    grad_scaler = torch.amp.GradScaler("cuda")
+    # grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
-    
+
     for _epoch in range(config.num_epochs or 10**12):
+
         epoch_batches = training_batches if _epoch == 0 else loader
+        # with DeviceTraceMode(only_cpu=True):
+        with torch.profiler.record_function("training_loop"):
 
-        LOGGER.timer.start("10steps")
-        for batch in epoch_batches:
+            LOGGER.timer.start("10steps")
+            for batch in epoch_batches:
 
-        # overfit on a single batch
-        # batch = next(iter(epoch_batches))
-        # for _ in range(10000):
+            
 
-            step += 1
-            LOGGER.debug(f"====================================== step {step}")
+            # overfit on a single batch
+            # batch = next(iter(epoch_batches))
+            # for _ in range(10000):
 
-            #
-            # Main magic - update model
-            #
+                step += 1
+                LOGGER.debug(f"====================================== step {step}")
+                prev_t = time.perf_counter()
+                prev_read, prev_write = tree_io_counters()
 
-            model.train()
-            maps, labels = batch
-            LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-            LOGGER.debug(f'Labels shape={labels.shape}')
-            maps = maps.to(device=device, dtype=torch.float32)
-            labels = labels.to(device=device, dtype=torch.float32)
-            optimizer.zero_grad(set_to_none=True)
-            LOGGER.debug('Running forward pass')
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+                #
+                # Main magic - update model
+                #
+
+                model.train()
+                maps, labels = batch
+                LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+                LOGGER.debug(f'Labels shape={labels.shape}')
+                maps = maps.to(device=device, dtype=torch.float32)
+                labels = labels.to(device=device, dtype=torch.float32)
+                optimizer.zero_grad(set_to_none=True)
+                LOGGER.debug('Running forward pass')
+                # with torch.autocast("cuda", dtype=torch.bfloat16):
                 predictions = model(maps)
                 LOGGER.debug('Running loss')
                 train_loss = loss_fn(predictions, labels)
-                train_loss = grad_scaler.scale(train_loss)
+                # train_loss = grad_scaler.scale(train_loss)
 
-            if not train_loss.requires_grad:
-                raise RuntimeError(
-                    "The training loss is detached from the model parameters; "
-                    "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
-                )
+                if not train_loss.requires_grad:
+                    raise RuntimeError(
+                        "The training loss is detached from the model parameters; "
+                        "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
+                    )
 
-            LOGGER.debug('Running backward pass')
-            train_loss.backward()
+                LOGGER.debug('Running backward pass')
+                train_loss.backward()
 
-            LOGGER.debug('Clipping gradients')
-            clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
+                LOGGER.debug('Clipping gradients')
+                clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
 
-            LOGGER.debug('Running optimizer step')
-            grad_scaler.step(optimizer)
-            grad_scaler.update()
-            
-            train_loss = train_loss.detach().cpu()
+                LOGGER.debug('Running optimizer step')
+                # grad_scaler.step(optimizer)
+                # grad_scaler.update()
+                optimizer.step()
+
+                # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
+                # continue
+                
+                train_loss = train_loss.detach().cpu()
+
+                #
+                # Step housekeeping
+                # 
+
+                # every step housekeeping
+                train_losses.append(train_loss)
+                maps, _labels = batch
+                examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
+                elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
+                current_learning_rate = optimizer.param_groups[0]["lr"]
+                if run is not None:
+
+                    # IO statistics    
+                    # This should be at the end of the step to not dilute the timing/rates, but the difference should be negligible.
+                    now_t = time.perf_counter()
+                    now_read, now_write = tree_io_counters()
+                    dt = now_t - prev_t
+                    d_read = now_read - prev_read
+                    d_write = now_write - prev_write
+
+                    wandb.log(
+                        {
+                            "train/loss": train_loss,
+                            "step": step,
+                            "learning_rate": current_learning_rate,
+                            "runtime/examples_per_second": examples_seen / elapsed_seconds,
+                            "proc_tree_io/read_MB_s": d_read / dt / 1e6,
+                            "proc_tree_io/write_MB_s": d_write / dt / 1e6,
+                            "proc_tree_io/read_MB": d_read / 1e6,
+                            "proc_tree_io/write_MB": d_write / 1e6,
+                        },
+                        step=step,
+                    )
+                print(f'step={step:>5d} train_loss={train_loss: .8e}')
+
+                # warm-up checks
+                if step < 10:
+
+                    _validate_gradient_flow(model)
+
+                # frequent metrics
+                if step % 10 == 0:
+
+                    LOGGER.info(
+                        f'Train loss epoch={_epoch:>3d} step={step:>5d} '
+                        f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+                    LOGGER.timer.reset("10steps")
+                    if run is not None:
+                        train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
+                        for key, value in train_loss_components.items():
+                            value = float(value.detach().cpu())
+                            wandb.log({f"train/loss_component/{key}": value}, step=step)
+                
+                # infrequent metrics
+                if step % 100 == 0:
+                    
+                    if run is not None:
+                        grad_logs = get_gradient_stats(model, log_per_parameter=False)
+                        grad_hist = log_selected_gradient_histograms(model)
+                        wandb.log({**grad_logs, **grad_hist}, step=step)
+
+                # very infrequent, checkpoint management
+                if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                    checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
+                    save_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        step,
+                        config,
+                        train_losses,
+                        validation_losses,
+                        loss_fn,
+                        active_wandb_info,
+                    )
+
+                    if run is not None:
+                        wandb.log(
+                            {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
+                            step=step,
+                        )
+
+                if config.max_steps is not None and step >= config.max_steps:
+                    break
+
 
             #
-            # Step housekeeping
-            # 
+            # Validatio after each epoch
+            #
 
-            # every step housekeeping
-            train_losses.append(train_loss)
-            maps, _labels = batch
-            examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
-            elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
-            current_learning_rate = optimizer.param_groups[0]["lr"]
-            if run is not None:
-                wandb.log(
-                    {
-                        "train/loss": train_loss,
-                        "step": step,
-                        "learning_rate": current_learning_rate,
-                        "runtime/examples_per_second": examples_seen / elapsed_seconds,
-                    },
-                    step=step,
-                )
-
-            # warm-up checks
-            if step < 10:
-
-                _validate_gradient_flow(model)
-
-            # frequent metrics
-            if step % 10 == 0:
-
-                LOGGER.info(
-                    f'Train loss epoch={_epoch:>3d} step={step:>5d} '
-                    f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
-                LOGGER.timer.reset("10steps")
-                if run is not None:
-                    train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
-                    for key, value in train_loss_components.items():
-                        value = float(value.detach().cpu())
-                        wandb.log({f"train/loss_component/{key}": value}, step=step)
-            
-            # infrequent metrics
-            if step % 100 == 0:
-                
-                if run is not None:
-                    grad_logs = get_gradient_stats(model, log_per_parameter=False)
-                    grad_hist = log_selected_gradient_histograms(model)
-                    wandb.log({**grad_logs, **grad_hist}, step=step)
-
-            # very infrequent, checkpoint management
-            if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
-                save_checkpoint(
-                    checkpoint_path,
-                    model,
-                    optimizer,
-                    step,
-                    config,
-                    train_losses,
-                    validation_losses,
-                    loss_fn,
-                    active_wandb_info,
-                )
-
+            validation_predictions_path = _evaluation_predictions_path(config, _epoch)
+            validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
+            if validation_loss is not None:
+                validation_losses.append(validation_loss)
                 if run is not None:
                     wandb.log(
-                        {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
+                        {
+                            "validation/loss": validation_loss,
+                            "step": step,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        },
                         step=step,
                     )
 
             if config.max_steps is not None and step >= config.max_steps:
                 break
 
-
-        #
-        # Validatio after each epoch
-        #
-
-        validation_predictions_path = _evaluation_predictions_path(config, _epoch)
-        validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
-        if validation_loss is not None:
-            validation_losses.append(validation_loss)
+        if checkpoint_dir:
+            final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
+            save_checkpoint(
+                final_checkpoint_path,
+                model,
+                optimizer,
+                step,
+                config,
+                train_losses,
+                validation_losses,
+                loss_fn,
+                active_wandb_info,
+            )
             if run is not None:
                 wandb.log(
-                    {
-                        "validation/loss": validation_loss,
-                        "step": step,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    },
+                    {"checkpoint/saved": 1, "checkpoint/path": str(final_checkpoint_path), "step": step},
                     step=step,
                 )
-
-        if config.max_steps is not None and step >= config.max_steps:
-            break
-
-    if checkpoint_dir:
-        final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
-        save_checkpoint(
-            final_checkpoint_path,
-            model,
-            optimizer,
-            step,
-            config,
-            train_losses,
-            validation_losses,
-            loss_fn,
-            active_wandb_info,
-        )
         if run is not None:
-            wandb.log(
-                {"checkpoint/saved": 1, "checkpoint/path": str(final_checkpoint_path), "step": step},
-                step=step,
-            )
-    if run is not None:
-        run.finish()
+            run.finish()
 
     return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
@@ -852,3 +877,188 @@ def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConf
         config_path = Path(config_or_path)
         return TrainingConfig.from_mapping(with_forward_model_config(load_config(config_path), config_path.parent))
     return TrainingConfig.from_mapping(with_forward_model_config(config_or_path))
+
+
+#
+# Tracing of tensor placement
+#
+
+import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+from collections.abc import Mapping, Sequence
+
+def tree_tensors(x):
+    if torch.is_tensor(x):
+        yield x
+    elif isinstance(x, Mapping):
+        for v in x.values():
+            yield from tree_tensors(v)
+    elif isinstance(x, Sequence) and not isinstance(x, (str, bytes)):
+        for v in x:
+            yield from tree_tensors(v)
+
+def tensor_sig(t):
+    return f"{tuple(t.shape)} {t.dtype} {t.device}"
+
+class DeviceTraceMode(TorchDispatchMode):
+    def __init__(self, only_cpu=True, max_lines=5000):
+        super().__init__()
+        self.only_cpu = only_cpu
+        self.max_lines = max_lines
+        self.lines = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        in_tensors = list(tree_tensors((args, kwargs)))
+        result = func(*args, **kwargs)
+        out_tensors = list(tree_tensors(result))
+
+        devices = {str(t.device) for t in in_tensors + out_tensors}
+
+        should_log = True
+        if self.only_cpu:
+            should_log = any(d == "cpu" for d in devices)
+
+        if should_log and self.lines < self.max_lines:
+            print(f"\n{func}")
+            if in_tensors:
+                print("  in :", [tensor_sig(t) for t in in_tensors])
+            if out_tensors:
+                print("  out:", [tensor_sig(t) for t in out_tensors])
+            self.lines += 1
+
+        return result
+
+
+#
+# Prefetcher data loader
+#
+
+import torch
+from collections.abc import Mapping, Sequence
+
+
+def iter_tensors(x):
+    """Yield all tensors inside a nested batch structure."""
+    if torch.is_tensor(x):
+        yield x
+    elif isinstance(x, Mapping):
+        for v in x.values():
+            yield from iter_tensors(v)
+    elif isinstance(x, Sequence) and not isinstance(x, (str, bytes)):
+        for v in x:
+            yield from iter_tensors(v)
+
+
+def move_to_device(x, device):
+    """Recursively move a nested batch structure to device."""
+    if torch.is_tensor(x):
+        return x.to(device, non_blocking=True)
+    elif isinstance(x, Mapping):
+        return type(x)({k: move_to_device(v, device) for k, v in x.items()})
+    elif isinstance(x, tuple) and hasattr(x, "_fields"):  # namedtuple
+        return type(x)(*(move_to_device(v, device) for v in x))
+    elif isinstance(x, tuple):
+        return tuple(move_to_device(v, device) for v in x)
+    elif isinstance(x, list):
+        return [move_to_device(v, device) for v in x]
+    else:
+        return x
+
+
+class CUDAPrefetcher:
+    """
+    Wraps a DataLoader and asynchronously preloads the next batch onto CUDA.
+
+    Usage:
+        loader = DataLoader(..., pin_memory=True)
+        loader = CUDAPrefetcher(loader, device="cuda:0")
+
+        for batch in loader:
+            loss = train_step(batch)
+    """
+
+    def __init__(self, loader, device="cuda"):
+        self.loader = loader
+        self.device = torch.device(device)
+
+        if self.device.type != "cuda":
+            raise ValueError(f"CUDAPrefetcher requires a CUDA device, got {self.device}")
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        return _CUDAPrefetcherIterator(self.loader, self.device)
+
+
+class _CUDAPrefetcherIterator:
+    def __init__(self, loader, device):
+        self.loader_iter = iter(loader)
+        self.device = device
+        self.stream = torch.cuda.Stream(device=device)
+        self.next_batch = None
+        self._done = False
+
+        self._preload()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._done and self.next_batch is None:
+            raise StopIteration
+
+        # Wait until the side-stream H2D copy for next_batch is complete.
+        torch.cuda.current_stream(self.device).wait_stream(self.stream)
+
+        batch = self.next_batch
+
+        if batch is None:
+            raise StopIteration
+
+        # Tell the caching allocator that these tensors are used on the
+        # current stream too, not only on the prefetch stream.
+        for t in iter_tensors(batch):
+            if t.device.type == "cuda":
+                t.record_stream(torch.cuda.current_stream(self.device))
+
+        # Start copying the following batch while the caller computes on this one.
+        self._preload()
+
+        return batch
+
+    def _preload(self):
+        try:
+            batch = next(self.loader_iter)
+        except StopIteration:
+            self.next_batch = None
+            self._done = True
+            return
+
+        with torch.cuda.stream(self.stream):
+            self.next_batch = move_to_device(batch, self.device)
+
+
+import os
+import time
+import psutil
+
+def tree_io_counters(root_pid=None):
+    root = psutil.Process(root_pid or os.getpid())
+    procs = [root] + root.children(recursive=True)
+
+    read_bytes = 0
+    write_bytes = 0
+
+    for p in procs:
+        try:
+            io = p.io_counters()
+            read_bytes += io.read_bytes
+            write_bytes += io.write_bytes
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    return read_bytes, write_bytes
