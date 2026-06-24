@@ -748,7 +748,6 @@ def train(
                         },
                         step=step,
                     )
-                print(f'step={step:>5d} train_loss={train_loss: .8e}')
 
                 # warm-up checks
                 if step < 10:
@@ -840,8 +839,9 @@ def train(
                     {"Checkpoint/saved": 1, "Checkpoint/path": str(final_checkpoint_path), "step": step},
                     step=step,
                 )
-        if run is not None:
-            run.finish()
+
+    if run is not None:
+        run.finish()
 
     return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
