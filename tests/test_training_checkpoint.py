@@ -97,6 +97,31 @@ def test_prepare_checkpoint_dir_uses_tag_and_clears_existing_contents(tmp_path) 
     assert (other_run_dir / "checkpoint.pt").read_text(encoding="utf-8") == "keep"
 
 
+def test_prepare_checkpoint_dir_preserves_existing_contents_when_resuming(tmp_path) -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, _prepare_checkpoint_dir
+
+    checkpoint_root = tmp_path / "checkpoints"
+    run_dir = checkpoint_root / "experiment-a"
+    run_dir.mkdir(parents=True)
+    existing_checkpoint = run_dir / "checkpoint-step-1.pt"
+    existing_checkpoint.write_text("keep", encoding="utf-8")
+
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        max_steps=1,
+        checkpoint_dir=str(checkpoint_root),
+        tag="experiment-a",
+        resume_from_checkpoint=str(existing_checkpoint),
+    )
+
+    prepared_dir = _prepare_checkpoint_dir(config)
+
+    assert prepared_dir == run_dir
+    assert existing_checkpoint.read_text(encoding="utf-8") == "keep"
+
+
 def test_write_reproducibility_config_to_checkpoint_dir(tmp_path) -> None:
     pytest.importorskip("torch")
     yaml = pytest.importorskip("yaml")
