@@ -292,10 +292,13 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
-def _prepare_checkpoint_dir(config: TrainingConfig, *, clear_existing: bool = True) -> Path | None:
-    """Return the run-specific checkpoint directory, optionally clearing old contents."""
+def _prepare_checkpoint_dir(config: TrainingConfig, *, clear_existing: bool | None = None) -> Path | None:
+    """Return the run-specific checkpoint directory, preserving contents when resuming."""
     if not config.checkpoint_dir:
         return None
+
+    if clear_existing is None:
+        clear_existing = not bool(config.resume_from_checkpoint)
 
     checkpoint_dir = Path(config.checkpoint_dir) / config.tag
     if checkpoint_dir.exists():
@@ -638,7 +641,7 @@ def train(
             loss_fn,
         )
         checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
-    checkpoint_dir = _prepare_checkpoint_dir(config, clear_existing=not bool(config.resume_from_checkpoint))
+    checkpoint_dir = _prepare_checkpoint_dir(config)
     _write_reproducibility_config(checkpoint_dir, config)
 
     # Housekeeping
