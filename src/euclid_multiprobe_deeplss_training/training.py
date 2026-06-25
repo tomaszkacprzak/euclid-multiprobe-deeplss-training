@@ -592,9 +592,9 @@ def train(
     #                     operator="mean").to(device)
                             
     loader = OntheflyPipeline(config.records_pattern, 
-                              physics_model, 
-                              smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
+                              physics_model=physics_model, 
+                              smoothing_model=smoothing_model,
                               num_workers=config.num_workers,
                               prefetch_factor=1,
                               device=device)
@@ -623,6 +623,7 @@ def train(
     trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
     optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
     step = 0
+    session_step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
     print()
@@ -649,13 +650,12 @@ def train(
     training_batches = _print_initial_model_summary(model, loader, device)
     run = init_wandb(config, checkpoint_wandb_info)
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
-    train_start_time = time.perf_counter()
-    examples_seen = 0
+    train_examples_seen = 0
+    train_timer = Timer()
     # grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
-
     for _epoch in range(config.num_epochs or 10**12):
 
         epoch_batches = training_batches if _epoch == 0 else loader
@@ -663,6 +663,7 @@ def train(
         with torch.profiler.record_function("training_loop"):
 
             LOGGER.timer.start("10steps")
+            train_timer.start()   
             for batch in epoch_batches:
 
             
@@ -672,6 +673,7 @@ def train(
             # for _ in range(10000):
 
                 step += 1
+                session_step += 1
                 LOGGER.debug(f"====================================== step {step}")
                 prev_t = time.perf_counter()
                 prev_read, prev_write = tree_io_counters()
@@ -710,6 +712,7 @@ def train(
                 # grad_scaler.step(optimizer)
                 # grad_scaler.update()
                 optimizer.step()
+                
 
                 # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
                 # continue
@@ -723,8 +726,9 @@ def train(
                 # every step housekeeping
                 train_losses.append(train_loss)
                 maps, _labels = batch
-                examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
-                elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
+                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
+                train_timer.stop()
+                
                 current_learning_rate = optimizer.param_groups[0]["lr"]
                 if run is not None:
 
@@ -741,7 +745,7 @@ def train(
                             "Train/loss": train_loss,
                             "step": step,
                             "learning_rate": current_learning_rate,
-                            "Runtime/examples_per_second": examples_seen / elapsed_seconds,
+                            "Runtime/examples_per_second": train_examples_seen / train_timer.elapsed(),
                             **get_io_stats(d_read, d_write, dt),
                             **get_tensor_stats(maps, "maps"),
                             **get_tensor_stats(labels, "labels"),
@@ -799,6 +803,8 @@ def train(
                 if config.max_steps is not None and step >= config.max_steps:
                     break
 
+                train_timer.start()
+
 
             #
             # Validatio after each epoch
@@ -818,7 +824,7 @@ def train(
                         step=step,
                     )
 
-            if config.max_steps is not None and step >= config.max_steps:
+            if config.max_steps is not None and session_step >= config.max_steps:
                 break
 
         if checkpoint_dir:
@@ -1067,6 +1073,7 @@ def tree_io_counters(root_pid=None):
 #
 # Helpers
 #
+
 def get_tensor_stats(x, name: str):
 
     return {
@@ -1083,3 +1090,32 @@ def get_io_stats(d_read, d_write, dt):
         "Proc_tree_io/read_MB": d_read / 1e6,
         "Proc_tree_io/write_MB": d_write / 1e6,
     }
+
+class Timer:
+
+    def __init__(self):
+        self.start_time = 0
+        self.elapsed_time = 0
+        self.running = False
+
+    def start(self):
+        if self.running:
+            print('Timer already running')
+        else:
+            self.running = True
+            self.start_time = time.perf_counter()
+
+    def stop(self):
+        if not self.running:
+            print('Timer not running')
+        else:
+            self.elapsed_time += time.perf_counter() - self.start_time
+            self.running = False
+        
+    def elapsed(self):
+        if self.running:
+            self.elapsed_time += time.perf_counter() - self.start_time
+        return self.elapsed_time
+
+    def __str__(self):
+        return f'Timer(elapsed={self.elapsed_time:.2f}s)'
