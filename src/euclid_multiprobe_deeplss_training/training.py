@@ -121,6 +121,7 @@ def evaluate(
     dataloader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device | str,
+    num_examples: int = 10000,
     predictions_path: str | Path | None = None,
 ) -> float | None:
     """Evaluate one full validation stream pass and optionally save targets/predictions."""
@@ -128,6 +129,8 @@ def evaluate(
     losses: list[float] = []
     target_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
+    batch_size = dataloader.batch_size
+    num_examples_seen = 0
     for maps, labels in dataloader:
         maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
@@ -136,6 +139,9 @@ def evaluate(
         if predictions_path is not None:
             target_batches.append(labels.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
+        num_examples_seen += maps.shape[0]
+        if num_examples_seen >= num_examples:
+            break
     if not losses:
         return None
     if predictions_path is not None:
@@ -170,11 +176,11 @@ def _save_evaluation_predictions(
         handle.create_dataset("predictions", data=predictions)
 
 
-def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
-    """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
+def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | None:
+    """Return the run-specific HDF5 path for per-step evaluation arrays, if enabled."""
     if config.checkpoint_dir is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-epoch-{epoch + 1:04d}.h5"
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step:06d}.h5"
 
 
 def _validate_gradient_flow(model: nn.Module) -> None:
@@ -666,6 +672,8 @@ def train(
             train_timer.start()   
             for batch in epoch_batches:
 
+                
+
             
 
             # overfit on a single batch
@@ -675,6 +683,12 @@ def train(
                 step += 1
                 session_step += 1
                 LOGGER.debug(f"====================================== step {step}")
+
+
+                # LOGGER.warning('continuing training loop')
+                # continue
+
+
                 prev_t = time.perf_counter()
                 prev_read, prev_write = tree_io_counters()
 
@@ -724,6 +738,7 @@ def train(
                 # 
 
                 # every step housekeeping
+                LOGGER.debug('Running housekeeping')
                 train_losses.append(train_loss)
                 maps, _labels = batch
                 train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
@@ -773,14 +788,16 @@ def train(
                 
                 # infrequent metrics
                 if step % 100 == 0:
-                    
+
                     if run is not None:
+                        LOGGER.debug('Running gradient logging')
                         grad_logs = get_gradient_stats(model, log_per_parameter=False)
                         grad_hist = log_selected_gradient_histograms(model)
                         wandb.log({**grad_logs, **grad_hist}, step=step)
 
                 # very infrequent, checkpoint management
                 if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                    LOGGER.debug('Running checkpoint saving')
                     checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
                     save_checkpoint(
                         checkpoint_path,
@@ -800,18 +817,21 @@ def train(
                             step=step,
                         )
 
-                if config.max_steps is not None and step >= config.max_steps:
+                if config.max_steps is not None and session_step >= config.max_steps:
+                    LOGGER.debug('Breaking training loop due to max steps')
                     break
 
                 train_timer.start()
+                LOGGER.debug('End of step')
 
 
             #
             # Validatio after each epoch
             #
 
-            validation_predictions_path = _evaluation_predictions_path(config, _epoch)
-            validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
+            validation_predictions_path = _evaluation_predictions_path(config, step)
+            LOGGER.debug('Running validation')
+            validation_loss = evaluate(model, loader, loss_fn, device, num_examples=1000, predictions_path=validation_predictions_path)
             if validation_loss is not None:
                 validation_losses.append(validation_loss)
                 if run is not None:
