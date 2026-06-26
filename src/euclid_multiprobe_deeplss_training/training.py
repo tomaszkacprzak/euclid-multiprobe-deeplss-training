@@ -175,6 +175,7 @@ def evaluate(
     dataloader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device | str,
+    num_examples: int = 10000,
     predictions_path: str | Path | None = None,
 ) -> float | None:
     """Evaluate one full validation stream pass and optionally save targets/predictions."""
@@ -182,6 +183,8 @@ def evaluate(
     losses: list[float] = []
     target_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
+    batch_size = dataloader.batch_size
+    num_examples_seen = 0
     for maps, labels in dataloader:
         maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
@@ -190,6 +193,9 @@ def evaluate(
         if predictions_path is not None:
             target_batches.append(labels.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
+        num_examples_seen += maps.shape[0]
+        if num_examples_seen >= num_examples:
+            break
     if not losses:
         return None
     if predictions_path is not None:
@@ -224,11 +230,11 @@ def _save_evaluation_predictions(
         handle.create_dataset("predictions", data=predictions)
 
 
-def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
-    """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
+def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | None:
+    """Return the run-specific HDF5 path for per-step evaluation arrays, if enabled."""
     if config.checkpoint_dir is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-epoch-{epoch + 1:04d}.h5"
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step:06d}.h5"
 
 
 def _validate_gradient_flow(model: nn.Module) -> None:
@@ -648,10 +654,10 @@ def train(
     #                     operator="mean").to(device)
                             
     loader = OntheflyPipeline(config.records_pattern, 
-                              physics_model, 
-                              smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
-                              num_workers=12,
+                              physics_model=physics_model, 
+                              smoothing_model=smoothing_model,
+                              num_workers=config.num_workers,
                               prefetch_factor=1,
                               device=device)
 
@@ -685,6 +691,7 @@ def train(
     trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
     optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
     step = 0
+    session_step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
     print()
@@ -712,13 +719,12 @@ def train(
     training_batches = _print_initial_model_summary(model, loader, device)
     run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
-    train_start_time = time.perf_counter()
-    examples_seen = 0
+    train_examples_seen = 0
+    train_timer = Timer()
     # grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
-
     for _epoch in range(config.num_epochs or 10**12):
 
         epoch_batches = training_batches if _epoch == 0 else loader
@@ -726,7 +732,10 @@ def train(
         with torch.profiler.record_function("training_loop"):
 
             LOGGER.timer.start("10steps")
+            train_timer.start()   
             for batch in epoch_batches:
+
+                
 
             
 
@@ -735,7 +744,14 @@ def train(
             # for _ in range(10000):
 
                 step += 1
+                session_step += 1
                 LOGGER.debug(f"====================================== step {step}")
+
+
+                # LOGGER.warning('continuing training loop')
+                # continue
+
+
                 prev_t = time.perf_counter()
                 prev_read, prev_write = tree_io_counters()
 
@@ -773,6 +789,7 @@ def train(
                 # grad_scaler.step(optimizer)
                 # grad_scaler.update()
                 optimizer.step()
+                
 
                 # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
                 # continue
@@ -784,10 +801,12 @@ def train(
                 # 
 
                 # every step housekeeping
+                LOGGER.debug('Running housekeeping')
                 train_losses.append(train_loss)
                 maps, _labels = batch
-                examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
-                elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
+                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
+                train_timer.stop()
+                
                 current_learning_rate = optimizer.param_groups[0]["lr"]
                 if run is not None:
 
@@ -804,7 +823,7 @@ def train(
                             "Train/loss": train_loss,
                             "step": step,
                             "learning_rate": current_learning_rate,
-                            "Runtime/examples_per_second": examples_seen / elapsed_seconds,
+                            "Runtime/examples_per_second": train_examples_seen / train_timer.elapsed(),
                             **get_io_stats(d_read, d_write, dt),
                             **get_tensor_stats(maps, "maps"),
                             **get_tensor_stats(labels, "labels"),
@@ -832,8 +851,9 @@ def train(
                 
                 # infrequent metrics
                 if step % 100 == 0:
-                    
+
                     if run is not None:
+                        LOGGER.debug('Running gradient logging')
                         grad_logs = get_gradient_stats(model, log_per_parameter=False)
                         grad_hist = log_selected_gradient_histograms(model)
                         wandb.log({**grad_logs, **grad_hist}, step=step)
@@ -859,8 +879,12 @@ def train(
                             step=step,
                         )
 
-                if config.max_steps is not None and step >= config.max_steps:
+                if config.max_steps is not None and session_step >= config.max_steps:
+                    LOGGER.debug('Breaking training loop due to max steps')
                     break
+
+                train_timer.start()
+                LOGGER.debug('End of step')
 
 
             #
@@ -881,7 +905,7 @@ def train(
                         step=step,
                     )
 
-            if config.max_steps is not None and step >= config.max_steps:
+            if config.max_steps is not None and session_step >= config.max_steps:
                 break
 
         if _is_main_process() and checkpoint_dir:
@@ -1133,6 +1157,7 @@ def tree_io_counters(root_pid=None):
 #
 # Helpers
 #
+
 def get_tensor_stats(x, name: str):
 
     return {
@@ -1149,3 +1174,32 @@ def get_io_stats(d_read, d_write, dt):
         "Proc_tree_io/read_MB": d_read / 1e6,
         "Proc_tree_io/write_MB": d_write / 1e6,
     }
+
+class Timer:
+
+    def __init__(self):
+        self.start_time = 0
+        self.elapsed_time = 0
+        self.running = False
+
+    def start(self):
+        if self.running:
+            print('Timer already running')
+        else:
+            self.running = True
+            self.start_time = time.perf_counter()
+
+    def stop(self):
+        if not self.running:
+            print('Timer not running')
+        else:
+            self.elapsed_time += time.perf_counter() - self.start_time
+            self.running = False
+        
+    def elapsed(self):
+        if self.running:
+            self.elapsed_time += time.perf_counter() - self.start_time
+        return self.elapsed_time
+
+    def __str__(self):
+        return f'Timer(elapsed={self.elapsed_time:.2f}s)'
