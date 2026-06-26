@@ -65,6 +65,7 @@ class TrainingConfig:
     num_targets: int = 1
     num_blocks: int = 2
     dropout: float = 0.0
+    data_parallel: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -141,6 +142,58 @@ def evaluate(
     if predictions_path is not None:
         _save_evaluation_predictions(predictions_path, target_batches, prediction_batches)
     return sum(losses) / len(losses)
+
+
+def _unwrap_parallel_model(model: nn.Module) -> nn.Module:
+    """Return the underlying module when a model is wrapped for data parallelism."""
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def _model_state_dict_for_checkpoint(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Return a checkpoint state dict that is independent of DataParallel wrapping."""
+    return _unwrap_parallel_model(model).state_dict()
+
+
+def _load_model_state_dict(model: nn.Module, state_dict: Mapping[str, torch.Tensor]) -> None:
+    """Load checkpoints saved with or without a DataParallel ``module.`` prefix."""
+    target_model = _unwrap_parallel_model(model)
+    try:
+        target_model.load_state_dict(state_dict)
+        return
+    except RuntimeError:
+        has_module_prefix = any(key.startswith("module.") for key in state_dict)
+        if not has_module_prefix:
+            raise
+
+    unprefixed_state_dict = {
+        key.removeprefix("module."): value for key, value in state_dict.items()
+    }
+    target_model.load_state_dict(unprefixed_state_dict)
+
+
+def _wrap_data_parallel_if_available(
+    model: nn.Module,
+    device: torch.device,
+    *,
+    enabled: bool = True,
+) -> nn.Module:
+    """Wrap a CUDA model in ``DataParallel`` when multiple GPUs are available."""
+    if not enabled:
+        LOGGER.info("Data parallel training disabled by configuration.")
+        return model
+    if device.type != "cuda":
+        LOGGER.info("Data parallel training requires a CUDA device; using single-device training.")
+        return model
+
+    device_count = torch.cuda.device_count()
+    if device_count <= 1:
+        LOGGER.info("Data parallel training requires multiple CUDA devices; using single-device training.")
+        return model
+
+    output_device = device.index if device.index is not None else 0
+    device_ids = list(range(device_count))
+    LOGGER.info(f"Using torch.nn.DataParallel on CUDA devices {device_ids} with output_device={output_device}.")
+    return nn.DataParallel(model, device_ids=device_ids, output_device=output_device)
 
 
 def _save_evaluation_predictions(
@@ -278,7 +331,7 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": _model_state_dict_for_checkpoint(model),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
         "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
@@ -340,7 +393,7 @@ def load_checkpoint(
     state, optimizer state, and global-step/loss-history bookkeeping.
     """
     checkpoint = torch.load(Path(path), map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    _load_model_state_dict(model, checkpoint["model_state_dict"])
     if loss_fn is not None:
         loss_state_dict = checkpoint.get("loss_state_dict")
         if loss_state_dict is None:
@@ -647,6 +700,7 @@ def train(
     # Housekeeping
     # loader_prefetcher = CUDAPrefetcher(loader, device=device)
     training_batches = _print_initial_model_summary(model, loader, device)
+    model = _wrap_data_parallel_if_available(model, device, enabled=config.data_parallel)
     run = init_wandb(config, checkpoint_wandb_info)
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_start_time = time.perf_counter()

@@ -226,3 +226,55 @@ def test_prepare_checkpoint_dir_preserves_existing_contents_when_requested(tmp_p
 
     assert prepared_dir == run_dir
     assert existing_checkpoint.read_text(encoding="utf-8") == "keep"
+
+
+def test_save_checkpoint_unwraps_data_parallel_model(tmp_path, monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training import training
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, save_checkpoint
+
+    class FakeDataParallel(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, *args, **kwargs):
+            return self.module(*args, **kwargs)
+
+    monkeypatch.setattr(training.nn, "DataParallel", FakeDataParallel)
+
+    model = torch.nn.Linear(2, 1)
+    wrapped_model = FakeDataParallel(model)
+    optimizer = torch.optim.Adam(wrapped_model.parameters(), lr=0.01)
+    config = TrainingConfig(records_pattern="records/*.tar", max_steps=1)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+
+    save_checkpoint(checkpoint_path, wrapped_model, optimizer, 1, config, [0.5], [])
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    assert set(checkpoint["model_state_dict"]) == {"weight", "bias"}
+
+
+def test_load_checkpoint_accepts_data_parallel_module_prefix(tmp_path) -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, load_checkpoint, save_checkpoint
+
+    source_model = torch.nn.Linear(2, 1)
+    target_model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.Adam(target_model.parameters(), lr=0.01)
+    config = TrainingConfig(records_pattern="records/*.tar", max_steps=1)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+
+    save_checkpoint(checkpoint_path, source_model, optimizer, 1, config, [0.5], [])
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint["model_state_dict"] = {
+        f"module.{key}": value for key, value in checkpoint["model_state_dict"].items()
+    }
+    torch.save(checkpoint, checkpoint_path)
+
+    load_checkpoint(checkpoint_path, target_model, optimizer, torch.device("cpu"))
+
+    assert torch.equal(target_model.weight, source_model.weight)
+    assert torch.equal(target_model.bias, source_model.bias)
