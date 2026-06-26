@@ -34,7 +34,8 @@ dependencies = [
   "h5py",
   "pyyaml",
   "wandb",
-  "cuHPX"
+  "cuHPX",
+  "accelerate",
 ]
 
 [project.optional-dependencies]

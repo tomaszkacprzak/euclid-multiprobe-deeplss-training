@@ -16,6 +16,7 @@ import yaml
 from torch import nn
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
+from accelerate import Accelerator
 
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
@@ -644,6 +645,11 @@ def train(
     checkpoint_dir = _prepare_checkpoint_dir(config)
     _write_reproducibility_config(checkpoint_dir, config)
 
+
+    # Hugging face Accelerate
+    accelerator = Accelerator()
+    model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
+
     # Housekeeping
     # loader_prefetcher = CUDAPrefetcher(loader, device=device)
     training_batches = _print_initial_model_summary(model, loader, device)
@@ -655,7 +661,7 @@ def train(
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
-
+    
     for _epoch in range(config.num_epochs or 10**12):
 
         epoch_batches = training_batches if _epoch == 0 else loader
@@ -701,7 +707,8 @@ def train(
                     )
 
                 LOGGER.debug('Running backward pass')
-                train_loss.backward()
+                # train_loss.backward()
+                accelerator.backward(train_loss)
 
                 LOGGER.debug('Clipping gradients')
                 clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)

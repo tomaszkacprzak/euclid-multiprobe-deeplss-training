@@ -6,7 +6,7 @@ import argparse
 
 from euclid_multiprobe_deeplss_training import __version__
 
-from .utils import logger
+from utils import logger
 
 LOGGER = logger.get_logger(__file__)
 
