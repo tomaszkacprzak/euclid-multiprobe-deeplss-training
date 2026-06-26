@@ -76,9 +76,9 @@ def modelprofile(
     return _profile_loader_forward_passes(loader, model, config=config)
 
 
-def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tuple[str, str, str, str, int]], list[Any]]:
+def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tuple[str, str, str, str, str, str, int]], list[Any]]:
     """Register hooks that collect a layer-by-layer model specification."""
-    rows: list[tuple[str, str, str, str, int]] = []
+    rows: list[tuple[str, str, str, str, str, str, int]] = []
     module_names = {module: name for name, module in model.named_modules()}
     hooks: list[Any] = []
 
@@ -94,7 +94,9 @@ def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tu
                     module_names.get(module, module.__class__.__name__),
                     module.__class__.__name__,
                     _format_tensor_shapes(inputs),
+                    _format_tensor_dtypes(inputs),
                     _format_tensor_shapes(output),
+                    _format_tensor_dtypes(output),
                     sum(parameter.numel() for parameter in module.parameters(recurse=False) if parameter.requires_grad),
                 )
             )
@@ -108,12 +110,20 @@ def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tu
     return rows, hooks
 
 
-def _print_model_specification_table(model: torch.nn.Module, rows: list[tuple[str, str, str, str, int]]) -> None:
+def _print_model_specification_table(model: torch.nn.Module, rows: list[tuple[str, str, str, str, str, str, int]]) -> None:
     """Print the collected layer-by-layer model specification table."""
     total_trainable_parameters = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
     _print_table(
-        ["Layer", "Operation", "Input shape(s)", "Output shape(s)", "Trainable params"],
-        [(*row[:4], f"{row[4]:,}") for row in rows],
+        [
+            "Layer",
+            "Operation",
+            "Input shape(s)",
+            "Input dtype(s)",
+            "Output shape(s)",
+            "Output dtype(s)",
+            "Trainable params",
+        ],
+        [(*row[:6], f"{row[6]:,}") for row in rows],
     )
     print(f"Total trainable parameters: {total_trainable_parameters:,}")
 
@@ -126,6 +136,17 @@ def _format_tensor_shapes(value: Any) -> str:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         shapes = [_format_tensor_shapes(item) for item in value if _contains_tensor(item)]
         return ", ".join(shapes) if shapes else type(value).__name__
+    return type(value).__name__
+
+
+def _format_tensor_dtypes(value: Any) -> str:
+    if isinstance(value, torch.Tensor):
+        return str(value.dtype).removeprefix("torch.")
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{key}: {_format_tensor_dtypes(item)}" for key, item in value.items()) + "}"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        dtypes = [_format_tensor_dtypes(item) for item in value if _contains_tensor(item)]
+        return ", ".join(dtypes) if dtypes else type(value).__name__
     return type(value).__name__
 
 

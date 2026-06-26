@@ -56,6 +56,7 @@ def test_train_command_passes_cli_overrides(monkeypatch) -> None:
                 "max_steps": 10,
                 "device": "cpu",
                 "wandb_mode": "disabled",
+                "tag": "test-run",
             },
         )
     ]

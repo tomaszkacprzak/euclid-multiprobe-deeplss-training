@@ -10,7 +10,10 @@ from euclid_multiprobe_deeplss_training.training import TrainingConfig, init_wan
 
 
 class DummyRun:
-    pass
+    id = "run-123"
+    project = "project"
+    entity = "entity"
+    name = "run-name"
 
 
 def test_init_wandb_skips_disabled_mode(monkeypatch) -> None:
@@ -57,3 +60,31 @@ def test_init_wandb_defaults_to_offline_mode(monkeypatch) -> None:
     assert calls[0]["name"] == "run-name"
     assert calls[0]["mode"] == "offline"
     assert calls[0]["config"]["wandb_project"] == "project"
+
+
+def test_init_wandb_resumes_from_checkpoint_metadata(monkeypatch) -> None:
+    calls = []
+
+    def fake_init(**kwargs):
+        calls.append(kwargs)
+        return DummyRun()
+
+    monkeypatch.setattr(training.wandb, "init", fake_init)
+
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        wandb_project="configured-project",
+        tag="configured-name",
+    )
+
+    run = init_wandb(
+        config,
+        {"id": "checkpoint-run-id", "project": "checkpoint-project", "entity": "checkpoint-entity", "name": "checkpoint-name"},
+    )
+
+    assert isinstance(run, DummyRun)
+    assert calls[0]["id"] == "checkpoint-run-id"
+    assert calls[0]["resume"] == "allow"
+    assert calls[0]["project"] == "checkpoint-project"
+    assert calls[0]["entity"] == "checkpoint-entity"
+    assert calls[0]["name"] == "checkpoint-name"

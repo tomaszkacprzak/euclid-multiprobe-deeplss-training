@@ -5,8 +5,7 @@ from __future__ import annotations
 import argparse
 
 from euclid_multiprobe_deeplss_training import __version__
-
-from .utils import logger
+from euclid_multiprobe_deeplss_training.utils import logger
 
 LOGGER = logger.get_logger(__file__)
 
@@ -127,6 +126,7 @@ def _run_train(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         device=args.device,
         wandb_mode=args.wandb_mode,
+        tag=args.tag,
     )
     return 0
 
