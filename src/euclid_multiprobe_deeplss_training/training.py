@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 import psutil
 import torch
+import torch.distributed as dist
 import wandb
 import yaml
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -65,6 +67,8 @@ class TrainingConfig:
     num_targets: int = 1
     num_blocks: int = 2
     dropout: float = 0.0
+    use_ddp: bool = True
+    ddp_backend: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -104,6 +108,56 @@ class TrainingConfig:
         if self.checkpoint_every_steps < 0:
             raise ValueError("checkpoint_every_steps must be non-negative.")
 
+
+
+
+def _ddp_env_world_size() -> int:
+    """Return torchrun world size from the environment, defaulting to one process."""
+    import os
+
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def _is_main_process() -> bool:
+    """Return True for rank zero and for non-distributed runs."""
+    return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+
+
+def _unwrap_parallel_module(module: nn.Module) -> nn.Module:
+    """Return the original module behind DistributedDataParallel wrappers."""
+    return module.module if isinstance(module, DDP) else module
+
+
+def _setup_ddp(config: TrainingConfig, requested_device: torch.device | str | None) -> tuple[bool, int, int, int, torch.device]:
+    """Initialize DDP from torchrun environment variables and choose this rank's device."""
+    import os
+
+    world_size = _ddp_env_world_size()
+    ddp_enabled = bool(config.use_ddp and world_size > 1)
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+
+    if ddp_enabled:
+        backend = config.ddp_backend or ("nccl" if torch.cuda.is_available() else "gloo")
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device(requested_device or "cpu")
+    else:
+        device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    return ddp_enabled, rank, world_size, local_rank, device
+
+
+def _ddp_barrier() -> None:
+    """Synchronize ranks when DDP is active."""
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
 
 # Re-export shared helpers for callers and tests that import them from this module.
@@ -278,7 +332,7 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": _unwrap_parallel_module(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
         "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
@@ -288,7 +342,7 @@ def save_checkpoint(
     if wandb_info is not None:
         checkpoint["wandb"] = dict(wandb_info)
     if loss_fn is not None:
-        checkpoint["loss_state_dict"] = loss_fn.state_dict()
+        checkpoint["loss_state_dict"] = _unwrap_parallel_module(loss_fn).state_dict()
     torch.save(checkpoint, path)
 
 
@@ -340,13 +394,13 @@ def load_checkpoint(
     state, optimizer state, and global-step/loss-history bookkeeping.
     """
     checkpoint = torch.load(Path(path), map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    _unwrap_parallel_module(model).load_state_dict(checkpoint["model_state_dict"])
     if loss_fn is not None:
         loss_state_dict = checkpoint.get("loss_state_dict")
         if loss_state_dict is None:
             LOGGER.warning("Checkpoint does not contain loss_state_dict; using the initialized loss function state.")
         else:
-            loss_fn.load_state_dict(loss_state_dict)
+            _unwrap_parallel_module(loss_fn).load_state_dict(loss_state_dict)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     LOGGER.info(f"Loaded checkpoint from {path} with step {checkpoint['step']}")
     return (
@@ -564,7 +618,7 @@ def train(
         NestDownsampler = _NestDownsampler
 
     config = _coerce_config(config_or_path)
-    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    ddp_enabled, rank, world_size, local_rank, device = _setup_ddp(config, device)
     LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
     LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
     for i in range(torch.cuda.device_count()):
@@ -574,6 +628,8 @@ def train(
 
     LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
+    if ddp_enabled:
+        LOGGER.info(f"DDP enabled: rank={rank} local_rank={local_rank} world_size={world_size}")
 
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
@@ -608,16 +664,22 @@ def train(
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
                     )
     model.to(device)
+    if ddp_enabled:
+        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
+        model = DDP(model, **ddp_kwargs)
 
     print()
     LOGGER.info(f'Model: {config.model_name}')
-    print(model)
+    print(_unwrap_parallel_module(model))
     print()
 
     # Loss function 
     loss_fn = build_loss(config.loss_function, num_targets=physics_model.num_targets)
     loss_fn = loss_fn.to(device)
-    LOGGER.info(f'Loss function: {loss_fn}')
+    if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
+        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
+        loss_fn = DDP(loss_fn, **ddp_kwargs)
+    LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss_fn)}')
 
     # Optimizer
     trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
@@ -641,13 +703,14 @@ def train(
             loss_fn,
         )
         checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
-    checkpoint_dir = _prepare_checkpoint_dir(config)
+    checkpoint_dir = _prepare_checkpoint_dir(config) if _is_main_process() else None
     _write_reproducibility_config(checkpoint_dir, config)
+    _ddp_barrier()
 
     # Housekeeping
     # loader_prefetcher = CUDAPrefetcher(loader, device=device)
     training_batches = _print_initial_model_summary(model, loader, device)
-    run = init_wandb(config, checkpoint_wandb_info)
+    run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_start_time = time.perf_counter()
     examples_seen = 0
@@ -776,7 +839,7 @@ def train(
                         wandb.log({**grad_logs, **grad_hist}, step=step)
 
                 # very infrequent, checkpoint management
-                if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
                     checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
                     save_checkpoint(
                         checkpoint_path,
@@ -804,7 +867,7 @@ def train(
             # Validatio after each epoch
             #
 
-            validation_predictions_path = _evaluation_predictions_path(config, _epoch)
+            validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
             validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
             if validation_loss is not None:
                 validation_losses.append(validation_loss)
@@ -821,7 +884,7 @@ def train(
             if config.max_steps is not None and step >= config.max_steps:
                 break
 
-        if checkpoint_dir:
+        if _is_main_process() and checkpoint_dir:
             final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
             save_checkpoint(
                 final_checkpoint_path,
@@ -842,6 +905,9 @@ def train(
 
     if run is not None:
         run.finish()
+    _ddp_barrier()
+    if ddp_enabled and dist.is_initialized():
+        dist.destroy_process_group()
 
     return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
