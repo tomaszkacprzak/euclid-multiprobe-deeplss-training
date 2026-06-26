@@ -168,7 +168,6 @@ _with_forward_model_config = with_forward_model_config
 
 
 
-
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -429,12 +428,19 @@ def _print_initial_model_summary(
     """
     from .modelprofile import _print_model_specification_table, _register_model_specification_hooks
 
+    def _print_rank_zero(model, rows):
+
+        rank = dist.get_rank()==0 if dist.is_initialized() else 0
+        if rank == 0:
+            _print_model_specification_table(model, rows)
+            print()
+
     iterator = iter(dataloader)
     try:
         first_batch = next(iterator)
     except StopIteration:
         LOGGER.warning("Skipping model parameter table because the training dataloader produced no batches.")
-        _print_model_specification_table(model, [])
+        _print_rank_zero(model, [])
         return iter(())
 
     rows, hooks = _register_model_specification_hooks(model)
@@ -449,8 +455,7 @@ def _print_initial_model_summary(
             handle.remove()
         model.train(was_training)
 
-    _print_model_specification_table(model, rows)
-    print()
+    _print_rank_zero(model, rows)
     return itertools.chain([first_batch], iterator)
 
 
@@ -630,7 +635,7 @@ def train(
     for i in range(torch.cuda.device_count()):
         LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
     
-    nside_training = 512
+    nside_training = 1024
 
     LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
@@ -642,10 +647,10 @@ def train(
                         device=device).to(device)
 
     # Downsample all maps to the same nside
-    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-                            nside_base=config.forward_model["analysis"]["n_side_down"], 
-                            nside_lower=nside_training, 
-                            operator="mean").to(device)
+    # smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+    #                         nside_base=config.forward_model["analysis"]["n_side_down"], 
+    #                         nside_lower=nside_training, 
+    #                         operator="mean").to(device)
     
     # Downsample each channel to a different nside
     # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -656,7 +661,7 @@ def train(
     loader = OntheflyPipeline(config.records_pattern, 
                               batch_size=config.batch_size, 
                               physics_model=physics_model, 
-                              smoothing_model=smoothing_model,
+                              smoothing_model=None,
                               num_workers=config.num_workers,
                               prefetch_factor=1,
                               device=device)
@@ -674,10 +679,7 @@ def train(
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         model = DDP(model, **ddp_kwargs)
 
-    print()
-    LOGGER.info(f'Model: {config.model_name}')
-    print(_unwrap_parallel_module(model))
-    print()
+    LOGGER.info(f'Model: {config.model_name}\n' + str(_unwrap_parallel_module(model)) + '\n')    
 
     # Loss function 
     loss_fn = build_loss(config.loss_function, num_targets=physics_model.num_targets)
@@ -694,10 +696,7 @@ def train(
     session_step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
-    print()
-    LOGGER.info('Optimizer:')
-    print(optimizer)
-    print()
+    LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
 
     # Checkpoints
     checkpoint_wandb_info = None
@@ -818,12 +817,14 @@ def train(
                     d_read = now_read - prev_read
                     d_write = now_write - prev_write
 
+                    # adjust for DDP
+
                     wandb.log(
                         {
                             "Train/loss": train_loss,
                             "step": step,
                             "learning_rate": current_learning_rate,
-                            "Runtime/examples_per_second": train_examples_seen / train_timer.elapsed(),
+                            **get_examples_stats(train_examples_seen, train_timer.elapsed()),
                             **get_io_stats(d_read, d_write, dt),
                             **get_tensor_stats(maps, "maps"),
                             **get_tensor_stats(labels, "labels"),
@@ -892,7 +893,7 @@ def train(
             #
 
             validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
-            validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
+            validation_loss = evaluate(model, loader, loss_fn, device, num_examples=2000, predictions_path=validation_predictions_path)
             if validation_loss is not None:
                 validation_losses.append(validation_loss)
                 if run is not None:
@@ -1167,12 +1168,20 @@ def get_tensor_stats(x, name: str):
         f"Batch/{name}/max": x.max().detach().cpu(),
     }
 
-def get_io_stats(d_read, d_write, dt):
+def get_examples_stats(examples_seen, dt):
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
     return {
-        "Proc_tree_io/read_MB_s": d_read / dt / 1e6,
-        "Proc_tree_io/write_MB_s": d_write / dt / 1e6,
-        "Proc_tree_io/read_MB": d_read / 1e6,
-        "Proc_tree_io/write_MB": d_write / 1e6,
+        "Runtime/examples_per_second": examples_seen / dt * world_size,
+    }
+
+def get_io_stats(d_read, d_write, dt):
+
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    return {
+        "Proc_tree_io/read_MB_s": d_read / dt / 1e6 * world_size,
+        "Proc_tree_io/write_MB_s": d_write / dt / 1e6 * world_size,
+        "Proc_tree_io/read_MB": d_read / 1e6 * world_size,
+        "Proc_tree_io/write_MB": d_write / 1e6 * world_size,
     }
 
 class Timer:
@@ -1184,14 +1193,14 @@ class Timer:
 
     def start(self):
         if self.running:
-            print('Timer already running')
+            pass
         else:
             self.running = True
             self.start_time = time.perf_counter()
 
     def stop(self):
         if not self.running:
-            print('Timer not running')
+            pass
         else:
             self.elapsed_time += time.perf_counter() - self.start_time
             self.running = False
