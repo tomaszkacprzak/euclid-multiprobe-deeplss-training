@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
+import time
 import numpy as np
 import torch
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
@@ -39,7 +39,7 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
     config = _coerce_config(config_or_path)
     
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
-                        scalers=False,
+                        scalers=True,
                         device=device).to(device)
 
     smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -48,11 +48,10 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
                         operator="mean").to(device)
     
     loader = OntheflyPipeline(config.records_pattern, 
+                              config.batch_size, 
                               physics_model, 
                               smoothing_model,
-                              batch_size=config.batch_size, 
                               num_workers=config.num_workers,
-                              pin_memory=True,
                               device=device)
 
     batch_stats: list[BatchChannelStats] = []
@@ -123,20 +122,20 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
         with_stack=True,
     ) as prof:
 
+        time_start = time.time()
         for maps, labels in data_iter:
 
-            LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-            LOGGER.debug(f'Batch {batch_count} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
+            LOGGER.debug(f'Batch {batch_count:>4d} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+            LOGGER.debug(f'Batch {batch_count:>4d} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
 
             if batch_count % 10 == 0:
-                LOGGER.info(f'Batch {batch_count}')
+                
+                time_diff = time_end = time.time() - time_start
+                LOGGER.info(f'Batch {batch_count:>4d}, num_examples_per_second: {batch_count * dataloader.batch_size / time_diff:.2f}')
 
             map_stats.append(_summarize_maps(maps, split=split))
             label_stats.append(_summarize_labels(labels, split=split))
             batch_count += 1
-
-            if batch_count == 100:
-                break
 
             if maps.is_cuda:
                 torch.cuda.synchronize()
