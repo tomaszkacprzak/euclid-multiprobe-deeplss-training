@@ -635,7 +635,7 @@ def train(
     for i in range(torch.cuda.device_count()):
         LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
     
-    nside_training = 1024
+    nside_training = 512
 
     LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
@@ -647,10 +647,10 @@ def train(
                         device=device).to(device)
 
     # Downsample all maps to the same nside
-    # smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-    #                         nside_base=config.forward_model["analysis"]["n_side_down"], 
-    #                         nside_lower=nside_training, 
-    #                         operator="mean").to(device)
+    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+                            nside_base=config.forward_model["analysis"]["n_side_down"], 
+                            nside_lower=nside_training, 
+                            operator="mean").to(device)
     
     # Downsample each channel to a different nside
     # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -661,7 +661,7 @@ def train(
     loader = OntheflyPipeline(config.records_pattern, 
                               batch_size=config.batch_size, 
                               physics_model=physics_model, 
-                              smoothing_model=None,
+                              smoothing_model=smoothing_model,
                               num_workers=config.num_workers,
                               prefetch_factor=1,
                               device=device)
