@@ -9,11 +9,13 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
-
+import psutil
 import torch
+import torch.distributed as dist
 import wandb
 import yaml
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -65,6 +67,8 @@ class TrainingConfig:
     num_targets: int = 1
     num_blocks: int = 2
     dropout: float = 0.0
+    use_ddp: bool = True
+    ddp_backend: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -106,9 +110,58 @@ class TrainingConfig:
 
 
 
+
+def _ddp_env_world_size() -> int:
+    """Return torchrun world size from the environment, defaulting to one process."""
+    import os
+
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def _is_main_process() -> bool:
+    """Return True for rank zero and for non-distributed runs."""
+    return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+
+
+def _unwrap_parallel_module(module: nn.Module) -> nn.Module:
+    """Return the original module behind DistributedDataParallel wrappers."""
+    return module.module if isinstance(module, DDP) else module
+
+
+def _setup_ddp(config: TrainingConfig, requested_device: torch.device | str | None) -> tuple[bool, int, int, int, torch.device]:
+    """Initialize DDP from torchrun environment variables and choose this rank's device."""
+    import os
+
+    world_size = _ddp_env_world_size()
+    ddp_enabled = bool(config.use_ddp and world_size > 1)
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+
+    if ddp_enabled:
+        backend = config.ddp_backend or ("nccl" if torch.cuda.is_available() else "gloo")
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device(requested_device or "cpu")
+    else:
+        device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    return ddp_enabled, rank, world_size, local_rank, device
+
+
+def _ddp_barrier() -> None:
+    """Synchronize ranks when DDP is active."""
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
 # Re-export shared helpers for callers and tests that import them from this module.
 _with_forward_model_config = with_forward_model_config
-
 
 
 
@@ -121,6 +174,7 @@ def evaluate(
     dataloader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device | str,
+    num_examples: int = 10000,
     predictions_path: str | Path | None = None,
 ) -> float | None:
     """Evaluate one full validation stream pass and optionally save targets/predictions."""
@@ -128,6 +182,8 @@ def evaluate(
     losses: list[float] = []
     target_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
+    batch_size = dataloader.batch_size
+    num_examples_seen = 0
     for maps, labels in dataloader:
         maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
@@ -136,6 +192,9 @@ def evaluate(
         if predictions_path is not None:
             target_batches.append(labels.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
+        num_examples_seen += maps.shape[0]
+        if num_examples_seen >= num_examples:
+            break
     if not losses:
         return None
     if predictions_path is not None:
@@ -170,11 +229,11 @@ def _save_evaluation_predictions(
         handle.create_dataset("predictions", data=predictions)
 
 
-def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
-    """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
+def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | None:
+    """Return the run-specific HDF5 path for per-step evaluation arrays, if enabled."""
     if config.checkpoint_dir is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-epoch-{epoch + 1:04d}.h5"
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step:06d}.h5"
 
 
 def _validate_gradient_flow(model: nn.Module) -> None:
@@ -278,7 +337,7 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": _unwrap_parallel_module(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
         "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
@@ -288,7 +347,7 @@ def save_checkpoint(
     if wandb_info is not None:
         checkpoint["wandb"] = dict(wandb_info)
     if loss_fn is not None:
-        checkpoint["loss_state_dict"] = loss_fn.state_dict()
+        checkpoint["loss_state_dict"] = _unwrap_parallel_module(loss_fn).state_dict()
     torch.save(checkpoint, path)
 
 
@@ -340,13 +399,13 @@ def load_checkpoint(
     state, optimizer state, and global-step/loss-history bookkeeping.
     """
     checkpoint = torch.load(Path(path), map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    _unwrap_parallel_module(model).load_state_dict(checkpoint["model_state_dict"])
     if loss_fn is not None:
         loss_state_dict = checkpoint.get("loss_state_dict")
         if loss_state_dict is None:
             LOGGER.warning("Checkpoint does not contain loss_state_dict; using the initialized loss function state.")
         else:
-            loss_fn.load_state_dict(loss_state_dict)
+            _unwrap_parallel_module(loss_fn).load_state_dict(loss_state_dict)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     LOGGER.info(f"Loaded checkpoint from {path} with step {checkpoint['step']}")
     return (
@@ -369,12 +428,19 @@ def _print_initial_model_summary(
     """
     from .modelprofile import _print_model_specification_table, _register_model_specification_hooks
 
+    def _print_rank_zero(model, rows):
+
+        rank = dist.get_rank()==0 if dist.is_initialized() else 0
+        if rank == 0:
+            _print_model_specification_table(model, rows)
+            print()
+
     iterator = iter(dataloader)
     try:
         first_batch = next(iterator)
     except StopIteration:
         LOGGER.warning("Skipping model parameter table because the training dataloader produced no batches.")
-        _print_model_specification_table(model, [])
+        _print_rank_zero(model, [])
         return iter(())
 
     rows, hooks = _register_model_specification_hooks(model)
@@ -389,8 +455,7 @@ def _print_initial_model_summary(
             handle.remove()
         model.train(was_training)
 
-    _print_model_specification_table(model, rows)
-    print()
+    _print_rank_zero(model, rows)
     return itertools.chain([first_batch], iterator)
 
 
@@ -564,7 +629,7 @@ def train(
         NestDownsampler = _NestDownsampler
 
     config = _coerce_config(config_or_path)
-    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    ddp_enabled, rank, world_size, local_rank, device = _setup_ddp(config, device)
     LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
     LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
     for i in range(torch.cuda.device_count()):
@@ -574,6 +639,8 @@ def train(
 
     LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
+    if ddp_enabled:
+        LOGGER.info(f"DDP enabled: rank={rank} local_rank={local_rank} world_size={world_size}")
 
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
@@ -592,11 +659,11 @@ def train(
     #                     operator="mean").to(device)
                             
     loader = OntheflyPipeline(config.records_pattern, 
-                              physics_model, 
-                              smoothing_model=smoothing_model,
                               batch_size=config.batch_size, 
+                              physics_model=physics_model, 
+                              smoothing_model=smoothing_model,
                               num_workers=config.num_workers,
-                              pin_memory=True,
+                              prefetch_factor=1,
                               device=device)
 
     # Model 
@@ -608,27 +675,28 @@ def train(
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
                     )
     model.to(device)
+    if ddp_enabled:
+        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
+        model = DDP(model, **ddp_kwargs)
 
-    print()
-    LOGGER.info(f'Model: {config.model_name}')
-    print(model)
-    print()
+    LOGGER.info(f'Model: {config.model_name}\n' + str(_unwrap_parallel_module(model)) + '\n')    
 
     # Loss function 
     loss_fn = build_loss(config.loss_function, num_targets=physics_model.num_targets)
     loss_fn = loss_fn.to(device)
-    LOGGER.info(f'Loss function: {loss_fn}')
+    if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
+        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
+        loss_fn = DDP(loss_fn, **ddp_kwargs)
+    LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss_fn)}')
 
     # Optimizer
     trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
     optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
     step = 0
+    session_step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
-    print()
-    LOGGER.info('Optimizer:')
-    print(optimizer)
-    print()
+    LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
 
     # Checkpoints
     checkpoint_wandb_info = None
@@ -641,182 +709,230 @@ def train(
             loss_fn,
         )
         checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
-    checkpoint_dir = _prepare_checkpoint_dir(config)
+    checkpoint_dir = _prepare_checkpoint_dir(config) if _is_main_process() else None
     _write_reproducibility_config(checkpoint_dir, config)
+    _ddp_barrier()
 
     # Housekeeping
+    # loader_prefetcher = CUDAPrefetcher(loader, device=device)
     training_batches = _print_initial_model_summary(model, loader, device)
-    run = init_wandb(config, checkpoint_wandb_info)
+    run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
-    train_start_time = time.perf_counter()
-    examples_seen = 0
-    grad_scaler = torch.amp.GradScaler("cuda")
+    train_examples_seen = 0
+    train_timer = Timer()
+    # grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
-    
     for _epoch in range(config.num_epochs or 10**12):
+
         epoch_batches = training_batches if _epoch == 0 else loader
+        # with DeviceTraceMode(only_cpu=True):
+        with torch.profiler.record_function("training_loop"):
 
-        LOGGER.timer.start("10steps")
-        for batch in epoch_batches:
+            LOGGER.timer.start("10steps")
+            train_timer.start()   
+            for batch in epoch_batches:
 
-        # overfit on a single batch
-        # batch = next(iter(epoch_batches))
-        # for _ in range(10000):
+                
 
-            step += 1
-            LOGGER.debug(f"====================================== step {step}")
+            
 
-            #
-            # Main magic - update model
-            #
+            # overfit on a single batch
+            # batch = next(iter(epoch_batches))
+            # for _ in range(10000):
 
-            model.train()
-            maps, labels = batch
-            LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-            LOGGER.debug(f'Labels shape={labels.shape}')
-            maps = maps.to(device=device, dtype=torch.float32)
-            labels = labels.to(device=device, dtype=torch.float32)
-            optimizer.zero_grad(set_to_none=True)
-            LOGGER.debug('Running forward pass')
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+                step += 1
+                session_step += 1
+                LOGGER.debug(f"====================================== step {step}")
+
+
+                # LOGGER.warning('continuing training loop')
+                # continue
+
+
+                prev_t = time.perf_counter()
+                prev_read, prev_write = tree_io_counters()
+
+                #
+                # Main magic - update model
+                #
+
+                model.train()
+                maps, labels = batch
+                LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+                LOGGER.debug(f'Labels shape={labels.shape}')
+                maps = maps.to(device=device, dtype=torch.float32)
+                labels = labels.to(device=device, dtype=torch.float32)
+                optimizer.zero_grad(set_to_none=True)
+                LOGGER.debug('Running forward pass')
+                # with torch.autocast("cuda", dtype=torch.bfloat16):
                 predictions = model(maps)
                 LOGGER.debug('Running loss')
                 train_loss = loss_fn(predictions, labels)
-                train_loss = grad_scaler.scale(train_loss)
+                # train_loss = grad_scaler.scale(train_loss)
 
-            if not train_loss.requires_grad:
-                raise RuntimeError(
-                    "The training loss is detached from the model parameters; "
-                    "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
-                )
+                if not train_loss.requires_grad:
+                    raise RuntimeError(
+                        "The training loss is detached from the model parameters; "
+                        "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
+                    )
 
-            LOGGER.debug('Running backward pass')
-            train_loss.backward()
+                LOGGER.debug('Running backward pass')
+                train_loss.backward()
 
-            LOGGER.debug('Clipping gradients')
-            clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
+                LOGGER.debug('Clipping gradients')
+                clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
 
-            LOGGER.debug('Running optimizer step')
-            grad_scaler.step(optimizer)
-            grad_scaler.update()
-            
-            train_loss = train_loss.detach().cpu()
-
-            #
-            # Step housekeeping
-            # 
-
-            # every step housekeeping
-            train_losses.append(train_loss)
-            maps, _labels = batch
-            examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
-            elapsed_seconds = max(time.perf_counter() - train_start_time, 1.0e-12)
-            current_learning_rate = optimizer.param_groups[0]["lr"]
-            if run is not None:
-                wandb.log(
-                    {
-                        "train/loss": train_loss,
-                        "step": step,
-                        "learning_rate": current_learning_rate,
-                        "runtime/examples_per_second": examples_seen / elapsed_seconds,
-                    },
-                    step=step,
-                )
-
-            # warm-up checks
-            if step < 10:
-
-                _validate_gradient_flow(model)
-
-            # frequent metrics
-            if step % 10 == 0:
-
-                LOGGER.info(
-                    f'Train loss epoch={_epoch:>3d} step={step:>5d} '
-                    f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
-                LOGGER.timer.reset("10steps")
-                if run is not None:
-                    train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
-                    for key, value in train_loss_components.items():
-                        value = float(value.detach().cpu())
-                        wandb.log({f"train/loss_component/{key}": value}, step=step)
-            
-            # infrequent metrics
-            if step % 100 == 0:
+                LOGGER.debug('Running optimizer step')
+                # grad_scaler.step(optimizer)
+                # grad_scaler.update()
+                optimizer.step()
                 
-                if run is not None:
-                    grad_logs = get_gradient_stats(model, log_per_parameter=False)
-                    grad_hist = log_selected_gradient_histograms(model)
-                    wandb.log({**grad_logs, **grad_hist}, step=step)
 
-            # very infrequent, checkpoint management
-            if config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
-                save_checkpoint(
-                    checkpoint_path,
-                    model,
-                    optimizer,
-                    step,
-                    config,
-                    train_losses,
-                    validation_losses,
-                    loss_fn,
-                    active_wandb_info,
-                )
+                # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
+                # continue
+                
+                train_loss = train_loss.detach().cpu()
 
+                #
+                # Step housekeeping
+                # 
+
+                # every step housekeeping
+                LOGGER.debug('Running housekeeping')
+                train_losses.append(train_loss)
+                maps, _labels = batch
+                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
+                train_timer.stop()
+                
+                current_learning_rate = optimizer.param_groups[0]["lr"]
                 if run is not None:
+
+                    # IO statistics    
+                    # This should be at the end of the step to not dilute the timing/rates, but the difference should be negligible.
+                    now_t = time.perf_counter()
+                    now_read, now_write = tree_io_counters()
+                    dt = now_t - prev_t
+                    d_read = now_read - prev_read
+                    d_write = now_write - prev_write
+
+                    # adjust for DDP
+
                     wandb.log(
-                        {"checkpoint/saved": 1, "checkpoint/path": str(checkpoint_path), "step": step},
+                        {
+                            "Train/loss": train_loss,
+                            "step": step,
+                            "learning_rate": current_learning_rate,
+                            **get_examples_stats(train_examples_seen, train_timer.elapsed()),
+                            **get_io_stats(d_read, d_write, dt),
+                            **get_tensor_stats(maps, "maps"),
+                            **get_tensor_stats(labels, "labels"),
+                        },
                         step=step,
                     )
 
-            if config.max_steps is not None and step >= config.max_steps:
+                # warm-up checks
+                if step < 10:
+
+                    _validate_gradient_flow(model)
+
+                # frequent metrics
+                if step % 10 == 0:
+
+                    LOGGER.info(
+                        f'Train loss epoch={_epoch:>3d} step={step:>5d} '
+                        f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+                    LOGGER.timer.reset("10steps")
+                    if run is not None:
+                        train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
+                        for key, value in train_loss_components.items():
+                            value = float(value.detach().cpu())
+                            wandb.log({f"Train/loss_component/{key}": value}, step=step)
+                
+                # infrequent metrics
+                if step % 100 == 0:
+
+                    if run is not None:
+                        LOGGER.debug('Running gradient logging')
+                        grad_logs = get_gradient_stats(model, log_per_parameter=False)
+                        grad_hist = log_selected_gradient_histograms(model)
+                        wandb.log({**grad_logs, **grad_hist}, step=step)
+
+                # very infrequent, checkpoint management
+                if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                    checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
+                    save_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        step,
+                        config,
+                        train_losses,
+                        validation_losses,
+                        loss_fn,
+                        active_wandb_info,
+                    )
+
+                    if run is not None:
+                        wandb.log(
+                            {"Checkpoint/saved": 1, "Checkpoint/path": str(checkpoint_path), "step": step},
+                            step=step,
+                        )
+
+                if config.max_steps is not None and session_step >= config.max_steps:
+                    LOGGER.debug('Breaking training loop due to max steps')
+                    break
+
+                train_timer.start()
+                LOGGER.debug('End of step')
+
+
+            #
+            # Validatio after each epoch
+            #
+
+            validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
+            validation_loss = evaluate(model, loader, loss_fn, device, num_examples=2000, predictions_path=validation_predictions_path)
+            if validation_loss is not None:
+                validation_losses.append(validation_loss)
+                if run is not None:
+                    wandb.log(
+                        {
+                            "Validation/loss": validation_loss,
+                            "step": step,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        },
+                        step=step,
+                    )
+
+            if config.max_steps is not None and session_step >= config.max_steps:
                 break
 
-
-        #
-        # Validatio after each epoch
-        #
-
-        validation_predictions_path = _evaluation_predictions_path(config, _epoch)
-        validation_loss = evaluate(model, loader, loss_fn, device, validation_predictions_path)
-        if validation_loss is not None:
-            validation_losses.append(validation_loss)
+        if _is_main_process() and checkpoint_dir:
+            final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
+            save_checkpoint(
+                final_checkpoint_path,
+                model,
+                optimizer,
+                step,
+                config,
+                train_losses,
+                validation_losses,
+                loss_fn,
+                active_wandb_info,
+            )
             if run is not None:
                 wandb.log(
-                    {
-                        "validation/loss": validation_loss,
-                        "step": step,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    },
+                    {"Checkpoint/saved": 1, "Checkpoint/path": str(final_checkpoint_path), "step": step},
                     step=step,
                 )
 
-        if config.max_steps is not None and step >= config.max_steps:
-            break
-
-    if checkpoint_dir:
-        final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
-        save_checkpoint(
-            final_checkpoint_path,
-            model,
-            optimizer,
-            step,
-            config,
-            train_losses,
-            validation_losses,
-            loss_fn,
-            active_wandb_info,
-        )
-        if run is not None:
-            wandb.log(
-                {"checkpoint/saved": 1, "checkpoint/path": str(final_checkpoint_path), "step": step},
-                step=step,
-            )
     if run is not None:
         run.finish()
+    _ddp_barrier()
+    if ddp_enabled and dist.is_initialized():
+        dist.destroy_process_group()
 
     return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
@@ -852,3 +968,247 @@ def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConf
         config_path = Path(config_or_path)
         return TrainingConfig.from_mapping(with_forward_model_config(load_config(config_path), config_path.parent))
     return TrainingConfig.from_mapping(with_forward_model_config(config_or_path))
+
+
+#
+# Tracing of tensor placement
+#
+
+import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+from collections.abc import Mapping, Sequence
+
+def tree_tensors(x):
+    if torch.is_tensor(x):
+        yield x
+    elif isinstance(x, Mapping):
+        for v in x.values():
+            yield from tree_tensors(v)
+    elif isinstance(x, Sequence) and not isinstance(x, (str, bytes)):
+        for v in x:
+            yield from tree_tensors(v)
+
+def tensor_sig(t):
+    return f"{tuple(t.shape)} {t.dtype} {t.device}"
+
+class DeviceTraceMode(TorchDispatchMode):
+    def __init__(self, only_cpu=True, max_lines=5000):
+        super().__init__()
+        self.only_cpu = only_cpu
+        self.max_lines = max_lines
+        self.lines = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        in_tensors = list(tree_tensors((args, kwargs)))
+        result = func(*args, **kwargs)
+        out_tensors = list(tree_tensors(result))
+
+        devices = {str(t.device) for t in in_tensors + out_tensors}
+
+        should_log = True
+        if self.only_cpu:
+            should_log = any(d == "cpu" for d in devices)
+
+        if should_log and self.lines < self.max_lines:
+            print(f"\n{func}")
+            if in_tensors:
+                print("  in :", [tensor_sig(t) for t in in_tensors])
+            if out_tensors:
+                print("  out:", [tensor_sig(t) for t in out_tensors])
+            self.lines += 1
+
+        return result
+
+
+#
+# Prefetcher data loader
+#
+
+import torch
+from collections.abc import Mapping, Sequence
+
+
+def iter_tensors(x):
+    """Yield all tensors inside a nested batch structure."""
+    if torch.is_tensor(x):
+        yield x
+    elif isinstance(x, Mapping):
+        for v in x.values():
+            yield from iter_tensors(v)
+    elif isinstance(x, Sequence) and not isinstance(x, (str, bytes)):
+        for v in x:
+            yield from iter_tensors(v)
+
+
+def move_to_device(x, device):
+    """Recursively move a nested batch structure to device."""
+    if torch.is_tensor(x):
+        return x.to(device, non_blocking=True)
+    elif isinstance(x, Mapping):
+        return type(x)({k: move_to_device(v, device) for k, v in x.items()})
+    elif isinstance(x, tuple) and hasattr(x, "_fields"):  # namedtuple
+        return type(x)(*(move_to_device(v, device) for v in x))
+    elif isinstance(x, tuple):
+        return tuple(move_to_device(v, device) for v in x)
+    elif isinstance(x, list):
+        return [move_to_device(v, device) for v in x]
+    else:
+        return x
+
+
+class CUDAPrefetcher:
+    """
+    Wraps a DataLoader and asynchronously preloads the next batch onto CUDA.
+
+    Usage:
+        loader = DataLoader(..., pin_memory=True)
+        loader = CUDAPrefetcher(loader, device="cuda:0")
+
+        for batch in loader:
+            loss = train_step(batch)
+    """
+
+    def __init__(self, loader, device="cuda"):
+        self.loader = loader
+        self.device = torch.device(device)
+
+        if self.device.type != "cuda":
+            raise ValueError(f"CUDAPrefetcher requires a CUDA device, got {self.device}")
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        return _CUDAPrefetcherIterator(self.loader, self.device)
+
+
+class _CUDAPrefetcherIterator:
+    def __init__(self, loader, device):
+        self.loader_iter = iter(loader)
+        self.device = device
+        self.stream = torch.cuda.Stream(device=device)
+        self.next_batch = None
+        self._done = False
+
+        self._preload()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._done and self.next_batch is None:
+            raise StopIteration
+
+        # Wait until the side-stream H2D copy for next_batch is complete.
+        torch.cuda.current_stream(self.device).wait_stream(self.stream)
+
+        batch = self.next_batch
+
+        if batch is None:
+            raise StopIteration
+
+        # Tell the caching allocator that these tensors are used on the
+        # current stream too, not only on the prefetch stream.
+        for t in iter_tensors(batch):
+            if t.device.type == "cuda":
+                t.record_stream(torch.cuda.current_stream(self.device))
+
+        # Start copying the following batch while the caller computes on this one.
+        self._preload()
+
+        return batch
+
+    def _preload(self):
+        try:
+            batch = next(self.loader_iter)
+        except StopIteration:
+            self.next_batch = None
+            self._done = True
+            return
+
+        with torch.cuda.stream(self.stream):
+            self.next_batch = move_to_device(batch, self.device)
+
+
+import os
+import time
+import psutil
+
+def tree_io_counters(root_pid=None):
+    root = psutil.Process(root_pid or os.getpid())
+    procs = [root] + root.children(recursive=True)
+
+    read_bytes = 0
+    write_bytes = 0
+
+    for p in procs:
+        try:
+            io = p.io_counters()
+            read_bytes += io.read_bytes
+            write_bytes += io.write_bytes
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    return read_bytes, write_bytes
+
+
+#
+# Helpers
+#
+
+def get_tensor_stats(x, name: str):
+
+    return {
+        f"Batch/{name}/mean": x.mean().detach().cpu(),
+        f"Batch/{name}/std": x.std().detach().cpu(),
+        f"Batch/{name}/min": x.min().detach().cpu(),
+        f"Batch/{name}/max": x.max().detach().cpu(),
+    }
+
+def get_examples_stats(examples_seen, dt):
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    return {
+        "Runtime/examples_per_second": examples_seen / dt * world_size,
+    }
+
+def get_io_stats(d_read, d_write, dt):
+
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    return {
+        "Proc_tree_io/read_MB_s": d_read / dt / 1e6 * world_size,
+        "Proc_tree_io/write_MB_s": d_write / dt / 1e6 * world_size,
+        "Proc_tree_io/read_MB": d_read / 1e6 * world_size,
+        "Proc_tree_io/write_MB": d_write / 1e6 * world_size,
+    }
+
+class Timer:
+
+    def __init__(self):
+        self.start_time = 0
+        self.elapsed_time = 0
+        self.running = False
+
+    def start(self):
+        if self.running:
+            pass
+        else:
+            self.running = True
+            self.start_time = time.perf_counter()
+
+    def stop(self):
+        if not self.running:
+            pass
+        else:
+            self.elapsed_time += time.perf_counter() - self.start_time
+            self.running = False
+        
+    def elapsed(self):
+        if self.running:
+            self.elapsed_time += time.perf_counter() - self.start_time
+        return self.elapsed_time
+
+    def __str__(self):
+        return f'Timer(elapsed={self.elapsed_time:.2f}s)'
