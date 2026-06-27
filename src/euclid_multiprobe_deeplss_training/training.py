@@ -701,14 +701,22 @@ def train(
     # Checkpoints
     checkpoint_wandb_info = None
     if config.resume_from_checkpoint:
-        step, train_losses, validation_losses = load_checkpoint(
-            config.resume_from_checkpoint,
-            model,
-            optimizer,
-            device,
-            loss_fn,
-        )
-        checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
+        
+        # if checkpoint does not exist, set resume_from_checkpoint to None and start the run from scratch
+        if not Path(config.resume_from_checkpoint).exists():
+            LOGGER.warning(f"Checkpoint file {config.resume_from_checkpoint} does not exist")
+            config.resume_from_checkpoint = None
+        
+        else:
+            step, train_losses, validation_losses = load_checkpoint(
+                config.resume_from_checkpoint,
+                model,
+                optimizer,
+                device,
+                loss_fn,
+            )
+            checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
+
     checkpoint_dir = _prepare_checkpoint_dir(config) if _is_main_process() else None
     _write_reproducibility_config(checkpoint_dir, config)
     _ddp_barrier()
@@ -909,28 +917,32 @@ def train(
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
 
-        if _is_main_process() and checkpoint_dir:
-            final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
-            save_checkpoint(
-                final_checkpoint_path,
-                model,
-                optimizer,
-                step,
-                config,
-                train_losses,
-                validation_losses,
-                loss_fn,
-                active_wandb_info,
+    # save final checkpoint
+    if _is_main_process() and checkpoint_dir:
+        final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
+        save_checkpoint(
+            final_checkpoint_path,
+            model,
+            optimizer,
+            step,
+            config,
+            train_losses,
+            validation_losses,
+            loss_fn,
+            active_wandb_info,
+        )
+        if run is not None:
+            wandb.log(
+                {"Checkpoint/saved": 1, "Checkpoint/path": str(final_checkpoint_path), "step": step},
+                step=step,
             )
-            if run is not None:
-                wandb.log(
-                    {"Checkpoint/saved": 1, "Checkpoint/path": str(final_checkpoint_path), "step": step},
-                    step=step,
-                )
 
+    # finish wandb run
     if run is not None:
         run.finish()
     _ddp_barrier()
+
+    # destroy process group
     if ddp_enabled and dist.is_initialized():
         dist.destroy_process_group()
 
