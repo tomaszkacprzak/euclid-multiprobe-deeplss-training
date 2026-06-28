@@ -665,7 +665,7 @@ def train(
         return loader_training, loader_validation
 
                             
-    loader_training, loader_validation = get_loaders(records_pattern=config.records_pattern, 
+    loader_training, loader_validation = get_loaders(webds_pattern=config.records_pattern, 
                                                      batch_size=config.batch_size, 
                                                      physics_model=physics_model, 
                                                      smoothing_model=smoothing_model, 
