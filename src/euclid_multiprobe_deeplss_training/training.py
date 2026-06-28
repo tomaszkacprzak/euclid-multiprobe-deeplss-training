@@ -48,7 +48,6 @@ class TrainingConfig:
     batch_size: int = 32
     num_epochs: int | None = 1
     max_steps: int | None = None
-    validation_fraction: float = 0.1
     learning_rate: float = 1.0e-3
     num_workers: int = 1
     checkpoint_dir: str | None = None
@@ -99,8 +98,6 @@ class TrainingConfig:
             raise ValueError("batch_size must be positive.")
         if self.num_epochs is None and self.max_steps is None:
             raise ValueError("Set at least one of num_epochs or max_steps.")
-        if not 0.0 <= self.validation_fraction < 1.0:
-            raise ValueError("validation_fraction must be in [0, 1).")
         if self.learning_rate <= 0.0:
             raise ValueError("learning_rate must be positive.")
         if self.num_workers < 0:
@@ -642,6 +639,10 @@ def train(
     if ddp_enabled:
         LOGGER.info(f"DDP enabled: rank={rank} local_rank={local_rank} world_size={world_size}")
 
+    # 
+    # Data loaders
+    #
+
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
                         device=device).to(device)
@@ -657,20 +658,29 @@ def train(
     #                     nside_base=config.forward_model["analysis"]["n_side_down"], 
     #                     nside_lower=[nside_training]*24, 
     #                     operator="mean").to(device)
-                            
-    loader = OntheflyPipeline(config.records_pattern, 
-                              batch_size=config.batch_size, 
-                              physics_model=physics_model, 
-                              smoothing_model=smoothing_model,
-                              num_workers=config.num_workers,
-                              prefetch_factor=1,
-                              device=device)
 
-    # Model 
+    def get_loaders(**kwargs):
+        loader_training = OntheflyPipeline(**kwargs)
+        loader_validation = OntheflyPipeline(**kwargs, validation=True)
+        return loader_training, loader_validation
+
+                            
+    loader_training, loader_validation = get_loaders(records_pattern=config.records_pattern, 
+                                                     batch_size=config.batch_size, 
+                                                     physics_model=physics_model, 
+                                                     smoothing_model=smoothing_model, 
+                                                     num_workers=config.num_workers, 
+                                                     prefetch_factor=1, 
+                                                     device=device)
+
+    # 
+    # Build neural network
+    #
+ 
     model = build_model(config.model_name, 
                     num_channels=physics_model.num_channels,
                     num_targets=physics_model.num_targets,
-                    num_pixels=loader.num_pixels,
+                    num_pixels=loader_training.num_pixels,
                     nside=nside_training,
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
                     )
@@ -688,6 +698,10 @@ def train(
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         loss_fn = DDP(loss_fn, **ddp_kwargs)
     LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss_fn)}')
+
+    # 
+    # Build optimizer
+    #
 
     # Optimizer
     trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
@@ -721,9 +735,13 @@ def train(
     _write_reproducibility_config(checkpoint_dir, config)
     _ddp_barrier()
 
+    # 
+    # Training loop
+    #
+
     # Housekeeping
     # loader_prefetcher = CUDAPrefetcher(loader, device=device)
-    training_batches = _print_initial_model_summary(model, loader, device)
+    training_batches = _print_initial_model_summary(model, loader_training, device)
     run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_examples_seen = 0
@@ -734,7 +752,7 @@ def train(
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
     for _epoch in range(config.num_epochs or 10**12):
 
-        epoch_batches = training_batches if _epoch == 0 else loader
+        epoch_batches = training_batches if _epoch == 0 else loader_training
         # with DeviceTraceMode(only_cpu=True):
         with torch.profiler.record_function("training_loop"):
 
@@ -901,7 +919,7 @@ def train(
             #
 
             validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
-            validation_loss = evaluate(model, loader, loss_fn, device, num_examples=2000, predictions_path=validation_predictions_path)
+            validation_loss = evaluate(model, loader_validation, loss_fn, device, num_examples=2000, predictions_path=validation_predictions_path)
             if validation_loss is not None:
                 validation_losses.append(validation_loss)
                 if run is not None:
