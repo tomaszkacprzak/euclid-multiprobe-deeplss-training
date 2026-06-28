@@ -426,9 +426,9 @@ def _print_initial_model_summary(
     from .modelprofile import _print_model_specification_table, _register_model_specification_hooks
 
     def _print_rank_zero(model, rows):
-
-        rank = dist.get_rank()==0 if dist.is_initialized() else 0
-        if rank == 0:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        global_rank = int(os.environ.get("RANK", "0"))
+        if local_rank == 0 and global_rank == 0:
             _print_model_specification_table(model, rows)
             print()
 
@@ -814,6 +814,8 @@ def train(
                 # grad_scaler.step(optimizer)
                 # grad_scaler.update()
                 optimizer.step()
+
+                global_train_loss = reduce_mean(train_loss)
                 
 
                 # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
@@ -847,7 +849,7 @@ def train(
 
                     wandb.log(
                         {
-                            "Train/loss": train_loss,
+                            "Train/loss": global_train_loss.item(),
                             "step": step,
                             "learning_rate": current_learning_rate,
                             **get_examples_stats(train_examples_seen, train_timer.elapsed()),
@@ -1162,6 +1164,9 @@ class _CUDAPrefetcherIterator:
         with torch.cuda.stream(self.stream):
             self.next_batch = move_to_device(batch, self.device)
 
+#
+# IO helpers
+#
 
 import os
 import time
@@ -1186,7 +1191,7 @@ def tree_io_counters(root_pid=None):
 
 
 #
-# Helpers
+# Logging helpers
 #
 
 def get_tensor_stats(x, name: str):
@@ -1213,6 +1218,10 @@ def get_io_stats(d_read, d_write, dt):
         "Proc_tree_io/read_MB": d_read / 1e6 * world_size,
         "Proc_tree_io/write_MB": d_write / 1e6 * world_size,
     }
+
+#
+# Timer
+# 
 
 class Timer:
 
@@ -1242,3 +1251,16 @@ class Timer:
 
     def __str__(self):
         return f'Timer(elapsed={self.elapsed_time:.2f}s)'
+
+
+#
+# DDP helpers
+# 
+
+def reduce_mean(x: torch.Tensor) -> torch.Tensor:
+
+    x = x.detach().clone()
+    dist.all_reduce(x, op=dist.ReduceOp.SUM)
+    x /= dist.get_world_size()
+
+    return x
