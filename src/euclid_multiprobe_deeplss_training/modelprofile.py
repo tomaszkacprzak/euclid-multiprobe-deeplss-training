@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-import healpy as hp
 
 import torch
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
@@ -50,12 +49,13 @@ def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig
     )
 
     model = build_model(
-        "nested_transformer",
+        config.model_name,
         num_channels=physics_model.num_channels,
         num_targets=physics_model.num_targets,
         num_pixels=loader.num_pixels,
         nside=int(config.forward_model["analysis"]["n_side"]),
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+        model_args=config.model_args,
     ).to(device)
     model.eval()
     LOGGER.info(f"Profiling model: {model.__class__.__name__}")
@@ -261,6 +261,8 @@ def _calculate_num_top_level_tokens(config: TrainingConfig, num_pixels: int) -> 
     Returns:
         The number of top-level tokens.
     """
+
+    import healpy as hp
 
     analysis_config = config.forward_model.get("analysis", {}) if isinstance(config.forward_model, Mapping) else {}
     nside_down = analysis_config.get("n_side_down")

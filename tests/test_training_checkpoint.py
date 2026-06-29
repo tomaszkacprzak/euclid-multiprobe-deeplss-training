@@ -146,8 +146,49 @@ def test_write_reproducibility_config_to_checkpoint_dir(tmp_path) -> None:
     assert saved_config["records_pattern"] == "records/*.tar"
     assert saved_config["checkpoint_dir"] == str(tmp_path / "checkpoints")
     assert saved_config["tag"] == "experiment-a"
+    assert saved_config["model_args"] == {}
     assert saved_config["forward_model"] == {"analysis": {"n_side": 512, "n_side_down": 64}}
     assert saved_config["max_steps"] == 5
+
+
+def test_training_config_accepts_model_args_from_top_level_and_model_section() -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig
+
+    top_level_config = TrainingConfig.from_mapping(
+        {
+            "records_pattern": "records/*.tar",
+            "max_steps": 1,
+            "model_args": {"base_embed_dim": 512, "growth": "128"},
+        }
+    )
+
+    nested_model_config = TrainingConfig.from_mapping(
+        {
+            "records_pattern": "records/*.tar",
+            "max_steps": 1,
+            "model": {"model_args": {"num_heads": 8}},
+        }
+    )
+
+    assert top_level_config.model_args == {"base_embed_dim": 512, "growth": "128"}
+    assert nested_model_config.model_args == {"num_heads": 8}
+
+
+def test_training_config_rejects_non_mapping_model_args() -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig
+
+    with pytest.raises(TypeError, match="model_args must be a mapping"):
+        TrainingConfig.from_mapping(
+            {
+                "records_pattern": "records/*.tar",
+                "max_steps": 1,
+                "model_args": ["base_embed_dim", 512],
+            }
+        )
 
 
 def test_evaluation_predictions_path_uses_run_checkpoint_dir(tmp_path) -> None:
