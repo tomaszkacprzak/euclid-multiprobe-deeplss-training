@@ -42,6 +42,7 @@ class TrainingConfig:
     
     records_pattern: str
     model_name: str = "nested_transformer"
+    model_args: dict[str, Any] = field(default_factory=dict)
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
     loss_function: str = "mse"
@@ -104,6 +105,8 @@ class TrainingConfig:
             raise ValueError("num_workers must be non-negative.")
         if self.checkpoint_every_steps < 0:
             raise ValueError("checkpoint_every_steps must be non-negative.")
+        if not isinstance(self.model_args, Mapping):
+            raise TypeError("model_args must be a mapping.")
 
 
 
@@ -683,6 +686,7 @@ def train(
                     num_pixels=loader_training.num_pixels,
                     nside=nside_training,
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+                    model_args=config.model_args,
                     )
     model.to(device)
     if ddp_enabled:
@@ -936,6 +940,10 @@ def train(
 
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
+
+        LOGGER.info(f'Epoch {_epoch} completed')
+
+    LOGGER.info(f'Training completed with {step} steps')
 
     # save final checkpoint
     if _is_main_process() and checkpoint_dir:
