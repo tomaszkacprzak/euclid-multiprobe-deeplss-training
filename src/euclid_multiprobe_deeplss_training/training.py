@@ -236,6 +236,11 @@ def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | No
     return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step:06d}.h5"
 
 
+def _latest_checkpoint_path(checkpoint_dir: Path) -> Path:
+    """Return the rolling checkpoint path used for restarts and completed runs."""
+    return checkpoint_dir / "checkpoint-latest.pt"
+
+
 def _validate_gradient_flow(model: nn.Module) -> None:
     """Fail fast when backpropagation produced no usable trainable gradients."""
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -893,7 +898,7 @@ def train(
 
                 # very infrequent, checkpoint management
                 if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                    checkpoint_path = checkpoint_dir / f"checkpoint-step-{step}.pt"
+                    checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
                     save_checkpoint(
                         checkpoint_path,
                         model,
@@ -945,11 +950,11 @@ def train(
 
     LOGGER.info(f'Training completed with {step} steps')
 
-    # save final checkpoint
+    # save the latest checkpoint after all epochs/steps complete
     if _is_main_process() and checkpoint_dir:
-        final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
+        latest_checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
         save_checkpoint(
-            final_checkpoint_path,
+            latest_checkpoint_path,
             model,
             optimizer,
             step,
@@ -961,7 +966,7 @@ def train(
         )
         if run is not None:
             wandb.log(
-                {"Checkpoint/saved": 1, "Checkpoint/path": str(final_checkpoint_path), "step": step},
+                {"Checkpoint/saved": 1, "Checkpoint/path": str(latest_checkpoint_path), "step": step},
                 step=step,
             )
 
