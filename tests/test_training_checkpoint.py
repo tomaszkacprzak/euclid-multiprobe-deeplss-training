@@ -122,6 +122,16 @@ def test_prepare_checkpoint_dir_preserves_existing_contents_when_resuming(tmp_pa
     assert existing_checkpoint.read_text(encoding="utf-8") == "keep"
 
 
+
+def test_latest_checkpoint_path_uses_rolling_restart_checkpoint_name(tmp_path) -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import _latest_checkpoint_path
+
+    checkpoint_dir = tmp_path / "checkpoints" / "experiment-a"
+
+    assert _latest_checkpoint_path(checkpoint_dir) == checkpoint_dir / "checkpoint-latest.pt"
+
 def test_write_reproducibility_config_to_checkpoint_dir(tmp_path) -> None:
     pytest.importorskip("torch")
     yaml = pytest.importorskip("yaml")
