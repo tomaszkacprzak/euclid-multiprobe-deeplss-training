@@ -941,6 +941,10 @@ def train(
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
 
+        LOGGER.info(f'Epoch {_epoch} completed')
+
+    LOGGER.info(f'Training completed with {step} steps')
+
     # save final checkpoint
     if _is_main_process() and checkpoint_dir:
         final_checkpoint_path = checkpoint_dir / "checkpoint-final.pt"
