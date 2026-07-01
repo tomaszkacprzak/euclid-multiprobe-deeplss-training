@@ -651,9 +651,12 @@ def train(
     # Data loaders
     #
 
+    # use non-reproducible seed, TODO: fix to reproducible
+    seed = np.random.randint(0, 1000000)
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
-                        device=device).to(device)
+                        device=device,
+                        seed=seed).to(device)
 
     # Downsample all maps to the same nside
     # smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
