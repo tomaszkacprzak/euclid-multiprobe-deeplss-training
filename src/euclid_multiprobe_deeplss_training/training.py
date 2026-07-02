@@ -240,6 +240,10 @@ def _latest_checkpoint_path(checkpoint_dir: Path) -> Path:
     """Return the rolling checkpoint path used for restarts and completed runs."""
     return checkpoint_dir / "checkpoint-latest.pt"
 
+def _step_checkpoint_path(checkpoint_dir: Path, step: int) -> Path:
+    """Return the rolling checkpoint path used for restarts and completed runs."""
+    return checkpoint_dir / f"checkpoint-step-{step:06d}.pt"
+
 
 def _validate_gradient_flow(model: nn.Module) -> None:
     """Fail fast when backpropagation produced no usable trainable gradients."""
@@ -901,18 +905,20 @@ def train(
 
                 # very infrequent, checkpoint management
                 if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                    checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
-                    save_checkpoint(
-                        checkpoint_path,
-                        model,
-                        optimizer,
-                        step,
-                        config,
-                        train_losses,
-                        validation_losses,
-                        loss_fn,
-                        active_wandb_info,
-                    )
+                    checkpoint_path_latest = _latest_checkpoint_path(checkpoint_dir)
+                    checkpoint_path_step = _step_checkpoint_path(checkpoint_dir, step)
+                    for checkpoint_path in [checkpoint_path_latest, checkpoint_path_step]:
+                        save_checkpoint(
+                            checkpoint_path,
+                            model,
+                            optimizer,
+                            step,
+                            config,
+                            train_losses,
+                            validation_losses,
+                            loss_fn,
+                            active_wandb_info,
+                        )
 
                     if run is not None:
                         wandb.log(
