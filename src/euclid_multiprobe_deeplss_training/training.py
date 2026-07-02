@@ -652,7 +652,7 @@ def train(
     #
 
     # use non-reproducible seed, TODO: fix to reproducible
-    seed = np.random.randint(0, 1000000)
+    seed = int(time.time())
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
                         device=device,
