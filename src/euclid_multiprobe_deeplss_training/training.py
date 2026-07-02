@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
+
 import psutil
 import torch
 import torch.distributed as dist
@@ -19,6 +20,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from .plots import parameter_names_from_physics_model, plot_evaluation_file
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
 
@@ -229,11 +231,11 @@ def _save_evaluation_predictions(
         handle.create_dataset("predictions", data=predictions)
 
 
-def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | None:
-    """Return the run-specific HDF5 path for per-step evaluation arrays, if enabled."""
+def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
+    """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
     if config.checkpoint_dir is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step:06d}.h5"
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-epoch-{epoch + 1:04d}.h5"
 
 
 def _latest_checkpoint_path(checkpoint_dir: Path) -> Path:
@@ -943,14 +945,21 @@ def train(
             if validation_loss is not None:
                 validation_losses.append(validation_loss)
                 if run is not None:
-                    wandb.log(
-                        {
-                            "Validation/loss": validation_loss,
-                            "step": step,
-                            "learning_rate": optimizer.param_groups[0]["lr"],
-                        },
-                        step=step,
-                    )
+                    validation_log: dict[str, Any] = {
+                        "Validation/loss": validation_loss,
+                        "step": step,
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                    }
+                    if validation_predictions_path is not None and validation_predictions_path.exists():
+                        fig = plot_evaluation_file(
+                            validation_predictions_path,
+                            parameter_names_from_physics_model(physics_model),
+                        )
+                        validation_log["Validation/targets_vs_predictions"] = wandb.Image(fig)
+                        import matplotlib.pyplot as plt
+
+                        plt.close(fig)
+                    wandb.log(validation_log, step=step)
 
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
