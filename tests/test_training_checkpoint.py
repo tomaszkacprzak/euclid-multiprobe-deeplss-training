@@ -75,9 +75,9 @@ def test_deepsphere_resnet_checkpoint_round_trip(tmp_path) -> None:
     from euclid_multiprobe_deeplss_training.training import TrainingConfig, load_checkpoint, save_checkpoint
 
     batch_size = 2
-    nside = 32
-    num_channels = 1
-    num_targets = 1
+    nside = 128
+    num_channels = 2
+    num_targets = 4
     indices = list(range(12 * nside * nside))
     model_args = {
         "n_filters": 16,
