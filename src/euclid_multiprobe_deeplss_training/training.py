@@ -1303,8 +1303,12 @@ class Timer:
 # 
 
 def reduce_mean(x: torch.Tensor) -> torch.Tensor:
+    """Return ``x`` averaged across ranks, or a detached local copy outside DDP."""
 
     x = x.detach().clone()
+    if not dist.is_available() or not dist.is_initialized():
+        return x
+
     dist.all_reduce(x, op=dist.ReduceOp.SUM)
     x /= dist.get_world_size()
 
