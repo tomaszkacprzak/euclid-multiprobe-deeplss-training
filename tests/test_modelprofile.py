@@ -3,6 +3,58 @@ from __future__ import annotations
 import pytest
 
 
+def test_model_specification_includes_layers_that_create_parameters_during_forward() -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.modelprofile import _register_model_specification_hooks
+
+    class LazyWrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = None
+
+        def forward(self, x):
+            if self.linear is None:
+                self.linear = torch.nn.Linear(x.shape[-1], 2).to(device=x.device, dtype=x.dtype)
+            return self.linear(x)
+
+    model = LazyWrapper()
+    rows, hooks = _register_model_specification_hooks(model)
+    try:
+        model(torch.ones(3, 4))
+    finally:
+        for handle in hooks:
+            handle.remove()
+
+    assert rows == [
+        (
+            "",
+            "LazyWrapper",
+            "(3, 4)",
+            "float32",
+            "(3, 2)",
+            "float32",
+            10,
+        )
+    ]
+
+
+def test_model_specification_omits_parameterless_leaf_modules() -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.modelprofile import _register_model_specification_hooks
+
+    model = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(4, 2))
+    rows, hooks = _register_model_specification_hooks(model)
+    try:
+        model(torch.ones(3, 2, 2))
+    finally:
+        for handle in hooks:
+            handle.remove()
+
+    assert [row[1] for row in rows] == ["Linear"]
+
+
 def test_modelprofile_profiles_nested_transformer_batches(monkeypatch) -> None:
     torch = pytest.importorskip("torch")
 

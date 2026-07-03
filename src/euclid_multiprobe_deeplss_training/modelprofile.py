@@ -69,13 +69,34 @@ def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tu
     module_names = {module: name for name, module in model.named_modules()}
     hooks: list[Any] = []
 
+    lazy_parameter_candidates: set[torch.nn.Module] = set()
+
     def should_summarize(module: torch.nn.Module) -> bool:
         if module is model or isinstance(module, (torch.nn.ModuleList, torch.nn.Sequential)):
             return False
-        return any(parameter.requires_grad for parameter in module.parameters(recurse=False))
+        if any(parameter.requires_grad for parameter in module.parameters(recurse=False)):
+            return True
+
+        # Some layers, including PyTorch Lazy modules and wrappers used by
+        # DeepSphere, create their trainable submodules/parameters during the
+        # first forward pass.  They have no parameters when hooks are registered,
+        # so also hook parameterless leaves and decide whether to print them
+        # after the forward pass has materialized any lazy state.
+        if not any(module.children()):
+            lazy_parameter_candidates.add(module)
+            return True
+        return False
+
+    def trainable_parameters(module: torch.nn.Module) -> int:
+        recurse = module in lazy_parameter_candidates
+        return sum(parameter.numel() for parameter in module.parameters(recurse=recurse) if parameter.requires_grad)
 
     def make_hook(module: torch.nn.Module):
         def hook(_module: torch.nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
+            parameter_count = trainable_parameters(module)
+            if parameter_count == 0:
+                return
+
             rows.append(
                 (
                     module_names.get(module, module.__class__.__name__),
@@ -84,7 +105,7 @@ def _register_model_specification_hooks(model: torch.nn.Module) -> tuple[list[tu
                     _format_tensor_dtypes(inputs),
                     _format_tensor_shapes(output),
                     _format_tensor_dtypes(output),
-                    sum(parameter.numel() for parameter in module.parameters(recurse=False) if parameter.requires_grad),
+                    parameter_count,
                 )
             )
 
