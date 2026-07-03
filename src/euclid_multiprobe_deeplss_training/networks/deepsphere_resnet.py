@@ -6,26 +6,10 @@ convolutions, residual graph-convolution blocks, and a dense regression head.
 """
 
 import numpy as np
-import torch
-from torch import nn
-from torch.nn import functional as F
-
 from deepsphere import HealpyGCNN, healpy_layers
 from deepsphere.utils import extend_indices
-
-
-class LazyLayerNorm(nn.Module):
-    """LayerNorm whose normalized shape is inferred on the first forward pass."""
-
-    def __init__(self):
-        super().__init__()
-        self.norm = None
-
-    def forward(self, x):
-        if self.norm is None:
-            self.norm = nn.LayerNorm(x.shape[1:]).to(device=x.device, dtype=x.dtype)
-        return self.norm(x)
-
+from torch import nn
+from torch.nn import functional as F
 
 
 class ResnetDeepSphereRegressor(HealpyGCNN):
@@ -50,9 +34,12 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
         # before constructing the model. If your supplied indices already satisfy
         # this, the call below returns the same set.
         n_side_out = n_side // (2 ** (downsampling_layers + cheby_layers))
+        if n_side_out < 1:
+            raise ValueError("n_side is too small for the requested downsampling and Chebyshev layers.")
         indices = extend_indices(np.asarray(indices), nside_in=n_side, nside_out=n_side_out)
+        downsampling_factor = n_side // n_side_out
+        output_pixels = np.unique(indices // (downsampling_factor**2)).size
 
-        x_batch = torch.zeros((batch_size, len(indices), n_channels), dtype=torch.float32)
         layers = []
 
         # Downsampling / pseudo-convolution stack.
@@ -79,10 +66,12 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
             )
 
         # Dense regression head: Flatten -> LayerNorm -> Dense(out_features).
-        # Lazy modules infer the flattened feature count on the first forward pass.
+        # All dimensions are derived at construction time so no head components
+        # are created or initialized lazily during forward.
+        flattened_features = int(output_pixels * n_filters)
         layers.append(nn.Flatten())
-        layers.append(LazyLayerNorm())
-        layers.append(nn.LazyLinear(out_features))
+        layers.append(nn.LayerNorm(flattened_features))
+        layers.append(nn.Linear(flattened_features, out_features))
 
         super().__init__(
             nside=n_side,
@@ -102,4 +91,3 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
         #     initial_Fin=n_channels,
         # )
         # return model
-

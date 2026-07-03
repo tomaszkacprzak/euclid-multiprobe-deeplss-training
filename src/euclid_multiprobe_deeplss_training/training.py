@@ -707,6 +707,12 @@ def train(
                     device=device)
     model.to(device)
 
+    # Some models, including DeepSphere's HealpyGCNN layers and lazy PyTorch
+    # heads, register/materialize parameters during the first forward pass.
+    # Do this before wrapping in DDP, building the optimizer, or restoring a
+    # checkpoint so all checkpoint keys are expected by the model state_dict.
+    training_batches = _print_initial_model_summary(model, loader_training, device)
+
     if ddp_enabled:
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         model = DDP(model, **ddp_kwargs)
@@ -763,7 +769,6 @@ def train(
 
     # Housekeeping
     # loader_prefetcher = CUDAPrefetcher(loader, device=device)
-    training_batches = _print_initial_model_summary(model, loader_training, device)
     run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_examples_seen = 0
@@ -1311,5 +1316,4 @@ def reduce_mean(x: torch.Tensor) -> torch.Tensor:
     x /= dist.get_world_size()
 
     return x
-
 
