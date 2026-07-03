@@ -56,7 +56,7 @@ def build_model(model_name: str,
         assert batch_size is not None, "batch_size is required for deepsphere_resnet"
         assert indices is not None, "indices are required for deepsphere_resnet"
 
-        from .resnet import ResnetDeepSphereRegressor
+        from .deepsphere_resnet import ResnetDeepSphereRegressor
         
         # Defaults
         constructor_args = {
