@@ -67,6 +67,78 @@ def test_save_and_load_checkpoint_round_trip(tmp_path) -> None:
     assert torch.equal(loss_fn.bias, saved_loss_bias)
 
 
+def test_deepsphere_resnet_checkpoint_round_trip(tmp_path) -> None:
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("deepsphere")
+
+    from euclid_multiprobe_deeplss_training.networks.builder import build_model
+    from euclid_multiprobe_deeplss_training.training import TrainingConfig, load_checkpoint, save_checkpoint
+
+    batch_size = 2
+    nside = 32
+    num_channels = 1
+    num_targets = 1
+    indices = list(range(12 * nside * nside))
+    model_args = {
+        "n_filters": 16,
+        "downsampling_layers": 3,
+        "cheby_layers": 2,
+        "residual_layers": 4,
+        "poly_degree": 5,
+        "n_neighbors": 20,
+    }
+    build_kwargs = {
+        "model_name": "deepsphere_resnet",
+        "num_channels": num_channels,
+        "num_targets": num_targets,
+        "nside": nside,
+        "nside_down": nside // (2 ** (model_args["downsampling_layers"] + model_args["cheby_layers"])),
+        "num_pixels": len(indices),
+        "batch_size": batch_size,
+        "indices": indices,
+        "model_args": model_args,
+        "device": torch.device("cpu"),
+    }
+
+    torch.manual_seed(1)
+    model = build_model(**build_kwargs)
+    example_batch = torch.randn(batch_size, len(indices), num_channels)
+
+    # DeepSphere's HealpyGCNN and this model's lazy dense head register/materialize
+    # some parameters during the first forward pass.  Materialize before saving and
+    # before loading into a fresh instance, matching how a trained checkpoint is used.
+    expected_output = model(example_batch).detach()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1.0e-3)
+    config = TrainingConfig(
+        records_pattern="records/*.tar",
+        model_name="deepsphere_resnet",
+        model_args=model_args,
+        batch_size=batch_size,
+        max_steps=1,
+    )
+    checkpoint_path = tmp_path / "deepsphere-resnet-checkpoint.pt"
+    save_checkpoint(checkpoint_path, model, optimizer, 1, config, [0.5], [])
+
+    torch.manual_seed(2)
+    restored_model = build_model(**build_kwargs)
+    _ = restored_model(example_batch)
+    restored_optimizer = torch.optim.Adam(restored_model.parameters(), lr=1.0e-3)
+
+    restored_step, restored_train_losses, restored_val_losses = load_checkpoint(
+        checkpoint_path,
+        restored_model,
+        restored_optimizer,
+        torch.device("cpu"),
+    )
+
+    assert restored_step == 1
+    assert restored_train_losses == [0.5]
+    assert restored_val_losses == []
+    torch.testing.assert_close(restored_model(example_batch), expected_output)
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(restored_model.state_dict()[key], value)
+
+
 def test_prepare_checkpoint_dir_uses_tag_and_clears_existing_contents(tmp_path) -> None:
     pytest.importorskip("torch")
 
