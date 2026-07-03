@@ -36,7 +36,7 @@ dependencies = [
   "wandb",
   "cuHPX",
   "torch-harmonics @ git+https://github.com/NVIDIA/torch-harmonics.git",
-  "deepsphere @ git+https://github.com/tomaszkacprzak/deepsphere-pytorch.git",
+  "deepsphere @ git+https://github.com/tomaszkacprzak/deepsphere-cosmo-pytorch.git",
 ]
 
 [project.optional-dependencies]
