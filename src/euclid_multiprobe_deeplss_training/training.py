@@ -707,8 +707,6 @@ def train(
                     device=device)
     model.to(device)
 
-    print_model_device(model)
-
     if ddp_enabled:
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         model = DDP(model, **ddp_kwargs)
