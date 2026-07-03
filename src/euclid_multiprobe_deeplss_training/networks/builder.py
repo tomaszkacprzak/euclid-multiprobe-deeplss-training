@@ -1,4 +1,7 @@
+import torch
 from ..utils.logger import get_logger
+from torch.nn import functional as F
+
 
 LOGGER = get_logger(__file__)
 
@@ -14,11 +17,14 @@ def build_model(model_name: str,
                 num_pixels: int,
                 batch_size: int = None,
                 indices: list[int] = None,
-                model_args: dict | None = None):
+                model_args: dict | None = None,
+                device: torch.device | str | None = None):
 
     if model_name == "nested_transformer":
 
         from .healpix_transformer import HealpixNestedHierarchicalLocalWindowTransformer
+
+        # Defaults
         constructor_args = {
             "base_embed_dim": 256,
             "growth": "128",
@@ -28,7 +34,10 @@ def build_model(model_name: str,
             "global_blocks": 1,
             "mlp_ratio": 4,
         }
+        # Update with model_args
         constructor_args.update(model_args or {})
+        
+        # Build model
         model = HealpixNestedHierarchicalLocalWindowTransformer(
             nside=nside,
             nside_down=nside_down,
@@ -48,14 +57,25 @@ def build_model(model_name: str,
         assert indices is not None, "indices are required for deepsphere_resnet"
 
         from .resnet import ResnetDeepSphereRegressor
+        
+        # Defaults
         constructor_args = {
             "n_side": nside,
             "indices": indices,
             "batch_size": batch_size,
             "n_channels": num_channels,
             "out_features": num_targets,
+            "n_filters": 32,
+            "downsampling_layers": 3,
+            "cheby_layers": 2,
+            "residual_layers": 6,
+            "poly_degree": 5,
+            "n_neighbors": 20,
         }
+        # Update with model_args
         constructor_args.update(model_args or {})
+
+        # Build model
         model = ResnetDeepSphereRegressor(
             **constructor_args,
         )

@@ -35,3 +35,24 @@ def with_forward_model_config(raw_config: Mapping[str, Any], base_dir: Path | No
         path = base_dir / path
     config["forward_model"] = load_forward_model_config(path)
     return config
+
+
+def load_pixel_indices(conf: dict):
+    """Loads the .h5 file that contains the pixel indices associated with the survey like the different patches. That
+    file is generated in notebooks/survey_file_gen/pixel_file.ipynb. If the conf argument is not passed, the default
+    within the directory where this file resides is used.
+
+    Args:
+        conf dict: A dictionary with msfm config.
+
+    Returns:
+        data_vec_pix: data vector pixels including padding in NEST ordering (non-tomographic).
+    """
+
+    import h5py
+    with h5py.File(conf["files"]["pixels"], "r") as f:
+        # pixel indices of padded data vector
+        data_vec_pix = f["data_vec"][:]
+
+
+    return data_vec_pix

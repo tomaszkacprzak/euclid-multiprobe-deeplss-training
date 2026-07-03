@@ -21,7 +21,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from .plots import parameter_names_from_physics_model, plot_evaluation_file
-from .utils.config import load_config, with_forward_model_config
+from .utils.config import load_config, with_forward_model_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -656,6 +656,7 @@ def train(
     # 
     # Data loaders
     #
+    indices_pixels_healpix = load_pixel_indices(config.forward_model)
 
     # use non-reproducible seed, TODO: fix to reproducible
     seed = int(time.time())
@@ -701,8 +702,13 @@ def train(
                     nside=nside_training,
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
                     model_args=config.model_args,
-                    )
+                    batch_size=config.batch_size,
+                    indices=indices_pixels_healpix,
+                    device=device)
     model.to(device)
+
+    print_model_device(model)
+
     if ddp_enabled:
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         model = DDP(model, **ddp_kwargs)
@@ -1250,6 +1256,14 @@ def get_io_stats(d_read, d_write, dt):
         "Proc_tree_io/write_MB": d_write / 1e6 * world_size,
     }
 
+def print_model_device(model):
+    for name, module in model.named_modules():
+        try:
+            device = next(module.parameters()).device
+            print(name or "<root>", device)
+        except StopIteration:
+            print(name or "<root>", "no parameters")
+
 #
 # Timer
 # 
@@ -1295,3 +1309,5 @@ def reduce_mean(x: torch.Tensor) -> torch.Tensor:
     x /= dist.get_world_size()
 
     return x
+
+

@@ -41,10 +41,10 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
         cheby_layers=2, 
         residual_layers=6, 
         poly_degree=5, 
-        n_neighbors=20,
-        activation=F.relu):
-        
+        n_neighbors=20):
 
+        activation = F.relu
+        
         # HealpyGCNN validates that the footprint can be reduced by the layers that
         # downsample. Extend sparse footprints to full NEST parent-pixel groups
         # before constructing the model. If your supplied indices already satisfy
@@ -84,7 +84,7 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
         layers.append(LazyLayerNorm())
         layers.append(nn.LazyLinear(out_features))
 
-        model = HealpyGCNN(
+        super().__init__(
             nside=n_side,
             indices=indices,
             layers=layers,
@@ -92,5 +92,14 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
             max_batch_size=batch_size,
             initial_Fin=n_channels,
         )
-        return model, x_batch
+
+        # model = HealpyGCNN(
+        #     nside=n_side,
+        #     indices=indices,
+        #     layers=layers,
+        #     n_neighbors=n_neighbors,
+        #     max_batch_size=batch_size,
+        #     initial_Fin=n_channels,
+        # )
+        # return model
 
