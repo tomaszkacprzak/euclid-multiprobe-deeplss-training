@@ -99,6 +99,20 @@ def test_train_from_config_loads_forward_model_config(tmp_path, monkeypatch) -> 
     assert captured["config"]["forward_model"] == {"survey": "euclid", "params": {"omega_m": 0.3}}
 
 
+def test_reduce_mean_without_initialized_process_group_returns_local_copy() -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training import training
+
+    value = torch.tensor(3.5, requires_grad=True)
+
+    reduced = training.reduce_mean(value)
+
+    assert reduced.item() == pytest.approx(3.5)
+    assert reduced is not value
+    assert not reduced.requires_grad
+
+
 def test_train_passes_forward_model_to_onthefly_pipeline(monkeypatch) -> None:
     torch = pytest.importorskip("torch")
     pytest.importorskip("wandb")
