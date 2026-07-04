@@ -77,33 +77,44 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     ell_max = lmax - 1
     lmin = 0
 
-    rng = np.random.default_rng(1234)
     alm_size = hp.Alm.getsize(ell_max, mmax=ell_max)
     input_t_alm = np.zeros(alm_size, dtype=np.complex128)
-    expected_e_alm_healpy = np.zeros(alm_size, dtype=np.complex128)
-    expected_b_alm_healpy = np.zeros(alm_size, dtype=np.complex128)
 
-    for ell in range(lmin, ell_max + 1):
-        for emm in range(ell + 1):
-            idx = hp.Alm.getidx(ell_max, ell, emm)
-            expected_e_alm_healpy[idx] = rng.normal(scale=1.0e-4) + 1j * rng.normal(scale=1.0e-4)
-            expected_b_alm_healpy[idx] = rng.normal(scale=5.0e-5) + 1j * rng.normal(scale=5.0e-5)
-            if emm == 0:
-                expected_e_alm_healpy[idx] = expected_e_alm_healpy[idx].real + 0j
-                expected_b_alm_healpy[idx] = expected_b_alm_healpy[idx].real + 0j
+    ell = np.arange(lmax, dtype=np.float64)
+    input_ee = np.zeros(lmax, dtype=np.float64)
+    input_bb = np.zeros(lmax, dtype=np.float64)
+    ell_ge_2 = ell >= 2
+    input_ee[ell_ge_2] = 2.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
+    input_bb[ell_ge_2] = 1.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
 
-    _, q_map_ring, u_map_ring = hp.alm2map(
-        [input_t_alm, expected_e_alm_healpy, expected_b_alm_healpy],
-        nside=nside,
-        lmax=ell_max,
-        pol=True,
-        verbose=False,
-    )
+    np.random.seed(1234)
+    q_maps_nest = np.empty((batch_size, hp.nside2npix(nside), num_channels), dtype=np.float64)
+    u_maps_nest = np.empty_like(q_maps_nest)
+    expected_e_alm_healpy = np.empty((batch_size, num_channels, alm_size), dtype=np.complex128)
+    expected_b_alm_healpy = np.empty_like(expected_e_alm_healpy)
 
-    q_map_nest = hp.reorder(q_map_ring, r2n=True)
-    u_map_nest = hp.reorder(u_map_ring, r2n=True)
-    g1 = torch.as_tensor(q_map_nest, device="cuda", dtype=torch.float64).reshape(batch_size, -1, num_channels)
-    g2 = torch.as_tensor(u_map_nest, device="cuda", dtype=torch.float64).reshape(batch_size, -1, num_channels)
+    for batch_idx in range(batch_size):
+        for channel_idx in range(num_channels):
+            e_map_ring = hp.synfast(input_ee, nside=nside, lmax=ell_max, pol=False, new=True, verbose=False)
+            b_map_ring = hp.synfast(input_bb, nside=nside, lmax=ell_max, pol=False, new=True, verbose=False)
+
+            e_alm = hp.map2alm(e_map_ring, lmax=ell_max, pol=False)
+            b_alm = hp.map2alm(b_map_ring, lmax=ell_max, pol=False)
+            expected_e_alm_healpy[batch_idx, channel_idx] = e_alm
+            expected_b_alm_healpy[batch_idx, channel_idx] = b_alm
+
+            _, q_map_ring, u_map_ring = hp.alm2map(
+                [input_t_alm, e_alm, b_alm],
+                nside=nside,
+                lmax=ell_max,
+                pol=True,
+                verbose=False,
+            )
+            q_maps_nest[batch_idx, :, channel_idx] = hp.reorder(q_map_ring, r2n=True)
+            u_maps_nest[batch_idx, :, channel_idx] = hp.reorder(u_map_ring, r2n=True)
+
+    g1 = torch.as_tensor(q_maps_nest, device="cuda", dtype=torch.float64)
+    g2 = torch.as_tensor(u_maps_nest, device="cuda", dtype=torch.float64)
 
     shear_to_eb = ShearToEBMode(
         batch_size=batch_size,
@@ -122,18 +133,15 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     # from an (lmax, mmax) grid, unlike healpy's compact m-major alm array.
     ell_indices, m_indices = np.nonzero(np.arange(mmax)[None, :] <= np.arange(lmax)[:, None])
     mode_mask = ell_indices >= lmin
-    expected_e_flat = np.asarray(
-        [expected_e_alm_healpy[hp.Alm.getidx(ell_max, int(ell), int(emm))] for ell, emm in zip(ell_indices, m_indices, strict=True)]
-    )
-    expected_b_flat = np.asarray(
-        [expected_b_alm_healpy[hp.Alm.getidx(ell_max, int(ell), int(emm))] for ell, emm in zip(ell_indices, m_indices, strict=True)]
-    )
+    healpy_indices = [hp.Alm.getidx(ell_max, int(ell), int(emm)) for ell, emm in zip(ell_indices, m_indices, strict=True)]
+    expected_e_flat = expected_e_alm_healpy[:, :, healpy_indices]
+    expected_b_flat = expected_b_alm_healpy[:, :, healpy_indices]
 
-    expected_e = torch.as_tensor(expected_e_flat[mode_mask], device="cuda", dtype=torch.complex128).reshape(
-        batch_size, -1, num_channels
+    expected_e = torch.as_tensor(
+        expected_e_flat[:, :, mode_mask].transpose(0, 2, 1), device="cuda", dtype=torch.complex128
     )
-    expected_b = torch.as_tensor(expected_b_flat[mode_mask], device="cuda", dtype=torch.complex128).reshape(
-        batch_size, -1, num_channels
+    expected_b = torch.as_tensor(
+        expected_b_flat[:, :, mode_mask].transpose(0, 2, 1), device="cuda", dtype=torch.complex128
     )
     selected_mode_indices = torch.as_tensor(np.nonzero(mode_mask)[0], device="cuda")
     actual_e_alm = actual_e_alm.index_select(1, selected_mode_indices)
