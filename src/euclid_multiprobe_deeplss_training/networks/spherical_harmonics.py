@@ -60,6 +60,7 @@ class SphCuHpx(nn.Module):
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
+        sht_iter: int = 3,
     ):
         super().__init__()
 
@@ -77,6 +78,9 @@ class SphCuHpx(nn.Module):
         self.nside = int(nside)
         self.npix = 12 * self.nside * self.nside
         self.input_order = input_order
+        self.sht_iter = int(sht_iter)
+        if self.sht_iter < 0:
+            raise ValueError("sht_iter must be non-negative.")
 
         # cuHPX convention: lmax is the number of ell rows, not inclusive ell_max.
         # Default ell_max = 3*nside - 1 -> num_ells = 3*nside.
@@ -159,6 +163,16 @@ class SphCuHpx(nn.Module):
         cl_den = 2.0 * ell + 1.0
         ell_ge_2 = ell >= 2.0
 
+        # cuHPX stores coefficients with an m-dependent longitudinal phase
+        # relative to the HEALPix/healpy alm convention used by downstream
+        # shear products.  Scalar power spectra are phase-invariant, but
+        # returning complex E/B modes requires converting the phase explicitly.
+        healpy_m_phase = torch.where(
+            (emm.to(torch.long) % 2) == 0,
+            torch.full_like(emm, -1.0),
+            torch.ones_like(emm),
+        )
+
         self.register_buffer("ell", ell, persistent=False)
         self.register_buffer("m", emm, persistent=False)
         self.register_buffer("ell_lm", ell_lm, persistent=False)
@@ -169,6 +183,7 @@ class SphCuHpx(nn.Module):
         self.register_buffer("cl_m_weight", cl_m_weight, persistent=False)
         self.register_buffer("cl_den", cl_den, persistent=False)
         self.register_buffer("ell_ge_2", ell_ge_2, persistent=False)
+        self.register_buffer("healpy_m_phase", healpy_m_phase, persistent=False)
 
     def _register_ring_geometry_buffers(self) -> None:
         theta = self._healpix_ring_theta(self.nside)
@@ -252,6 +267,20 @@ class SphCuHpx(nn.Module):
             return cuhpx_remap.nest2ring_batch(x, self.nside, x.size(-1))
 
         return cuhpx.nest2ring(x, self.nside)
+
+    def _sht_analysis(self, maps: torch.Tensor) -> torch.Tensor:
+        """Return scalar alm coefficients with healpy-style iterative refinement.
+
+        HEALPix quadrature is not exact at finite nside.  healpy.map2alm
+        compensates by default with three residual-correction iterations; doing
+        the same here prevents low-m leakage from dominating the spin-lowered
+        E/B modes.
+        """
+        alm = self.sht(maps)
+        for _ in range(self.sht_iter):
+            residual = maps - self.isht(alm).real
+            alm = alm + self.sht(residual.contiguous())
+        return alm
 
     def _sin_theta_dtheta_alm(self, alm: torch.Tensor) -> torch.Tensor:
         """
@@ -411,14 +440,14 @@ class SphCuHpx(nn.Module):
         if self.input_order == "nest":
             g = self._nest_to_ring_last_axis(g)
 
-        alm_g = self.sht(g)                        # (B, C, 2, L, M)
+        alm_g = self._sht_analysis(g)              # (B, C, 2, L, M)
         dr, di = self._dr_di_from_scalar_alm(alm_g)
 
         x_e_map = dr[:, :, 0, :] + di[:, :, 1, :]
         x_b_map = dr[:, :, 1, :] - di[:, :, 0, :]
         x_maps = torch.stack((x_e_map, x_b_map), dim=2).contiguous()
 
-        return self.sht(x_maps)                    # (B, C, 2, L, M)
+        return self._sht_analysis(x_maps)          # (B, C, 2, L, M)
 
 
 class AngularPowerSpectrum(SphCuHpx):
@@ -448,6 +477,7 @@ class AngularPowerSpectrum(SphCuHpx):
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
+        sht_iter: int = 3,
         return_stacked: bool = False,
     ):
         super().__init__(
@@ -458,6 +488,7 @@ class AngularPowerSpectrum(SphCuHpx):
             quad_weights=quad_weights,
             norm=norm,
             csphase=csphase,
+            sht_iter=sht_iter,
         )
         self.return_stacked = bool(return_stacked)
 
@@ -510,6 +541,7 @@ class ShearToEBMode(SphCuHpx):
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
+        sht_iter: int = 3,
     ):
         super().__init__(
             nside=nside,
@@ -521,6 +553,7 @@ class ShearToEBMode(SphCuHpx):
             quad_weights=quad_weights,
             norm=norm,
             csphase=csphase,
+            sht_iter=sht_iter,
         )
 
     def forward(self, g1: torch.Tensor, g2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -535,6 +568,12 @@ class ShearToEBMode(SphCuHpx):
 
         ell_ge_2 = self.ell_ge_2.to(device=eb_alm.device).view(1, 1, 1, self.lmax, 1)
         eb_alm = torch.where(ell_ge_2, eb_alm, torch.zeros_like(eb_alm))
+
+        # Convert from cuHPX's internal complex-alm phase to the
+        # HEALPix/healpy phase expected by callers. Without this, modes with
+        # even m have the opposite sign while odd m appear to agree.
+        m_phase = self.healpy_m_phase.to(device=eb_alm.device, dtype=self._real_dtype_of(eb_alm))
+        eb_alm = eb_alm * m_phase.view(1, 1, 1, 1, self.mmax)
 
         ell_idx = self.alm_ell_indices.to(device=eb_alm.device)
         m_idx = self.alm_m_indices.to(device=eb_alm.device)
