@@ -773,6 +773,9 @@ def train(
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_examples_seen = 0
     train_timer = Timer()
+    timer_batch_prep = Timer()
+    timer_model_update = Timer()
+
     # grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
