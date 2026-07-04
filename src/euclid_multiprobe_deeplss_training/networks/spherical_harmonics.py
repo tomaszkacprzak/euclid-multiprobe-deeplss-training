@@ -13,10 +13,12 @@ except Exception:
     cuhpx_remap = None
 
 
-class AngularPowerSpectrum(nn.Module):
-    """
-    Full-sky E/B power spectrum of a spin-2 shear field g = g1 + i g2,
-    implemented using only scalar spherical-harmonic transforms.
+class SphCuHpx(nn.Module):
+    """Shared cuHPX spherical-harmonic support for spin-2 shear modules.
+
+    The base class owns all common dimensions, HEALPix ordering metadata,
+    cuHPX SHT/iSHT operators, spectral buffers, ring-geometry buffers, and
+    flattened alm indexing used by the concrete modules.
 
     Public input layout
     -------------------
@@ -52,21 +54,29 @@ class AngularPowerSpectrum(nn.Module):
         lmax: int | None = None,
         mmax: int | None = None,
         *,
+        batch_size: int | None = None,
+        num_channels: int | None = None,
         input_order: Literal["nest", "ring"] = "nest",
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
-        return_stacked: bool = False,
     ):
         super().__init__()
 
         if nside <= 0 or (nside & (nside - 1)) != 0:
             raise ValueError("nside must be a positive power of two.")
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be positive when provided.")
+        if num_channels is not None and num_channels <= 0:
+            raise ValueError("num_channels must be positive when provided.")
+        if input_order not in ("nest", "ring"):
+            raise ValueError("input_order must be either 'nest' or 'ring'.")
 
+        self.batch_size = int(batch_size) if batch_size is not None else None
+        self.num_channels = int(num_channels) if num_channels is not None else None
         self.nside = int(nside)
         self.npix = 12 * self.nside * self.nside
         self.input_order = input_order
-        self.return_stacked = bool(return_stacked)
 
         # cuHPX convention: lmax is the number of ell rows, not inclusive ell_max.
         # Default ell_max = 3*nside - 1 -> num_ells = 3*nside.
@@ -82,11 +92,9 @@ class AngularPowerSpectrum(nn.Module):
                 "This implementation assumes mmax <= lmax. "
                 "Use mmax=lmax for the full m range."
             )
-        if input_order not in ("nest", "ring"):
-            raise ValueError("input_order must be either 'nest' or 'ring'.")
 
         # cuHPX scalar transforms. cuHPX's README shows SHTCUDA/iSHTCUDA usage
-        # with lmax and mmax passed at construction. 
+        # with lmax and mmax passed at construction.
         self.sht = SHTCUDA(
             self.nside,
             lmax=self.lmax,
@@ -106,6 +114,7 @@ class AngularPowerSpectrum(nn.Module):
 
         self._register_spectral_buffers()
         self._register_ring_geometry_buffers()
+        self._register_alm_index_buffers()
 
     def _register_spectral_buffers(self) -> None:
         L = self.lmax
@@ -365,6 +374,93 @@ class AngularPowerSpectrum(nn.Module):
 
         return torch.where(ell_ge_2, cl, torch.zeros_like(cl))
 
+
+    def _register_alm_index_buffers(self) -> None:
+        valid_indices = torch.nonzero(self.valid_lm, as_tuple=False)
+        self.register_buffer("alm_ell_indices", valid_indices[:, 0], persistent=False)
+        self.register_buffer("alm_m_indices", valid_indices[:, 1], persistent=False)
+        self.num_alm = int(valid_indices.size(0))
+
+    def _validate_shear_inputs(self, g1: torch.Tensor, g2: torch.Tensor) -> None:
+        if g1.shape != g2.shape:
+            raise ValueError(f"g1 and g2 must have the same shape, got {g1.shape} and {g2.shape}.")
+        if g1.ndim != 3:
+            raise ValueError("g1 and g2 must have shape (batch_size, num_pix, num_channels).")
+        if g1.shape[1] != self.npix:
+            raise ValueError(
+                f"Expected num_pix={self.npix} for nside={self.nside}, "
+                f"got num_pix={g1.shape[1]}."
+            )
+        if self.batch_size is not None and g1.shape[0] != self.batch_size:
+            raise ValueError(f"Expected batch_size={self.batch_size}, got {g1.shape[0]}.")
+        if self.num_channels is not None and g1.shape[2] != self.num_channels:
+            raise ValueError(f"Expected num_channels={self.num_channels}, got {g1.shape[2]}.")
+        if not g1.is_cuda or not g2.is_cuda:
+            raise RuntimeError("cuHPX SHTCUDA requires CUDA tensors.")
+        if g1.dtype not in (torch.float32, torch.float64):
+            raise TypeError("g1 and g2 must be float32 or float64 tensors.")
+        if g2.dtype != g1.dtype:
+            raise TypeError("g1 and g2 must have the same dtype.")
+
+    def _shear_to_lowered_eb_alm(self, g1: torch.Tensor, g2: torch.Tensor) -> torch.Tensor:
+        self._validate_shear_inputs(g1, g2)
+
+        g = torch.stack((g1, g2), dim=-1)          # (B, Npix, C, 2)
+        g = g.permute(0, 2, 3, 1).contiguous()     # (B, C, 2, Npix)
+
+        if self.input_order == "nest":
+            g = self._nest_to_ring_last_axis(g)
+
+        alm_g = self.sht(g)                        # (B, C, 2, L, M)
+        dr, di = self._dr_di_from_scalar_alm(alm_g)
+
+        x_e_map = dr[:, :, 0, :] + di[:, :, 1, :]
+        x_b_map = dr[:, :, 1, :] - di[:, :, 0, :]
+        x_maps = torch.stack((x_e_map, x_b_map), dim=2).contiguous()
+
+        return self.sht(x_maps)                    # (B, C, 2, L, M)
+
+
+class AngularPowerSpectrum(SphCuHpx):
+    """
+    Full-sky E/B power spectrum of a spin-2 shear field g = g1 + i g2,
+    implemented using only scalar spherical-harmonic transforms.
+
+    Public input layout
+    -------------------
+    g1, g2 : torch.Tensor
+        Shape (batch_size, num_pix, num_channels), in HEALPix NESTED order
+        by default.
+
+    Output
+    ------
+    cl_ee, cl_bb : torch.Tensor
+        Each has shape (batch_size, num_ells, num_channels).
+    """
+
+    def __init__(
+        self,
+        nside: int,
+        lmax: int | None = None,
+        mmax: int | None = None,
+        *,
+        input_order: Literal["nest", "ring"] = "nest",
+        quad_weights: str = "ring",
+        norm: str = "ortho",
+        csphase: bool = True,
+        return_stacked: bool = False,
+    ):
+        super().__init__(
+            nside=nside,
+            lmax=lmax,
+            mmax=mmax,
+            input_order=input_order,
+            quad_weights=quad_weights,
+            norm=norm,
+            csphase=csphase,
+        )
+        self.return_stacked = bool(return_stacked)
+
     def forward(
         self,
         g1: torch.Tensor,
@@ -385,54 +481,7 @@ class AngularPowerSpectrum(nn.Module):
             cl_eb_stack with shape (batch_size, 2, lmax, num_channels),
             where index 0 is EE and index 1 is BB.
         """
-        if g1.shape != g2.shape:
-            raise ValueError(f"g1 and g2 must have the same shape, got {g1.shape} and {g2.shape}.")
-        if g1.ndim != 3:
-            raise ValueError(
-                "g1 and g2 must have shape (batch_size, num_pix, num_channels)."
-            )
-        if g1.shape[1] != self.npix:
-            raise ValueError(
-                f"Expected num_pix={self.npix} for nside={self.nside}, "
-                f"got num_pix={g1.shape[1]}."
-            )
-        if not g1.is_cuda or not g2.is_cuda:
-            raise RuntimeError("cuHPX SHTCUDA requires CUDA tensors.")
-        if g1.dtype not in (torch.float32, torch.float64):
-            raise TypeError("g1 and g2 must be float32 or float64 tensors.")
-        if g2.dtype != g1.dtype:
-            raise TypeError("g1 and g2 must have the same dtype.")
-
-        # Public input:
-        #   g1, g2: (B, Npix, C)
-        #
-        # Internal cuHPX layout:
-        #   g: (B, C, component, Npix)
-        #
-        # component 0 = g1 = Q-like component
-        # component 1 = g2 = U-like component
-        g = torch.stack((g1, g2), dim=-1)          # (B, Npix, C, 2)
-        g = g.permute(0, 2, 3, 1).contiguous()     # (B, C, 2, Npix)
-
-        if self.input_order == "nest":
-            g = self._nest_to_ring_last_axis(g)
-        # else already RING
-
-        # Scalar alm of g1 and g2, no spin transform.
-        alm_g = self.sht(g)                        # (B, C, 2, L, M)
-
-        # Build D_R and D_I scalar maps for each component.
-        dr, di = self._dr_di_from_scalar_alm(alm_g)  # each (B, C, 2, Npix)
-
-        # X_E = D_R g1 + D_I g2
-        # X_B = D_R g2 - D_I g1
-        x_e_map = dr[:, :, 0, :] + di[:, :, 1, :]
-        x_b_map = dr[:, :, 1, :] - di[:, :, 0, :]
-
-        x_maps = torch.stack((x_e_map, x_b_map), dim=2).contiguous()  # (B, C, 2, Npix)
-
-        # Scalar alm of the spin-lowered E/B scalar maps.
-        lowered_alm = self.sht(x_maps)              # (B, C, 2, L, M)
+        lowered_alm = self._shear_to_lowered_eb_alm(g1, g2)
 
         # Convert x_lm to C_ell^EE and C_ell^BB.
         cl = self._lowered_alm_to_cl(lowered_alm)   # (B, C, 2, L)
@@ -446,33 +495,8 @@ class AngularPowerSpectrum(nn.Module):
         return cl_ee, cl_bb
 
 
-class ShearToEBMode(nn.Module):
-    """
-    Convert a spin-2 shear field into flattened E- and B-mode alm coefficients.
-
-    Parameters
-    ----------
-    batch_size, nside, num_channels, lmax, mmax:
-        Expected input batch size, HEALPix nside, channel count, and cuHPX
-        harmonic bandlimits.  As in :class:`AngularPowerSpectrum`, ``lmax``
-        and ``mmax`` are counts, not inclusive maxima: ell runs from
-        ``0`` to ``lmax - 1`` and m runs from ``0`` to ``mmax - 1``.
-
-    Inputs
-    ------
-    g1, g2:
-        CUDA tensors with shape ``(batch_size, 12 * nside**2, num_channels)``
-        in HEALPix NESTED order.
-
-    Returns
-    -------
-    e_alm, b_alm:
-        Complex tensors containing the valid m >= 0 spherical-harmonic
-        coefficients for the E- and B-mode maps.  Each tensor has shape
-        ``(batch_size, num_alm, num_channels)``, where ``num_alm`` is the
-        number of valid ``(ell, m)`` pairs satisfying ``0 <= ell < lmax``,
-        ``0 <= m < mmax``, and ``m <= ell``.
-    """
+class ShearToEBMode(SphCuHpx):
+    """Convert a spin-2 shear field into flattened E- and B-mode alm coefficients."""
 
     def __init__(
         self,
@@ -481,54 +505,27 @@ class ShearToEBMode(nn.Module):
         num_channels: int,
         lmax: int,
         mmax: int,
+        *,
+        input_order: Literal["nest", "ring"] = "nest",
+        quad_weights: str = "ring",
+        norm: str = "ortho",
+        csphase: bool = True,
     ):
-
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive.")
-        if num_channels <= 0:
-            raise ValueError("num_channels must be positive.")
-
-        self.batch_size = int(batch_size)
-        self.num_channels = int(num_channels)
-        self.nside = int(nside)
-        self.lmax = int(lmax)
-        self.mmax = int(mmax)
-        self.npix = 12 * nside**2
-
-        valid_indices = torch.nonzero(self.valid_lm, as_tuple=False)
-        self.register_buffer("alm_ell_indices", valid_indices[:, 0], persistent=False)
-        self.register_buffer("alm_m_indices", valid_indices[:, 1], persistent=False)
-        self.num_alm = int(valid_indices.size(0))
-
-    def _validate_shear_inputs(self, g1: torch.Tensor, g2: torch.Tensor) -> None:
-        if g1.shape != g2.shape:
-            raise ValueError(f"g1 and g2 must have the same shape, got {g1.shape} and {g2.shape}.")
-        expected_shape = (self.batch_size, self.npix, self.num_channels)
-        if tuple(g1.shape) != expected_shape:
-            raise ValueError(f"g1 and g2 must have shape {expected_shape}, got {tuple(g1.shape)}.")
-        if not g1.is_cuda or not g2.is_cuda:
-            raise RuntimeError("cuHPX SHTCUDA requires CUDA tensors.")
-        if g1.dtype not in (torch.float32, torch.float64):
-            raise TypeError("g1 and g2 must be float32 or float64 tensors.")
-        if g2.dtype != g1.dtype:
-            raise TypeError("g1 and g2 must have the same dtype.")
+        super().__init__(
+            nside=nside,
+            lmax=lmax,
+            mmax=mmax,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            input_order=input_order,
+            quad_weights=quad_weights,
+            norm=norm,
+            csphase=csphase,
+        )
 
     def forward(self, g1: torch.Tensor, g2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return flattened E- and B-mode alm tensors for ``g1`` and ``g2``."""
-        self._validate_shear_inputs(g1, g2)
-
-        g = torch.stack((g1, g2), dim=-1)          # (B, Npix, C, 2)
-        g = g.permute(0, 2, 3, 1).contiguous()     # (B, C, 2, Npix)
-        g = self._nest_to_ring_last_axis(g)
-
-        alm_g = self.sht(g)                        # (B, C, 2, L, M)
-        dr, di = self._dr_di_from_scalar_alm(alm_g)
-
-        x_e_map = dr[:, :, 0, :] + di[:, :, 1, :]
-        x_b_map = dr[:, :, 1, :] - di[:, :, 0, :]
-        x_maps = torch.stack((x_e_map, x_b_map), dim=2).contiguous()
-
-        lowered_alm = self.sht(x_maps)             # (B, C, 2, L, M)
+        lowered_alm = self._shear_to_lowered_eb_alm(g1, g2)
 
         spin2_norm = torch.sqrt(
             self.spin2_norm2.to(device=lowered_alm.device, dtype=self._real_dtype_of(lowered_alm))
