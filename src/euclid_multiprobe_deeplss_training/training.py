@@ -701,7 +701,7 @@ def train(
                     num_pixels=loader_training.num_pixels,
                     nside=nside_training,
                     nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                    model_args=config.model_args,
+                    model_args=config.model_args if hasattr(config, "model_args") else {},
                     batch_size=config.batch_size,
                     indices=indices_pixels_healpix,
                     device=device)
@@ -719,8 +719,14 @@ def train(
 
     LOGGER.info(f'Model: {config.model_name}\n' + str(_unwrap_parallel_module(model)) + '\n')    
 
+    #
     # Loss function 
-    loss_fn = build_loss(config.loss_function, num_targets=physics_model.num_targets)
+    #
+
+    loss_fn = build_loss(config.loss_function, 
+                    num_targets=physics_model.num_targets, 
+                    loss_args=config.loss_args if hasattr(config, "loss_args") else {})
+
     loss_fn = loss_fn.to(device)
     if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}

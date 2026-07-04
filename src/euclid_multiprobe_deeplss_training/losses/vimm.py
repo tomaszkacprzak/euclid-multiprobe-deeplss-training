@@ -44,9 +44,9 @@ class FullCovMixtureDensityRegressor(nn.Module):
         self,
         x_dim: int,
         y_dim: int,
-        hidden_dim: int = 64,
+        hidden_dim: int = 128,
         n_components: int = 5,
-        min_scale: float = 1e-3,
+        min_scale: float = 1e-6,
     ):
         super().__init__()
 
