@@ -12,7 +12,7 @@ def test_angular_power_spectrum_matches_healpy_spin2_synfast() -> None:
     if not torch.cuda.is_available():
         pytest.skip("AngularPowerSpectrum requires CUDA tensors via cuHPX SHTCUDA.")
 
-    from euclid_multiprobe_deeplss_training.networks.angular_power_spectra import AngularPowerSpectrum
+    from euclid_multiprobe_deeplss_training.networks.spherical_harmonics import AngularPowerSpectrum
 
     nside = 128
     lmax = 3 * nside
