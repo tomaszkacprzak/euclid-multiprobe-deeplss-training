@@ -57,3 +57,107 @@ def test_angular_power_spectrum_matches_healpy_spin2_synfast() -> None:
     assert actual_bb.shape == (1, lmax, 1)
     torch.testing.assert_close(actual_ee[0, lmin:, 0], expected_ee[lmin:], rtol=1.0e-2, atol=1.0e-6)
     torch.testing.assert_close(actual_bb[0, lmin:, 0], expected_bb[lmin:], rtol=1.0e-2, atol=1.0e-6)
+
+def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
+    np = pytest.importorskip("numpy")
+    hp = pytest.importorskip("healpy")
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("cuhpx")
+
+    if not torch.cuda.is_available():
+        pytest.skip("ShearToEBMode requires CUDA tensors via cuHPX SHTCUDA.")
+
+    from euclid_multiprobe_deeplss_training.networks.spherical_harmonics import ShearToEBMode
+
+    batch_size = 4
+    nside = 32
+    num_channels = 2
+    lmax = 2 * nside
+    mmax = lmax
+    ell_max = lmax - 1
+    lmin = 0
+
+    rng = np.random.default_rng(1234)
+    alm_size = hp.Alm.getsize(ell_max, mmax=ell_max)
+    input_t_alm = np.zeros(alm_size, dtype=np.complex128)
+    expected_e_alm_healpy = np.zeros(alm_size, dtype=np.complex128)
+    expected_b_alm_healpy = np.zeros(alm_size, dtype=np.complex128)
+
+    for ell in range(lmin, ell_max + 1):
+        for emm in range(ell + 1):
+            idx = hp.Alm.getidx(ell_max, ell, emm)
+            expected_e_alm_healpy[idx] = rng.normal(scale=1.0e-4) + 1j * rng.normal(scale=1.0e-4)
+            expected_b_alm_healpy[idx] = rng.normal(scale=5.0e-5) + 1j * rng.normal(scale=5.0e-5)
+            if emm == 0:
+                expected_e_alm_healpy[idx] = expected_e_alm_healpy[idx].real + 0j
+                expected_b_alm_healpy[idx] = expected_b_alm_healpy[idx].real + 0j
+
+    _, q_map_ring, u_map_ring = hp.alm2map(
+        [input_t_alm, expected_e_alm_healpy, expected_b_alm_healpy],
+        nside=nside,
+        lmax=ell_max,
+        pol=True,
+        verbose=False,
+    )
+
+    q_map_nest = hp.reorder(q_map_ring, r2n=True)
+    u_map_nest = hp.reorder(u_map_ring, r2n=True)
+    g1 = torch.as_tensor(q_map_nest, device="cuda", dtype=torch.float64).reshape(batch_size, -1, num_channels)
+    g2 = torch.as_tensor(u_map_nest, device="cuda", dtype=torch.float64).reshape(batch_size, -1, num_channels)
+
+    shear_to_eb = ShearToEBMode(
+        batch_size=batch_size,
+        nside=nside,
+        num_channels=num_channels,
+        lmax=lmax,
+        mmax=mmax,
+    ).to("cuda")
+
+    print("g1.shape = ", g1.shape)
+    print("g2.shape = ", g2.shape)
+
+    actual_e_alm, actual_b_alm = shear_to_eb(g1, g2)
+
+    # ShearToEBMode flattens valid coefficients in row-major (ell, m) order
+    # from an (lmax, mmax) grid, unlike healpy's compact m-major alm array.
+    ell_indices, m_indices = np.nonzero(np.arange(mmax)[None, :] <= np.arange(lmax)[:, None])
+    mode_mask = ell_indices >= lmin
+    expected_e_flat = np.asarray(
+        [expected_e_alm_healpy[hp.Alm.getidx(ell_max, int(ell), int(emm))] for ell, emm in zip(ell_indices, m_indices, strict=True)]
+    )
+    expected_b_flat = np.asarray(
+        [expected_b_alm_healpy[hp.Alm.getidx(ell_max, int(ell), int(emm))] for ell, emm in zip(ell_indices, m_indices, strict=True)]
+    )
+
+    expected_e = torch.as_tensor(expected_e_flat[mode_mask], device="cuda", dtype=torch.complex128).reshape(
+        batch_size, -1, num_channels
+    )
+    expected_b = torch.as_tensor(expected_b_flat[mode_mask], device="cuda", dtype=torch.complex128).reshape(
+        batch_size, -1, num_channels
+    )
+    selected_mode_indices = torch.as_tensor(np.nonzero(mode_mask)[0], device="cuda")
+    actual_e_alm = actual_e_alm.index_select(1, selected_mode_indices)
+    actual_b_alm = actual_b_alm.index_select(1, selected_mode_indices)
+    actual_e_alm = actual_e_alm.cpu().numpy()
+    actual_b_alm = actual_b_alm.cpu().numpy()
+    expected_e = expected_e.cpu().numpy()
+    expected_b = expected_b.cpu().numpy()
+
+    print("actual_e_alm.shape = ", actual_e_alm.shape)
+    print("expected_e.shape = ", expected_e.shape)
+    print("actual_b_alm.shape = ", actual_b_alm.shape)
+    print("expected_b.shape = ", expected_b.shape)
+
+    print("E comparison:")
+    for i in range(actual_e_alm.shape[0]):
+        print(f"actual_e_alm[{i}] = {actual_e_alm[i]} vs expected_e[{i}] = {expected_e[i]}")
+
+    print("B comparison:")
+    for i in range(actual_e_alm.shape[0]):
+        print(f"actual_b_alm[{i}] = {actual_b_alm[i]} vs expected_b[{i}] = {expected_b[i]}")
+
+
+    assert actual_e_alm.shape == expected_e.shape
+    assert actual_b_alm.shape == expected_b.shape
+    torch.testing.assert_close(actual_e_alm, expected_e, rtol=0.0, atol=1.0e-3)
+    torch.testing.assert_close(actual_b_alm, expected_b, rtol=0.0, atol=1.0e-3)
