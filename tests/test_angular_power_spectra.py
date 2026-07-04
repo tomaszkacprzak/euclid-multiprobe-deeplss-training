@@ -70,7 +70,7 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     from euclid_multiprobe_deeplss_training.networks.spherical_harmonics import ShearToEBMode
 
     batch_size = 4
-    nside = 32
+    nside = 128
     num_channels = 2
     lmax = 2 * nside
     mmax = lmax
@@ -84,7 +84,7 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     input_ee = np.zeros(lmax, dtype=np.float64)
     input_bb = np.zeros(lmax, dtype=np.float64)
     ell_ge_2 = ell >= 2
-    input_ee[ell_ge_2] = 2.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
+    input_ee[ell_ge_2] = 5.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
     input_bb[ell_ge_2] = 1.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
 
     np.random.seed(1234)
@@ -157,12 +157,12 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     print("expected_b.shape = ", expected_b.shape)
 
     print("E comparison:")
-    for i in range(actual_e_alm.shape[0]):
-        print(f"actual_e_alm[{i}] = {actual_e_alm[i]} vs expected_e[{i}] = {expected_e[i]}")
+    for i in range(actual_e_alm.shape[1]):
+        print(f"l={ell_indices[i]:>5d} m={m_indices[i]: >5d} actual_e_alm[{i}] = {actual_e_alm[0,i,0]: .10f} vs expected_e[{i}] = {expected_e[0,i,0]: .10f} delta = {np.abs(actual_e_alm[0,i,0] - expected_e[0,i,0]): .10f}")
 
     print("B comparison:")
     for i in range(actual_e_alm.shape[0]):
-        print(f"actual_b_alm[{i}] = {actual_b_alm[i]} vs expected_b[{i}] = {expected_b[i]}")
+        print(f"l={ell_indices[i]:>5d} m={m_indices[i]: >5d} actual_b_alm[{i}] = {actual_b_alm[0,i,0]: .10f} vs expected_b[{i}] = {expected_b[0,i,0]: .10f} delta = {np.abs(actual_b_alm[0,i,0] - expected_b[0,i,0]): .10f}")
 
 
     assert actual_e_alm.shape == expected_e.shape
