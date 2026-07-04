@@ -741,7 +741,10 @@ def train(
 
     # Optimizer
     trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
-    optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
+    # optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=config.learning_rate, weight_decay=1e-4)
+
+
     step = 0
     session_step = 0
     train_losses: list[float] = []
