@@ -646,8 +646,6 @@ def train(
     for i in range(torch.cuda.device_count()):
         LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
     
-    nside_training = 512
-
     LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
     if ddp_enabled:
@@ -656,7 +654,11 @@ def train(
     # 
     # Data loaders
     #
+    nside_training = 512
     indices_pixels_healpix = load_pixel_indices(config.forward_model)
+    import numpy as np
+    indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
+   
 
     # use non-reproducible seed, TODO: fix to reproducible
     seed = int(time.time())
