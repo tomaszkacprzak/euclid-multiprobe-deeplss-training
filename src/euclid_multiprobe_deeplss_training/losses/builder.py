@@ -12,9 +12,8 @@ def build_loss(loss_name: str,
 
     elif loss_name == "vimm":
 
-        from .vimm import VIMMLoss
-        loss_fn = VIMMLoss(num_targets=num_targets, lambda_mi=0.01, dim=1)
-
+        raise ValueError(f"Loss {loss_name} not supported")
+        
     else:
 
         raise ValueError(f"Loss {loss_name} not supported")
