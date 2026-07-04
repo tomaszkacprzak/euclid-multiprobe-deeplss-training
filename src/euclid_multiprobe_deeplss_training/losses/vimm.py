@@ -1,25 +1,43 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical, MultivariateNormal, MixtureSameFamily
+from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal
 
 
 class FullCovMixtureDensityRegressor(nn.Module):
     """
-    Multivariate regression model:
+    Multivariate Gaussian-mixture density regressor with full covariance matrices.
 
-        x -> z = encoder(x)
-        z -> q_phi(y | z)
+    The module maps an input feature vector ``x`` to the parameters of
+    ``q_phi(y | x)``, a ``K``-component mixture of multivariate Gaussian
+    distributions. Each component has its own mean vector and full covariance
+    matrix parameterized through a lower-triangular Cholesky factor.
 
-    q_phi(y | z) is a K-component Gaussian mixture.
-    Each Gaussian component has a full covariance matrix.
+    Args:
+        x_dim: Number of features in each input sample ``x``.
+        y_dim: Number of regression targets in each output/event sample ``y``.
+        hidden_dim: Width of the two hidden encoder layers.
+        n_components: Number of Gaussian mixture components ``K``.
+        min_scale: Positive value added to every Cholesky diagonal entry after
+            ``softplus`` to keep component covariance matrices positive definite.
 
-    The training loss is:
+    Inputs:
+        x: Tensor with shape ``[batch_size, x_dim]`` containing input features.
+        y: Tensor with shape ``[batch_size, y_dim]`` containing target values;
+            used by :meth:`nll` when computing the negative conditional
+            log-likelihood.
 
-        L = -log q_phi(y | z)
-
-    which is the variational conditional log-likelihood objective for
-    maximizing a lower bound on I(Z; Y).
+    Outputs:
+        forward: A ``torch.distributions.MixtureSameFamily`` distribution with
+            batch shape ``[batch_size]`` and event shape ``[y_dim]``. Its mixture
+            distribution has logits with shape ``[batch_size, n_components]``;
+            its component distribution has means with shape
+            ``[batch_size, n_components, y_dim]`` and Cholesky factors with shape
+            ``[batch_size, n_components, y_dim, y_dim]``.
+        nll: Scalar tensor containing the mean negative log-likelihood
+            ``-log q_phi(y | x)`` across the batch.
+        predict_mean: Tensor with shape ``[batch_size, y_dim]`` containing the
+            mixture mean ``E[Y | x]``.
     """
 
     def __init__(
@@ -51,11 +69,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
         #   mixture logits:           K
         #   component means:          K * D
         #   Cholesky parameters:      K * D * (D + 1) / 2
-        output_dim = (
-            n_components
-            + n_components * y_dim
-            + n_components * self.n_tril
-        )
+        output_dim = n_components + n_components * y_dim + n_components * self.n_tril
 
         self.decoder = nn.Linear(hidden_dim, output_dim)
 
@@ -65,8 +79,18 @@ class FullCovMixtureDensityRegressor(nn.Module):
 
     def forward(self, x: torch.Tensor) -> MixtureSameFamily:
         """
-        Returns a torch.distributions.MixtureSameFamily object representing
-        q_phi(y | x).
+        Build the conditional mixture distribution ``q_phi(y | x)``.
+
+        Args:
+            x: Tensor with shape ``[batch_size, x_dim]`` containing input
+                features. The tensor device and dtype are used for all generated
+                distribution parameters.
+
+        Returns:
+            A ``MixtureSameFamily`` distribution with batch shape
+            ``[batch_size]`` and event shape ``[y_dim]``. Calling
+            ``log_prob(y)`` expects ``y`` to have shape ``[batch_size, y_dim]``
+            and returns one log-likelihood value per batch item.
         """
         batch_size = x.shape[0]
         K = self.n_components
@@ -92,10 +116,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
 
         # Make diagonal strictly positive so covariance = L L^T is positive definite.
         diag_idx = torch.arange(D, device=x.device)
-        scale_tril[:, :, diag_idx, diag_idx] = (
-            F.softplus(scale_tril[:, :, diag_idx, diag_idx])
-            + self.min_scale
-        )
+        scale_tril[:, :, diag_idx, diag_idx] = F.softplus(scale_tril[:, :, diag_idx, diag_idx]) + self.min_scale
 
         # Mixture distribution over K components.
         mixture_dist = Categorical(logits=logits)
@@ -118,12 +139,19 @@ class FullCovMixtureDensityRegressor(nn.Module):
 
     def nll(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Negative conditional log-likelihood:
+        Compute the mean negative conditional log-likelihood.
 
-            -log q_phi(y | x)
+        This is the VIMM loss for maximizing the variational lower bound on
+        ``I(Z; Y)``, ignoring the constant ``H(Y)``.
 
-        This is the VIMM loss for maximizing the variational lower bound
-        on I(Z; Y), ignoring the constant H(Y).
+        Args:
+            x: Tensor with shape ``[batch_size, x_dim]`` containing input
+                features.
+            y: Tensor with shape ``[batch_size, y_dim]`` containing regression
+                targets/events to score under ``q_phi(y | x)``.
+
+        Returns:
+            Scalar tensor equal to ``-dist.log_prob(y).mean()``.
         """
         dist = self.forward(x)
         return -dist.log_prob(y).mean()
@@ -131,7 +159,14 @@ class FullCovMixtureDensityRegressor(nn.Module):
     @torch.no_grad()
     def predict_mean(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Mixture mean E[Y | x].
+        Predict the conditional mixture mean ``E[Y | x]``.
+
+        Args:
+            x: Tensor with shape ``[batch_size, x_dim]`` containing input
+                features.
+
+        Returns:
+            Tensor with shape ``[batch_size, y_dim]`` containing the weighted
+            mean across Gaussian mixture components.
         """
         return self.forward(x).mean
-
