@@ -71,8 +71,9 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
 
     batch_size = 4
     nside = 32
+    npix = 12 * nside * nside
     num_channels = 2
-    lmax = 2 * nside
+    lmax = 3 * nside
     mmax = lmax
     ell_max = lmax - 1
     lmin = 0
@@ -104,6 +105,12 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     u_map_nest = hp.reorder(u_map_ring, r2n=True)
     g1 = torch.as_tensor(q_map_nest, device="cuda", dtype=torch.float64).reshape(batch_size, -1, num_channels)
     g2 = torch.as_tensor(u_map_nest, device="cuda", dtype=torch.float64).reshape(batch_size, -1, num_channels)
+
+    print("g1.shape = ", g1.shape)
+    print("g2.shape = ", g2.shape)
+    print("nside = ", nside)
+    print("npix = ", npix)
+
 
     shear_to_eb = ShearToEBMode(
         batch_size=batch_size,
