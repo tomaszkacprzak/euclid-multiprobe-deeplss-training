@@ -446,7 +446,7 @@ class AngularPowerSpectrum(nn.Module):
         return cl_ee, cl_bb
 
 
-class ShearToEBMode(AngularPowerSpectrum):
+class ShearToEBMode(nn.Module):
     """
     Convert a spin-2 shear field into flattened E- and B-mode alm coefficients.
 
@@ -482,13 +482,6 @@ class ShearToEBMode(AngularPowerSpectrum):
         lmax: int,
         mmax: int,
     ):
-        super().__init__(
-            nside=nside,
-            lmax=lmax,
-            mmax=mmax,
-            input_order="nest",
-            return_stacked=False,
-        )
 
         if batch_size <= 0:
             raise ValueError("batch_size must be positive.")
@@ -497,6 +490,10 @@ class ShearToEBMode(AngularPowerSpectrum):
 
         self.batch_size = int(batch_size)
         self.num_channels = int(num_channels)
+        self.nside = int(nside)
+        self.lmax = int(lmax)
+        self.mmax = int(mmax)
+        self.npix = 12 * nside**2
 
         valid_indices = torch.nonzero(self.valid_lm, as_tuple=False)
         self.register_buffer("alm_ell_indices", valid_indices[:, 0], persistent=False)
