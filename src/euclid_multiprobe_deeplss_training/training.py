@@ -646,7 +646,7 @@ def train(
     for i in range(torch.cuda.device_count()):
         LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
     
-    nside_training = 1024
+    nside_training = 512
 
     LOGGER.info(f"\n\nTag: {config.tag}\n")
     LOGGER.info(f"Training on {device} with config: {config}")
@@ -666,10 +666,10 @@ def train(
                         seed=seed).to(device)
 
     # Downsample all maps to the same nside
-    # smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-    #                         nside_base=config.forward_model["analysis"]["n_side_down"], 
-    #                         nside_lower=nside_training, 
-    #                         operator="mean").to(device)
+    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+                            nside_base=config.forward_model["analysis"]["n_side_down"], 
+                            nside_lower=nside_training, 
+                            operator="mean").to(device)
     
     # Downsample each channel to a different nside
     # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -686,7 +686,7 @@ def train(
     loader_training, loader_validation = get_loaders(webds_pattern=config.records_pattern, 
                                                      batch_size=config.batch_size, 
                                                      physics_model=physics_model, 
-                                                     smoothing_model=None, 
+                                                     smoothing_model=smoothing_model, 
                                                      num_workers=config.num_workers, 
                                                      prefetch_factor=1, 
                                                      device=device)
@@ -968,16 +968,18 @@ def train(
                         "step": step,
                         "learning_rate": optimizer.param_groups[0]["lr"],
                     }
+                    wandb.log(validation_log, step=step)
+                    
                     if validation_predictions_path is not None and validation_predictions_path.exists():
+                        plots_log = {}
                         fig = plot_evaluation_file(
                             validation_predictions_path,
                             parameter_names_from_physics_model(physics_model),
                         )
-                        validation_log["Validation/targets_vs_predictions"] = wandb.Image(fig)
-                        import matplotlib.pyplot as plt
-
-                        plt.close(fig)
-                    wandb.log(validation_log, step=step)
+                        plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
+                        fig.close()
+                        wandb.log(plots_log, epoch=_epoch)
+                    
 
             if config.max_steps is not None and session_step >= config.max_steps:
                 break

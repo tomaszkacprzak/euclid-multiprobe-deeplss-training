@@ -34,6 +34,7 @@ dependencies = [
   "h5py",
   "pyyaml",
   "wandb",
+  "deepsphere"
 ]
 
 [project.optional-dependencies]
