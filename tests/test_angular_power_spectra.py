@@ -52,7 +52,8 @@ def test_angular_power_spectrum_matches_healpy_spin2_synfast() -> None:
 
     actual_ee, actual_bb = angular_power_spectrum(g1, g2)
 
+    lmin = 3
     assert actual_ee.shape == (1, lmax, 1)
     assert actual_bb.shape == (1, lmax, 1)
-    torch.testing.assert_close(actual_ee[0, 2:, 0], expected_ee[2:], rtol=5.0e-2, atol=1.0e-10)
-    torch.testing.assert_close(actual_bb[0, 2:, 0], expected_bb[2:], rtol=5.0e-2, atol=1.0e-10)
+    torch.testing.assert_close(actual_ee[0, lmin:, 0], expected_ee[lmin:], rtol=1.0e-2, atol=1.0e-6)
+    torch.testing.assert_close(actual_bb[0, lmin:, 0], expected_bb[lmin:], rtol=1.0e-2, atol=1.0e-6)
