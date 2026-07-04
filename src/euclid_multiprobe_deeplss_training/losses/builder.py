@@ -1,4 +1,5 @@
 from ..utils.logger import get_logger
+from .vimm import FullCovMixtureDensityRegressor
 from torch import nn
 
 LOGGER = get_logger(__file__)
@@ -12,7 +13,10 @@ def build_loss(loss_name: str,
 
     elif loss_name == "vimm":
 
-        raise ValueError(f"Loss {loss_name} not supported")
+        loss_fn = FullCovMixtureDensityRegressor(
+            x_dim=num_targets,
+            y_dim=num_targets,
+        )
         
     else:
 
