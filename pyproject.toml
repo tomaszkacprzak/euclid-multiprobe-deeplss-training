@@ -34,8 +34,6 @@ dependencies = [
   "h5py",
   "pyyaml",
   "wandb",
-  "cuHPX",
-  "torch-harmonics @ git+https://github.com/NVIDIA/torch-harmonics.git",
 ]
 
 [project.optional-dependencies]
