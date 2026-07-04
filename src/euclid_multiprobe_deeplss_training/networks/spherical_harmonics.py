@@ -159,6 +159,16 @@ class SphCuHpx(nn.Module):
         cl_den = 2.0 * ell + 1.0
         ell_ge_2 = ell >= 2.0
 
+        # cuHPX stores coefficients with an m-dependent longitudinal phase
+        # relative to the HEALPix/healpy alm convention used by downstream
+        # shear products.  Scalar power spectra are phase-invariant, but
+        # returning complex E/B modes requires converting the phase explicitly.
+        healpy_m_phase = torch.where(
+            (emm.to(torch.long) % 2) == 0,
+            torch.full_like(emm, -1.0),
+            torch.ones_like(emm),
+        )
+
         self.register_buffer("ell", ell, persistent=False)
         self.register_buffer("m", emm, persistent=False)
         self.register_buffer("ell_lm", ell_lm, persistent=False)
@@ -169,6 +179,7 @@ class SphCuHpx(nn.Module):
         self.register_buffer("cl_m_weight", cl_m_weight, persistent=False)
         self.register_buffer("cl_den", cl_den, persistent=False)
         self.register_buffer("ell_ge_2", ell_ge_2, persistent=False)
+        self.register_buffer("healpy_m_phase", healpy_m_phase, persistent=False)
 
     def _register_ring_geometry_buffers(self) -> None:
         theta = self._healpix_ring_theta(self.nside)
@@ -535,6 +546,12 @@ class ShearToEBMode(SphCuHpx):
 
         ell_ge_2 = self.ell_ge_2.to(device=eb_alm.device).view(1, 1, 1, self.lmax, 1)
         eb_alm = torch.where(ell_ge_2, eb_alm, torch.zeros_like(eb_alm))
+
+        # Convert from cuHPX's internal complex-alm phase to the
+        # HEALPix/healpy phase expected by callers. Without this, modes with
+        # even m have the opposite sign while odd m appear to agree.
+        m_phase = self.healpy_m_phase.to(device=eb_alm.device, dtype=self._real_dtype_of(eb_alm))
+        eb_alm = eb_alm * m_phase.view(1, 1, 1, 1, self.mmax)
 
         ell_idx = self.alm_ell_indices.to(device=eb_alm.device)
         m_idx = self.alm_m_indices.to(device=eb_alm.device)
