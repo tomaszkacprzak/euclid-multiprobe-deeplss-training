@@ -45,3 +45,26 @@ def test_full_cov_mixture_density_regressor_shapes_and_loss() -> None:
     assert torch.allclose(nll, -log_prob.mean())
     assert prediction.shape == (batch_size, y_dim)
     assert torch.isfinite(prediction).all()
+
+
+def test_build_vimm_loss_returns_trainable_mean_nll() -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.losses.builder import build_loss
+    from euclid_multiprobe_deeplss_training.losses.vimm import FullCovMixtureDensityRegressor
+
+    torch.manual_seed(0)
+    loss_fn = build_loss("vimm", num_targets=2)
+    assert isinstance(loss_fn, FullCovMixtureDensityRegressor)
+
+    predictions = torch.randn(5, 2, requires_grad=True)
+    targets = torch.randn(5, 2)
+    loss = loss_fn(predictions, targets)
+
+    assert loss.shape == ()
+    assert torch.isfinite(loss)
+
+    loss.backward()
+    assert predictions.grad is not None
+    assert torch.isfinite(predictions.grad).all()
+    assert any(parameter.grad is not None for parameter in loss_fn.parameters())
