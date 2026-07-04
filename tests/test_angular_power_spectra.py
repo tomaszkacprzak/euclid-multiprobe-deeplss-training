@@ -16,7 +16,7 @@ def test_angular_power_spectrum_matches_healpy_spin2_synfast() -> None:
 
     nside = 128
     lmax = 3 * nside
-    ell_max = lmax - 1
+    lmax = lmax - 1
 
     ell = np.arange(lmax, dtype=np.float64)
     input_ee = np.zeros(lmax, dtype=np.float64)
@@ -30,13 +30,13 @@ def test_angular_power_spectrum_matches_healpy_spin2_synfast() -> None:
     t_map, q_map, u_map = hp.synfast(
         [np.zeros(lmax, dtype=np.float64), input_ee, input_bb, np.zeros(lmax, dtype=np.float64)],
         nside=nside,
-        lmax=ell_max,
+        lmax=lmax,
         pol=True,
         new=True,
         verbose=False,
     )
 
-    expected_cls = hp.anafast([t_map, q_map, u_map], lmax=ell_max, pol=True)
+    expected_cls = hp.anafast([t_map, q_map, u_map], lmax=lmax, pol=True)
     expected_ee = torch.as_tensor(expected_cls[1], device="cuda", dtype=torch.float64)
     expected_bb = torch.as_tensor(expected_cls[2], device="cuda", dtype=torch.float64)
 
@@ -72,12 +72,11 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     batch_size = 4
     nside = 128
     num_channels = 2
-    lmax = 2 * nside
+    lmax = 2 * nside + 1
     mmax = lmax
-    ell_max = lmax - 1
     lmin = 0
 
-    alm_size = hp.Alm.getsize(ell_max, mmax=ell_max)
+    alm_size = hp.Alm.getsize(lmax, mmax=lmax)
     input_t_alm = np.zeros(alm_size, dtype=np.complex128)
 
     ell = np.arange(lmax, dtype=np.float64)
@@ -87,7 +86,7 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     input_ee[ell_ge_2] = 5.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
     input_bb[ell_ge_2] = 1.0e-5 / (ell[ell_ge_2] * (ell[ell_ge_2] + 1.0))
 
-    np.random.seed(1234)
+    np.random.seed(12343)
     q_maps_nest = np.empty((batch_size, hp.nside2npix(nside), num_channels), dtype=np.float64)
     u_maps_nest = np.empty_like(q_maps_nest)
     expected_e_alm_healpy = np.empty((batch_size, num_channels, alm_size), dtype=np.complex128)
@@ -95,18 +94,18 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
 
     for batch_idx in range(batch_size):
         for channel_idx in range(num_channels):
-            e_map_ring = hp.synfast(input_ee, nside=nside, lmax=ell_max, pol=False, new=True, verbose=False)
-            b_map_ring = hp.synfast(input_bb, nside=nside, lmax=ell_max, pol=False, new=True, verbose=False)
+            e_map_ring = hp.synfast(input_ee, nside=nside, lmax=lmax, pol=False, new=True, verbose=False)
+            b_map_ring = hp.synfast(input_bb, nside=nside, lmax=lmax, pol=False, new=True, verbose=False)
 
-            e_alm = hp.map2alm(e_map_ring, lmax=ell_max, pol=False)
-            b_alm = hp.map2alm(b_map_ring, lmax=ell_max, pol=False)
+            e_alm = hp.map2alm(e_map_ring, lmax=lmax, pol=False, use_weights=False, use_pixel_weights=False)
+            b_alm = hp.map2alm(b_map_ring, lmax=lmax, pol=False, use_weights=False, use_pixel_weights=False)
             expected_e_alm_healpy[batch_idx, channel_idx] = e_alm
             expected_b_alm_healpy[batch_idx, channel_idx] = b_alm
 
             _, q_map_ring, u_map_ring = hp.alm2map(
                 [input_t_alm, e_alm, b_alm],
                 nside=nside,
-                lmax=ell_max,
+                lmax=lmax,
                 pol=True,
                 verbose=False,
             )
@@ -116,14 +115,19 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     g1 = torch.as_tensor(q_maps_nest, device="cuda", dtype=torch.float64)
     g2 = torch.as_tensor(u_maps_nest, device="cuda", dtype=torch.float64)
 
+    sht_iter = 1
     shear_to_eb = ShearToEBMode(
         batch_size=batch_size,
         nside=nside,
         num_channels=num_channels,
         lmax=lmax,
         mmax=mmax,
+        sht_iter=sht_iter,
+        quad_weights="ring",
     ).to("cuda")
 
+    print()
+    print("sht_iter = ", sht_iter)
     print("g1.shape = ", g1.shape)
     print("g2.shape = ", g2.shape)
 
@@ -133,7 +137,7 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     # from an (lmax, mmax) grid, unlike healpy's compact m-major alm array.
     ell_indices, m_indices = np.nonzero(np.arange(mmax)[None, :] <= np.arange(lmax)[:, None])
     mode_mask = ell_indices >= lmin
-    healpy_indices = [hp.Alm.getidx(ell_max, int(ell), int(emm)) for ell, emm in zip(ell_indices, m_indices, strict=True)]
+    healpy_indices = [hp.Alm.getidx(lmax, int(ell), int(emm)) for ell, emm in zip(ell_indices, m_indices, strict=True)]
     expected_e_flat = expected_e_alm_healpy[:, :, healpy_indices]
     expected_b_flat = expected_b_alm_healpy[:, :, healpy_indices]
 
@@ -156,13 +160,15 @@ def test_shear_to_eb_mode_matches_healpy_toy_alms() -> None:
     print("actual_b_alm.shape = ", actual_b_alm.shape)
     print("expected_b.shape = ", expected_b.shape)
 
+    example_id = 1
+    channel_id = 1
     print("E comparison:")
-    for i in range(actual_e_alm.shape[1]):
-        print(f"l={ell_indices[i]:>5d} m={m_indices[i]: >5d} actual_e_alm[{i}] = {actual_e_alm[0,i,0]: .10f} vs expected_e[{i}] = {expected_e[0,i,0]: .10f} delta = {np.abs(actual_e_alm[0,i,0] - expected_e[0,i,0]): .10f}")
+    for i in range(20):
+        print(f"l={ell_indices[i]:>5d} m={m_indices[i]: >5d} actual_e_alm[{i}] = {actual_e_alm[example_id,i,channel_id]: .10f} vs expected_e[{i}] = {expected_e[example_id,i,channel_id]: .10f} delta = {np.abs(actual_e_alm[example_id,i,channel_id] - expected_e[example_id,i,channel_id]): .10f}")
 
     print("B comparison:")
-    for i in range(actual_e_alm.shape[0]):
-        print(f"l={ell_indices[i]:>5d} m={m_indices[i]: >5d} actual_b_alm[{i}] = {actual_b_alm[0,i,0]: .10f} vs expected_b[{i}] = {expected_b[0,i,0]: .10f} delta = {np.abs(actual_b_alm[0,i,0] - expected_b[0,i,0]): .10f}")
+    for i in range(20):
+        print(f"l={ell_indices[i]:>5d} m={m_indices[i]: >5d} actual_b_alm[{i}] = {actual_b_alm[example_id,i,channel_id]: .10f} vs expected_b[{i}] = {expected_b[example_id,i,channel_id]: .10f} delta = {np.abs(actual_b_alm[example_id,i,channel_id] - expected_b[example_id,i,channel_id]): .10f}")
 
 
     assert actual_e_alm.shape == expected_e.shape
