@@ -77,7 +77,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
         tril_idx = torch.tril_indices(row=y_dim, col=y_dim, offset=0)
         self.register_buffer("tril_idx", tril_idx)
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor | None = None) -> MixtureSameFamily | torch.Tensor:
+    def distribution(self, x: torch.Tensor) -> MixtureSameFamily:
         """
         Build ``q_phi(y | x)`` or score targets with its mean NLL.
 
@@ -85,17 +85,10 @@ class FullCovMixtureDensityRegressor(nn.Module):
             x: Tensor with shape ``[batch_size, x_dim]`` containing input
                 features. The tensor device and dtype are used for all generated
                 distribution parameters.
-            y: Optional tensor with shape ``[batch_size, y_dim]`` containing
-                regression targets. When provided, this method returns the mean
-                negative conditional log-likelihood so the module can be used as
-                a standard PyTorch loss via ``loss_fn(predictions, targets)``.
 
         Returns:
-            If ``y`` is omitted, a ``MixtureSameFamily`` distribution with batch
-            shape ``[batch_size]`` and event shape ``[y_dim]``. Calling
-            ``log_prob(y)`` expects ``y`` to have shape ``[batch_size, y_dim]``
-            and returns one log-likelihood value per batch item. If ``y`` is
-            provided, returns scalar ``-dist.log_prob(y).mean()``.
+            A``MixtureSameFamily`` distribution with batch
+            shape ``[batch_size]`` and event shape ``[y_dim]``. 
         """
         batch_size = x.shape[0]
         K = self.n_components
@@ -141,8 +134,6 @@ class FullCovMixtureDensityRegressor(nn.Module):
             mixture_distribution=mixture_dist,
             component_distribution=component_dist,
         )
-        if y is not None:
-            return -dist.log_prob(y).mean()
         return dist
 
     def nll(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -161,8 +152,17 @@ class FullCovMixtureDensityRegressor(nn.Module):
         Returns:
             Scalar tensor equal to ``-dist.log_prob(y).mean()``.
         """
-        dist = self.forward(x)
+        dist = self.distribution(x)
         return -dist.log_prob(y).mean()
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the mean negative conditional log-likelihood.
+
+        This is the VIMM loss for maximizing the variational lower bound on
+        ``I(Z; Y)``, ignoring the constant ``H(Y)``.
+        """
+        return self.nll(x, y)
 
     @torch.no_grad()
     def predict_mean(self, x: torch.Tensor) -> torch.Tensor:
@@ -177,4 +177,4 @@ class FullCovMixtureDensityRegressor(nn.Module):
             Tensor with shape ``[batch_size, y_dim]`` containing the weighted
             mean across Gaussian mixture components.
         """
-        return self.forward(x).mean
+        return self.distribution(x).mean

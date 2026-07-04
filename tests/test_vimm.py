@@ -25,7 +25,7 @@ def test_full_cov_mixture_density_regressor_shapes_and_loss() -> None:
     x = torch.randn(batch_size, x_dim)
     y = torch.randn(batch_size, y_dim)
 
-    dist = model(x)
+    dist = model.distribution(x)
 
     assert isinstance(dist, MixtureSameFamily)
     assert dist.batch_shape == torch.Size([batch_size])
