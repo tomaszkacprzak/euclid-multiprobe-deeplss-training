@@ -43,3 +43,26 @@ def test_evaluate_rejects_mismatched_target_prediction_shapes(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="same shape"):
         evaluate(torch.nn.Linear(2, 2), dataloader, torch.nn.MSELoss(), torch.device("cpu"), tmp_path / "bad.h5")
+
+
+def test_evaluate_returns_standard_mse_alongside_configured_loss() -> None:
+    torch = pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.training import evaluate
+
+    model = torch.nn.Linear(1, 1)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+        model.bias.zero_()
+
+    dataloader = [(torch.tensor([[1.0], [3.0]]), torch.tensor([[2.0], [5.0]]))]
+
+    metrics = evaluate(
+        model,
+        dataloader,
+        torch.nn.L1Loss(),
+        torch.device("cpu"),
+        return_metrics=True,
+    )
+
+    assert metrics == {"loss": pytest.approx(1.5), "mse_loss": pytest.approx(2.5)}
