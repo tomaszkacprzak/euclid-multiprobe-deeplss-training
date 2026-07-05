@@ -16,6 +16,7 @@ import torch.distributed as dist
 import wandb
 import yaml
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
@@ -177,21 +178,34 @@ def evaluate(
     dataloader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device | str,
-    num_examples: int = 10000,
+    num_examples: int | str | Path = 10000,
     predictions_path: str | Path | None = None,
-) -> float | None:
-    """Evaluate one full validation stream pass and optionally save targets/predictions."""
+    *,
+    return_metrics: bool = False,
+) -> float | dict[str, float] | None:
+    """Evaluate one full validation stream pass and optionally save targets/predictions.
+
+    The primary ``loss`` metric is computed with the supplied ``loss_fn`` so it
+    matches training.  ``mse_loss`` is always computed with standard mean
+    squared error for consistent validation monitoring, regardless of the
+    configured training loss.
+    """
+    if isinstance(num_examples, str | Path):
+        predictions_path = num_examples
+        num_examples = 10000
+
     model.eval()
     losses: list[float] = []
+    mse_losses: list[float] = []
     target_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
-    batch_size = dataloader.batch_size
     num_examples_seen = 0
     for maps, labels in dataloader:
         maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
         predictions = model(maps)
         losses.append(float(loss_fn(predictions, labels).detach().cpu()))
+        mse_losses.append(float(F.mse_loss(predictions, labels).detach().cpu()))
         if predictions_path is not None:
             target_batches.append(labels.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
@@ -202,7 +216,14 @@ def evaluate(
         return None
     if predictions_path is not None:
         _save_evaluation_predictions(predictions_path, target_batches, prediction_batches)
-    return sum(losses) / len(losses)
+
+    metrics = {
+        "loss": sum(losses) / len(losses),
+        "mse_loss": sum(mse_losses) / len(mse_losses),
+    }
+    if return_metrics:
+        return metrics
+    return metrics["loss"]
 
 
 def _save_evaluation_predictions(
@@ -965,12 +986,22 @@ def train(
             #
 
             validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
-            validation_loss = evaluate(model, loader_validation, loss_fn, device, num_examples=2000, predictions_path=validation_predictions_path)
-            if validation_loss is not None:
+            validation_metrics = evaluate(
+                model,
+                loader_validation,
+                loss_fn,
+                device,
+                num_examples=2000,
+                predictions_path=validation_predictions_path,
+                return_metrics=True,
+            )
+            if validation_metrics is not None:
+                validation_loss = validation_metrics["loss"]
                 validation_losses.append(validation_loss)
                 if run is not None:
                     validation_log: dict[str, Any] = {
                         "Validation/loss": validation_loss,
+                        "Validation/mse_loss": validation_metrics["mse_loss"],
                         "step": step,
                         "learning_rate": optimizer.param_groups[0]["lr"],
                     }
