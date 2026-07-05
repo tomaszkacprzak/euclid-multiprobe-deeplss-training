@@ -20,6 +20,7 @@ from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
+import torchinfo
 
 from .plots import parameter_names_from_physics_model, plot_evaluation_file
 from .utils.config import load_config, with_forward_model_config, load_pixel_indices
@@ -596,7 +597,6 @@ def get_gradient_stats(model, log_per_parameter=False):
 
 def train(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
-    model: nn.Module | None = None,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
     """Run a compact train/evaluate/checkpoint loop.
@@ -629,7 +629,7 @@ def train(
     # 
     # Data loaders
     #
-    nside_training = 512
+    nside_training = 256
     indices_pixels_healpix = load_pixel_indices(config.forward_model)
     import numpy as np
     indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
@@ -674,17 +674,21 @@ def train(
     #
  
     encoder = build_encoder(config.encoder_name, 
-                        num_channels=physics_model.num_channels,
-                        embed_dim=config.embed_dim,
-                        num_pixels=loader_training.num_pixels,
-                        nside=nside_training,
-                        nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                        model_args=config.encoder_args if hasattr(config, "encoder_args") else {},
-                        batch_size=config.batch_size,
-                        indices=indices_pixels_healpix,
-                        device=device)
+                            num_channels=physics_model.num_channels,
+                            embed_dim=config.embed_dim,
+                            num_pixels=loader_training.num_pixels,
+                            nside=nside_training,
+                            nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+                            encoder_args=config.encoder_args if hasattr(config, "encoder_args") else {},
+                            batch_size=config.batch_size,
+                            indices=indices_pixels_healpix,
+                            device=device)
     encoder.to(device)
+    torchinfo.summary(encoder, input_size=(loader_training.batch_size, loader_training.num_pixels, loader_training.num_channels))
     encoder = torch.compile(encoder)
+    
+    
+
 
     LOGGER.info(f'Encoder: {config.encoder_name}\n' + str(_unwrap_parallel_module(encoder)) + '\n')    
 
@@ -707,9 +711,9 @@ def train(
 
     if ddp_enabled and any(parameter.requires_grad for parameter in loss.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        model = DDP(model, **ddp_kwargs)
+        encoder = DDP(encoder, **ddp_kwargs)
+        loss = DDP(loss, **ddp_kwargs)
     
-
     # 
     # Optimizer
     #
@@ -859,7 +863,7 @@ def train(
                 # warm-up checks
                 if step < 10:
 
-                    _validate_gradient_flow(model)
+                    _validate_gradient_flow(encoder)
 
                 # frequent metrics
                 if step % 10 == 0:
@@ -879,8 +883,8 @@ def train(
 
                     if run is not None:
                         LOGGER.debug('Running gradient logging')
-                        grad_logs = get_gradient_stats(model, log_per_parameter=False)
-                        grad_hist = log_selected_gradient_histograms(model)
+                        grad_logs = get_gradient_stats(encoder, log_per_parameter=False)
+                        grad_hist = log_selected_gradient_histograms(encoder)
                         wandb.log({**grad_logs, **grad_hist}, step=step)
 
                 # very infrequent, checkpoint management
@@ -988,7 +992,7 @@ def train(
     if ddp_enabled and dist.is_initialized():
         dist.destroy_process_group()
 
-    return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
+    return {"encoder": encoder, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
 
 
 def train_from_config(

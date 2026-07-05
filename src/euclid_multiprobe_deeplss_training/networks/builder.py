@@ -14,7 +14,7 @@ def build_encoder(encoder_name: str,
                   num_pixels: int,
                   batch_size: int = None,
                   indices: list[int] = None,
-                  model_args: dict | None = None,
+                  encoder_args: dict | None = None,
                   device: torch.device | str | None = None):
 
     if encoder_name == "nested_transformer":
@@ -32,7 +32,7 @@ def build_encoder(encoder_name: str,
             "mlp_ratio": 4,
         }
         # Update with model_args
-        constructor_args.update(model_args or {})
+        constructor_args.update(encoder_args or {})
         
         # Build model
         model = HealpixNestedHierarchicalLocalWindowTransformer(
