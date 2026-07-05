@@ -2,12 +2,13 @@ import healpy as hp
 import torch
 import torch.nn as nn
 
+
 class NestDownsampler(nn.Module):
     """
     A layer that manipulates the nest resolution of a Healpix map.
     """
 
-    def __init__(self, nside, nside_base, nside_lower, operator="sum"):
+    def __init__(self, nside, nside_base, nside_lower, operator="mean"):
 
         assert nside > nside_base, "nside must be greater than nside_base"
         assert nside > nside_lower, "nside must be greater than nside_lower"
@@ -26,17 +27,17 @@ class NestDownsampler(nn.Module):
 
     def forward(self, x):
 
-        batch_size, npix, num_channels = x.shape
+        batch_size, npix, num_bins, num_fields = x.shape # assumes the same number of bins for each field
         nord = hp.nside2order(self.nside)
         nord_base = hp.nside2order(self.nside_base)
         npix_base = npix // ( hp.nside2npix(self.nside) // hp.nside2npix(self.nside_base)) 
         nord_lower = hp.nside2order(self.nside_lower)
 
-        shape = [batch_size, npix_base] + [4] * (nord - nord_base) + [num_channels]
+        shape = [batch_size, npix_base] + [4] * (nord - nord_base) + [num_bins, num_fields]
         dims_sum = tuple(range(1 + nord_lower - nord_base + 1, 1 + nord - nord_base + 1))  # 1+ because of the batch dimension
         x_lower = self.operator(x.reshape(shape), dim=dims_sum, keepdims=False)
                 
-        return x_lower.reshape(batch_size, -1, num_channels)
+        return x_lower.reshape(batch_size, -1, num_bins, num_fields)
         
 
 class NestChannelDownsampler(nn.Module):

@@ -27,12 +27,6 @@ from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
-OntheflyPhysicsModelLinear = None
-OntheflyPipeline = None
-build_loss = None
-build_model = None
-NestDownsampler = None
-
 
 @dataclass(slots=True)
 class TrainingConfig:
@@ -46,6 +40,7 @@ class TrainingConfig:
     records_pattern: str
     model_name: str = "nested_transformer"
     model_args: dict[str, Any] = field(default_factory=dict)
+    embed_dim: int = 64
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
     loss_function: str = "mse"
@@ -614,10 +609,9 @@ def train(
     """
     from msfm.onthefly_pipeline import OntheflyPipeline
     from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-    from msfm.networks.smoothing import NestDownsampler
-    from msfm.networks.smoothing import NestChannelDownsampler
-    from msfm.losses.builder import build_loss
-    from msfm.networks.builder import build_model
+    from .networks.smoothing import NestDownsampler, NestChannelDownsampler, NestDownsamplerChannelOperators
+    from .losses.builder import build_loss
+    from .networks.builder import build_model
     
 
 
@@ -646,17 +640,16 @@ def train(
     seed = int(time.time())
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
-                        device=device,
-                        seed=seed).to('cpu')
+                        device='cpu',
+                        seed=seed).to(device)
 
     # Downsample all maps to the same nside
-    smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-                            nside_base=config.forward_model["analysis"]["n_side_down"], 
-                            nside_lower=nside_training, 
-                            operator="mean").to('cpu')
+    downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+                                  nside_base=config.forward_model["analysis"]["n_side_down"], 
+                                  nside_lower=nside_training).to(device)
     
     # Downsample each channel to a different nside
-    # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+    # smoother = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
     #                     nside_base=config.forward_model["analysis"]["n_side_down"], 
     #                     nside_lower=[nside_training]*24, 
     #                     operator="mean").to(device)
@@ -670,7 +663,8 @@ def train(
     loader_training, loader_validation = get_loaders(webds_pattern=config.records_pattern, 
                                                      batch_size=config.batch_size, 
                                                      physics_model=physics_model, 
-                                                     smoothing_model=smoothing_model, 
+                                                     downsampler=downsampler,
+                                                     smoother=None, 
                                                      num_workers=config.num_workers, 
                                                      prefetch_factor=1, 
                                                      device=device)
@@ -950,7 +944,6 @@ def train(
                 device,
                 num_examples=2000,
                 predictions_path=validation_predictions_path,
-                return_metrics=True,
             )
             if validation_metrics is not None:
                 validation_loss = validation_metrics["loss"]
