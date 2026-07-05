@@ -6,7 +6,7 @@ import itertools
 import shutil
 import time
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,39 @@ NestDownsampler = None
 
 
 @dataclass(slots=True)
+class SweepConfig:
+    """Per-model settings for one member of a simultaneous training sweep."""
+
+    sweep_tag: str
+    model_name: str = "nested_transformer"
+    model_args: dict[str, Any] = field(default_factory=dict)
+    loss_function: str = "mse"
+    loss_args: dict[str, Any] = field(default_factory=dict)
+    learning_rate: float = 1.0e-3
+
+    @classmethod
+    def from_mapping(cls, raw_config: Mapping[str, Any]) -> SweepConfig:
+        if not isinstance(raw_config, Mapping):
+            raise TypeError("Each sweep entry must be a mapping.")
+        values = dict(raw_config)
+        if "sweep_tag" not in values:
+            raise KeyError("Each sweep entry requires 'sweep_tag'.")
+        config = cls(**values)
+        config._validate()
+        return config
+
+    def _validate(self) -> None:
+        if not self.sweep_tag:
+            raise ValueError("sweep_tag must be non-empty.")
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive.")
+        if not isinstance(self.model_args, Mapping):
+            raise TypeError("model_args must be a mapping.")
+        if not isinstance(self.loss_args, Mapping):
+            raise TypeError("loss_args must be a mapping.")
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     """Normalized training configuration loaded from a YAML file.
 
@@ -46,9 +79,11 @@ class TrainingConfig:
     records_pattern: str
     model_name: str = "nested_transformer"
     model_args: dict[str, Any] = field(default_factory=dict)
+    sweep: list[SweepConfig] = field(default_factory=list)
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
     loss_function: str = "mse"
+    loss_args: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 32
     num_epochs: int | None = 1
     max_steps: int | None = None
@@ -93,7 +128,21 @@ class TrainingConfig:
         if "records_pattern" not in values:
             raise KeyError("Training config requires 'records_pattern'.")
 
+        if "sweep" in values:
+            values["sweep"] = [SweepConfig.from_mapping(item) for item in values["sweep"]]
+
         config = cls(**values)
+        if not config.sweep:
+            config.sweep = [
+                SweepConfig(
+                    sweep_tag="default",
+                    model_name=config.model_name,
+                    model_args=dict(config.model_args),
+                    loss_function=config.loss_function,
+                    loss_args=dict(config.loss_args),
+                    learning_rate=config.learning_rate,
+                )
+            ]
         config._validate()
         config.extra = {key: value for key, value in raw_config.items() if key not in names}
         return config
@@ -111,7 +160,18 @@ class TrainingConfig:
             raise ValueError("checkpoint_every_steps must be non-negative.")
         if not isinstance(self.model_args, Mapping):
             raise TypeError("model_args must be a mapping.")
-
+        if not isinstance(self.loss_args, Mapping):
+            raise TypeError("loss_args must be a mapping.")
+        if not self.sweep:
+            raise ValueError("sweep must contain at least one entry.")
+        seen_tags: set[str] = set()
+        for item in self.sweep:
+            if not isinstance(item, SweepConfig):
+                raise TypeError("sweep entries must be SweepConfig instances.")
+            item._validate()
+            if item.sweep_tag in seen_tags:
+                raise ValueError(f"Duplicate sweep_tag: {item.sweep_tag}")
+            seen_tags.add(item.sweep_tag)
 
 
 
@@ -343,6 +403,7 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
         "name": config_dict.get("wandb_run_name") or config_dict.get("tag"),
         "mode": wandb_mode or "offline",
         "config": config_dict,
+        "reinit": "create_new",
     }
     if wandb_info_dict.get("entity") is not None:
         init_kwargs["entity"] = wandb_info_dict["entity"]
@@ -716,346 +777,347 @@ def train(
                                                      device=device)
 
     # 
-    # Build neural network
-    #
- 
-    model = build_model(config.model_name, 
-                    num_channels=physics_model.num_channels,
-                    num_targets=physics_model.num_targets,
-                    num_pixels=loader_training.num_pixels,
-                    nside=nside_training,
-                    nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                    model_args=config.model_args if hasattr(config, "model_args") else {},
-                    batch_size=config.batch_size,
-                    indices=indices_pixels_healpix,
-                    device=device)
-    model.to(device)
-
-    # Some models, including DeepSphere's HealpyGCNN layers and lazy PyTorch
-    # heads, register/materialize parameters during the first forward pass.
-    # Do this before wrapping in DDP, building the optimizer, or restoring a
-    # checkpoint so all checkpoint keys are expected by the model state_dict.
-    training_batches = _print_initial_model_summary(model, loader_training, device)
-
-    if ddp_enabled:
-        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        model = DDP(model, **ddp_kwargs)
-
-    LOGGER.info(f'Model: {config.model_name}\n' + str(_unwrap_parallel_module(model)) + '\n')    
-
-    #
-    # Loss function 
+    # Build neural networks, loss functions, optimizers, and run-specific state.
     #
 
-    loss_fn = build_loss(config.loss_function, 
-                    num_targets=physics_model.num_targets, 
-                    loss_args=config.loss_args if hasattr(config, "loss_args") else {})
+    try:
+        first_batch = next(iter(loader_training))
+    except StopIteration:
+        LOGGER.warning("Training dataloader produced no batches.")
+        first_batch = None
+    training_batches = iter(()) if first_batch is None else itertools.chain([first_batch], iter(loader_training))
 
-    loss_fn = loss_fn.to(device)
-    if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
-        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        loss_fn = DDP(loss_fn, **ddp_kwargs)
-    LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss_fn)}')
+    sweep_states: list[dict[str, Any]] = []
+    ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if ddp_enabled and device.type == "cuda" else {}
 
-    # 
-    # Build optimizer
-    #
+    for sweep_config in config.sweep:
+        run_tag = f"{config.tag}_{sweep_config.sweep_tag}"
+        run_config = replace(
+            config,
+            tag=run_tag,
+            model_name=sweep_config.model_name,
+            model_args=dict(sweep_config.model_args),
+            loss_function=sweep_config.loss_function,
+            loss_args=dict(sweep_config.loss_args),
+            learning_rate=sweep_config.learning_rate,
+            wandb_run_name=run_tag,
+        )
 
-    # Optimizer
-    trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
-    # optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=config.learning_rate, weight_decay=1e-4)
+        sweep_model = build_model(
+            sweep_config.model_name,
+            num_channels=physics_model.num_channels,
+            num_targets=physics_model.num_targets,
+            num_pixels=loader_training.num_pixels,
+            nside=nside_training,
+            nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+            model_args=sweep_config.model_args,
+            batch_size=config.batch_size,
+            indices=indices_pixels_healpix,
+            device=device,
+        )
+        sweep_model.to(device)
 
+        if first_batch is not None:
+            from .modelprofile import _print_model_specification_table, _register_model_specification_hooks
 
-    step = 0
-    session_step = 0
-    train_losses: list[float] = []
-    validation_losses: list[float] = []
-    LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
+            rows, hooks = _register_model_specification_hooks(sweep_model)
+            was_training = sweep_model.training
+            sweep_model.eval()
+            try:
+                maps, _labels = first_batch
+                with torch.no_grad():
+                    sweep_model(maps.to(device=device, dtype=torch.float32))
+            finally:
+                for handle in hooks:
+                    handle.remove()
+                sweep_model.train(was_training)
+            if _is_main_process():
+                LOGGER.info(f"Model summary for sweep {sweep_config.sweep_tag}")
+                _print_model_specification_table(sweep_model, rows)
+                print()
 
-    # Checkpoints
-    checkpoint_wandb_info = None
-    if config.resume_from_checkpoint:
-        
-        # if checkpoint does not exist, set resume_from_checkpoint to None and start the run from scratch
-        if not Path(config.resume_from_checkpoint).exists():
-            LOGGER.warning(f"Checkpoint file {config.resume_from_checkpoint} does not exist")
-            config.resume_from_checkpoint = None
-        
-        else:
-            step, train_losses, validation_losses = load_checkpoint(
-                config.resume_from_checkpoint,
-                model,
-                optimizer,
-                device,
-                loss_fn,
-            )
-            checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
+        if ddp_enabled:
+            sweep_model = DDP(sweep_model, **ddp_kwargs)
 
-    checkpoint_dir = _prepare_checkpoint_dir(config) if _is_main_process() else None
-    _write_reproducibility_config(checkpoint_dir, config)
+        LOGGER.info(f'Model[{sweep_config.sweep_tag}]: {sweep_config.model_name}\n' + str(_unwrap_parallel_module(sweep_model)) + '\n')
+
+        loss_fn = build_loss(
+            sweep_config.loss_function,
+            num_targets=physics_model.num_targets,
+            loss_args=sweep_config.loss_args,
+        ).to(device)
+        if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
+            loss_fn = DDP(loss_fn, **ddp_kwargs)
+        LOGGER.info(f'Loss function[{sweep_config.sweep_tag}]: {_unwrap_parallel_module(loss_fn)}')
+
+        optimizer = torch.optim.AdamW(
+            itertools.chain(sweep_model.parameters(), loss_fn.parameters()),
+            lr=sweep_config.learning_rate,
+            weight_decay=1e-4,
+        )
+
+        checkpoint_wandb_info = None
+        step = 0
+        train_losses: list[float] = []
+        validation_losses: list[float] = []
+        if run_config.resume_from_checkpoint:
+            checkpoint_path = Path(run_config.resume_from_checkpoint)
+            if not checkpoint_path.exists():
+                LOGGER.warning(f"Checkpoint file {checkpoint_path} does not exist")
+                run_config.resume_from_checkpoint = None
+            else:
+                step, train_losses, validation_losses = load_checkpoint(
+                    checkpoint_path,
+                    sweep_model,
+                    optimizer,
+                    device,
+                    loss_fn,
+                )
+                checkpoint_wandb_info = _wandb_info_from_checkpoint(checkpoint_path)
+
+        checkpoint_dir = _prepare_checkpoint_dir(run_config) if _is_main_process() else None
+        _write_reproducibility_config(checkpoint_dir, run_config)
+        run = init_wandb(run_config, checkpoint_wandb_info) if _is_main_process() else None
+        active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
+
+        sweep_states.append(
+            {
+                "sweep_config": sweep_config,
+                "config": run_config,
+                "model": sweep_model,
+                "loss_fn": loss_fn,
+                "optimizer": optimizer,
+                "step": step,
+                "train_losses": train_losses,
+                "validation_losses": validation_losses,
+                "checkpoint_dir": checkpoint_dir,
+                "run": run,
+                "active_wandb_info": active_wandb_info,
+            }
+        )
+        LOGGER.info(f'Optimizer[{sweep_config.sweep_tag}]:\n{optimizer}\n')
+
     _ddp_barrier()
 
     # 
     # Training loop
     #
 
-    # Housekeeping
-    # loader_prefetcher = CUDAPrefetcher(loader, device=device)
-    run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
-    active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
+    # Housekeeping shared by all sweep elements.
     train_examples_seen = 0
+    session_step = 0
     train_timer = Timer()
-    timer_batch_prep = Timer()
-    timer_model_update = Timer()
 
-    # grad_scaler = torch.amp.GradScaler("cuda")
-
-    # Training loop.
-    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
+    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs} sweep_size={len(sweep_states)}')
     for _epoch in range(config.num_epochs or 10**12):
-
         epoch_batches = training_batches if _epoch == 0 else loader_training
-        # with DeviceTraceMode(only_cpu=True):
         with torch.profiler.record_function("training_loop"):
-
             LOGGER.timer.start("10steps")
-            train_timer.start()   
+            train_timer.start()
             for batch in epoch_batches:
-
-                
-
-            
-
-            # overfit on a single batch
-            # batch = next(iter(epoch_batches))
-            # for _ in range(10000):
-
-                step += 1
                 session_step += 1
-                LOGGER.debug(f"====================================== step {step}")
-
-
-                # LOGGER.warning('continuing training loop')
-                # continue
-
+                shared_step = max(int(state["step"]) for state in sweep_states) + 1
+                LOGGER.debug(f"====================================== step {shared_step}")
 
                 prev_t = time.perf_counter()
                 prev_read, prev_write = tree_io_counters()
-
-                #
-                # Main magic - update model
-                #
-
-                model.train()
                 maps, labels = batch
                 LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
                 LOGGER.debug(f'Labels shape={labels.shape}')
                 maps = maps.to(device=device, dtype=torch.float32)
                 labels = labels.to(device=device, dtype=torch.float32)
-                optimizer.zero_grad(set_to_none=True)
-                LOGGER.debug('Running forward pass')
-                # with torch.autocast("cuda", dtype=torch.bfloat16):
-                predictions = model(maps)
-                LOGGER.debug('Running loss')
-                train_loss = loss_fn(predictions, labels)
-                # train_loss = grad_scaler.scale(train_loss)
+                batch_size_seen = int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
 
-                if not train_loss.requires_grad:
-                    raise RuntimeError(
-                        "The training loss is detached from the model parameters; "
-                        "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
-                    )
+                now_t = time.perf_counter()
+                now_read, now_write = tree_io_counters()
+                dt = now_t - prev_t
+                d_read = now_read - prev_read
+                d_write = now_write - prev_write
 
-                LOGGER.debug('Running backward pass')
-                train_loss.backward()
+                for state in sweep_states:
+                    sweep_config = state["sweep_config"]
+                    run_config = state["config"]
+                    model = state["model"]
+                    loss_fn = state["loss_fn"]
+                    optimizer = state["optimizer"]
+                    run = state["run"]
 
-                LOGGER.debug('Clipping gradients')
-                clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), config.grad_clip_max_norm)
+                    state["step"] = int(state["step"]) + 1
+                    step = int(state["step"])
 
-                LOGGER.debug('Running optimizer step')
-                # grad_scaler.step(optimizer)
-                # grad_scaler.update()
-                optimizer.step()
+                    model.train()
+                    optimizer.zero_grad(set_to_none=True)
+                    LOGGER.debug('Running forward pass for sweep %s', sweep_config.sweep_tag)
+                    predictions = model(maps)
+                    LOGGER.debug('Running loss for sweep %s', sweep_config.sweep_tag)
+                    train_loss = loss_fn(predictions, labels)
 
-                global_train_loss = reduce_mean(train_loss)
-                
-
-                # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
-                # continue
-                
-                train_loss = train_loss.detach().cpu()
-
-                #
-                # Step housekeeping
-                # 
-
-                # every step housekeeping
-                LOGGER.debug('Running housekeeping')
-                train_losses.append(train_loss)
-                maps, _labels = batch
-                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
-                train_timer.stop()
-                
-                current_learning_rate = optimizer.param_groups[0]["lr"]
-                if run is not None:
-
-                    # IO statistics    
-                    # This should be at the end of the step to not dilute the timing/rates, but the difference should be negligible.
-                    now_t = time.perf_counter()
-                    now_read, now_write = tree_io_counters()
-                    dt = now_t - prev_t
-                    d_read = now_read - prev_read
-                    d_write = now_write - prev_write
-
-                    # adjust for DDP
-
-                    wandb.log(
-                        {
-                            "Train/loss": global_train_loss.item(),
-                            "step": step,
-                            "learning_rate": current_learning_rate,
-                            **get_examples_stats(train_examples_seen, train_timer.elapsed()),
-                            **get_io_stats(d_read, d_write, dt),
-                            **get_tensor_stats(maps, "maps"),
-                            **get_tensor_stats(labels, "labels"),
-                        },
-                        step=step,
-                    )
-
-                # warm-up checks
-                if step < 10:
-
-                    _validate_gradient_flow(model)
-
-                # frequent metrics
-                if step % 10 == 0:
-
-                    LOGGER.info(
-                        f'Train loss epoch={_epoch:>3d} step={step:>5d} '
-                        f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
-                    LOGGER.timer.reset("10steps")
-                    if run is not None:
-                        train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
-                        for key, value in train_loss_components.items():
-                            value = float(value.detach().cpu())
-                            wandb.log({f"Train/loss_component/{key}": value}, step=step)
-                
-                # infrequent metrics
-                if step % 100 == 0:
-
-                    if run is not None:
-                        LOGGER.debug('Running gradient logging')
-                        grad_logs = get_gradient_stats(model, log_per_parameter=False)
-                        grad_hist = log_selected_gradient_histograms(model)
-                        wandb.log({**grad_logs, **grad_hist}, step=step)
-
-                # very infrequent, checkpoint management
-                if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
-                    checkpoint_path_latest = _latest_checkpoint_path(checkpoint_dir)
-                    checkpoint_path_step = _step_checkpoint_path(checkpoint_dir, step)
-                    for checkpoint_path in [checkpoint_path_latest, checkpoint_path_step]:
-                        save_checkpoint(
-                            checkpoint_path,
-                            model,
-                            optimizer,
-                            step,
-                            config,
-                            train_losses,
-                            validation_losses,
-                            loss_fn,
-                            active_wandb_info,
+                    if not train_loss.requires_grad:
+                        raise RuntimeError(
+                            "The training loss is detached from the model parameters; "
+                            "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
                         )
 
+                    train_loss.backward()
+                    clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), config.grad_clip_max_norm)
+                    optimizer.step()
+
+                    global_train_loss = reduce_mean(train_loss)
+                    train_loss_cpu = train_loss.detach().cpu()
+                    state["train_losses"].append(train_loss_cpu)
+                    current_learning_rate = optimizer.param_groups[0]["lr"]
+
                     if run is not None:
-                        wandb.log(
-                            {"Checkpoint/saved": 1, "Checkpoint/path": str(checkpoint_path), "step": step},
+                        run.log(
+                            {
+                                "Train/loss": global_train_loss.item(),
+                                "step": step,
+                                "learning_rate": current_learning_rate,
+                                **get_examples_stats(train_examples_seen + batch_size_seen, train_timer.elapsed()),
+                                **get_io_stats(d_read, d_write, max(dt, 1.0e-12)),
+                                **get_tensor_stats(maps, "maps"),
+                                **get_tensor_stats(labels, "labels"),
+                            },
                             step=step,
                         )
 
+                    if step < 10:
+                        _validate_gradient_flow(model)
+
+                    if step % 10 == 0:
+                        LOGGER.info(
+                            f'Train loss sweep={sweep_config.sweep_tag} epoch={_epoch:>3d} step={step:>5d} '
+                            f'loss={train_loss_cpu: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
+                        if run is not None:
+                            train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
+                            for key, value in train_loss_components.items():
+                                run.log({f"Train/loss_component/{key}": float(value.detach().cpu())}, step=step)
+
+                    if step % 100 == 0 and run is not None:
+                        grad_logs = get_gradient_stats(model, log_per_parameter=False)
+                        grad_hist = log_selected_gradient_histograms(model)
+                        run.log({**grad_logs, **grad_hist}, step=step)
+
+                    checkpoint_dir = state["checkpoint_dir"]
+                    if _is_main_process() and checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                        checkpoint_path_latest = _latest_checkpoint_path(checkpoint_dir)
+                        checkpoint_path_step = _step_checkpoint_path(checkpoint_dir, step)
+                        for checkpoint_path in [checkpoint_path_latest, checkpoint_path_step]:
+                            save_checkpoint(
+                                checkpoint_path,
+                                model,
+                                optimizer,
+                                step,
+                                run_config,
+                                state["train_losses"],
+                                state["validation_losses"],
+                                loss_fn,
+                                state["active_wandb_info"],
+                            )
+                        if run is not None:
+                            run.log({"Checkpoint/saved": 1, "Checkpoint/path": str(checkpoint_path), "step": step}, step=step)
+
+                if shared_step % 10 == 0:
+                    LOGGER.timer.reset("10steps")
+
+                train_examples_seen += batch_size_seen
+                train_timer.stop()
                 if config.max_steps is not None and session_step >= config.max_steps:
                     LOGGER.debug('Breaking training loop due to max steps')
                     break
-
                 train_timer.start()
-                LOGGER.debug('End of step')
 
+            # Validation after each epoch. The validation batch is prepared once,
+            # then each sweep model evaluates that prepared batch in turn.
+            for state in sweep_states:
+                state["model"].eval()
+            val_accumulators = {
+                id(state): {"losses": [], "mse_losses": [], "targets": [], "predictions": [], "seen": 0}
+                for state in sweep_states
+            }
+            with torch.no_grad():
+                for val_maps, val_labels in loader_validation:
+                    val_maps = val_maps.to(device=device, dtype=torch.float32)
+                    val_labels = val_labels.to(device=device, dtype=torch.float32)
+                    for state in sweep_states:
+                        acc = val_accumulators[id(state)]
+                        predictions = state["model"](val_maps)
+                        loss_fn = state["loss_fn"]
+                        acc["losses"].append(float(loss_fn(predictions, val_labels).detach().cpu()))
+                        acc["mse_losses"].append(float(F.mse_loss(predictions, val_labels).detach().cpu()))
+                        if _is_main_process() and state["config"].checkpoint_dir is not None:
+                            acc["targets"].append(val_labels.detach().cpu())
+                            acc["predictions"].append(predictions.detach().cpu())
+                        acc["seen"] += val_maps.shape[0]
+                    if all(val_accumulators[id(state)]["seen"] >= 2000 for state in sweep_states):
+                        break
 
-            #
-            # Validatio after each epoch
-            #
-
-            validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
-            validation_metrics = evaluate(
-                model,
-                loader_validation,
-                loss_fn,
-                device,
-                num_examples=2000,
-                predictions_path=validation_predictions_path,
-                return_metrics=True,
-            )
-            if validation_metrics is not None:
-                validation_loss = validation_metrics["loss"]
-                validation_losses.append(validation_loss)
+            for state in sweep_states:
+                acc = val_accumulators[id(state)]
+                if not acc["losses"]:
+                    continue
+                validation_loss = sum(acc["losses"]) / len(acc["losses"])
+                validation_mse_loss = sum(acc["mse_losses"]) / len(acc["mse_losses"])
+                state["validation_losses"].append(validation_loss)
+                validation_predictions_path = _evaluation_predictions_path(state["config"], _epoch) if _is_main_process() else None
+                if validation_predictions_path is not None:
+                    _save_evaluation_predictions(validation_predictions_path, acc["targets"], acc["predictions"])
+                run = state["run"]
                 if run is not None:
-                    validation_log: dict[str, Any] = {
-                        "Validation/loss": validation_loss,
-                        "Validation/mse_loss": validation_metrics["mse_loss"],
-                        "step": step,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    }
-                    wandb.log(validation_log, step=step)
-                    
+                    step = int(state["step"])
+                    run.log(
+                        {
+                            "Validation/loss": validation_loss,
+                            "Validation/mse_loss": validation_mse_loss,
+                            "step": step,
+                            "learning_rate": state["optimizer"].param_groups[0]["lr"],
+                        },
+                        step=step,
+                    )
                     if validation_predictions_path is not None and validation_predictions_path.exists():
-                        plots_log = {}
-                        fig = plot_evaluation_file(
-                            validation_predictions_path,
-                            parameter_names_from_physics_model(physics_model),
-                        )
-                        plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
+                        fig = plot_evaluation_file(validation_predictions_path, parameter_names_from_physics_model(physics_model))
+                        run.log({"Plots/targets_vs_predictions": wandb.Image(fig)}, step=_epoch)
                         import matplotlib.pyplot as plt
                         plt.close(fig)
-                        wandb.log(plots_log, step=_epoch)
-                    
 
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
 
         LOGGER.info(f'Epoch {_epoch} completed')
 
-    LOGGER.info(f'Training completed with {step} steps')
+    LOGGER.info(f'Training completed with {session_step} shared steps')
 
-    # save the latest checkpoint after all epochs/steps complete
-    if _is_main_process() and checkpoint_dir:
-        latest_checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
-        save_checkpoint(
-            latest_checkpoint_path,
-            model,
-            optimizer,
-            step,
-            config,
-            train_losses,
-            validation_losses,
-            loss_fn,
-            active_wandb_info,
-        )
+    if _is_main_process():
+        for state in sweep_states:
+            checkpoint_dir = state["checkpoint_dir"]
+            if checkpoint_dir:
+                latest_checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
+                save_checkpoint(
+                    latest_checkpoint_path,
+                    state["model"],
+                    state["optimizer"],
+                    int(state["step"]),
+                    state["config"],
+                    state["train_losses"],
+                    state["validation_losses"],
+                    state["loss_fn"],
+                    state["active_wandb_info"],
+                )
+                run = state["run"]
+                if run is not None:
+                    run.log({"Checkpoint/saved": 1, "Checkpoint/path": str(latest_checkpoint_path), "step": int(state["step"])}, step=int(state["step"]))
+
+    for state in sweep_states:
+        run = state["run"]
         if run is not None:
-            wandb.log(
-                {"Checkpoint/saved": 1, "Checkpoint/path": str(latest_checkpoint_path), "step": step},
-                step=step,
-            )
-
-    # finish wandb run
-    if run is not None:
-        run.finish()
+            run.finish()
     _ddp_barrier()
 
     # destroy process group
     if ddp_enabled and dist.is_initialized():
         dist.destroy_process_group()
 
-    return {"model": model, "step": step, "train_losses": train_losses, "validation_losses": validation_losses}
+    return {"sweep": sweep_states, "step": session_step}
 
 
 def train_from_config(
