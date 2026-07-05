@@ -52,6 +52,7 @@ class TrainingConfig:
     num_epochs: int | None = 1
     max_steps: int | None = None
     learning_rate: float = 1.0e-3
+    grad_clip_max_norm: float = 1.0
     num_workers: int = 1
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
@@ -566,41 +567,41 @@ def get_gradient_stats(model, log_per_parameter=False):
 
 
 
-def train_one_step(
-    model: nn.Module,
-    batch: tuple[torch.Tensor, torch.Tensor],
-    optimizer: torch.optim.Optimizer,
-    loss_fn: nn.Module,
-    device: torch.device | str,
-) -> float:
-    """Run one optimization step and return the scalar loss."""
-    model.train()
-    maps, labels = batch
-    LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-    LOGGER.debug(f'Labels shape={labels.shape}')
-    maps = maps.to(device=device, dtype=torch.float32)
-    labels = labels.to(device=device, dtype=torch.float32)
+# def train_one_step(
+#     model: nn.Module,
+#     batch: tuple[torch.Tensor, torch.Tensor],
+#     optimizer: torch.optim.Optimizer,
+#     loss_fn: nn.Module,
+#     device: torch.device | str,
+# ) -> float:
+#     """Run one optimization step and return the scalar loss."""
+#     model.train()
+#     maps, labels = batch
+#     LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+#     LOGGER.debug(f'Labels shape={labels.shape}')
+#     maps = maps.to(device=device, dtype=torch.float32)
+#     labels = labels.to(device=device, dtype=torch.float32)
 
-    optimizer.zero_grad(set_to_none=True)
-    LOGGER.debug('Running forward pass')
-    predictions = model(maps)
-    LOGGER.debug('Running loss')
-    loss = loss_fn(predictions, labels)
-    if not loss.requires_grad:
-        raise RuntimeError(
-            "The training loss is detached from the model parameters; "
-            "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
-        )
+#     optimizer.zero_grad(set_to_none=True)
+#     LOGGER.debug('Running forward pass')
+#     predictions = model(maps)
+#     LOGGER.debug('Running loss')
+#     loss = loss_fn(predictions, labels)
+#     if not loss.requires_grad:
+#         raise RuntimeError(
+#             "The training loss is detached from the model parameters; "
+#             "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
+#         )
 
-    LOGGER.debug('Running backward pass')
-    loss.backward()
+#     LOGGER.debug('Running backward pass')
+#     loss.backward()
 
-    LOGGER.debug('Clipping gradients')
-    clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
+#     LOGGER.debug('Clipping gradients')
+#     clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
 
-    LOGGER.debug('Running optimizer step')
-    optimizer.step()
-    return float(loss.detach().cpu())
+#     LOGGER.debug('Running optimizer step')
+#     optimizer.step()
+#     return float(loss.detach().cpu())
 
 
 def train(
@@ -849,7 +850,7 @@ def train(
                 train_loss.backward()
 
                 LOGGER.debug('Clipping gradients')
-                clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
+                clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), config.grad_clip_max_norm)
 
                 LOGGER.debug('Running optimizer step')
                 # grad_scaler.step(optimizer)
@@ -982,7 +983,9 @@ def train(
                             parameter_names_from_physics_model(physics_model),
                         )
                         plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
-                        fig.close()
+                        # fig.close()
+                        import matplotlib.pyplot as plt
+                        plt.close(fig)
                         wandb.log(plots_log, epoch=_epoch)
                     
 
