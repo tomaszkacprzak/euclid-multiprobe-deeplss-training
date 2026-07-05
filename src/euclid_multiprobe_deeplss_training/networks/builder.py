@@ -69,8 +69,8 @@ def build_encoder(encoder_name: str,
             "poly_degree": 5,
             "n_neighbors": 20,
         }
-        # Update with model_args
-        constructor_args.update(model_args or {})
+        # Update with encoder_args
+        constructor_args.update(encoder_args or {})
 
         # Build model
         model = ResnetDeepSphereRegressor(
@@ -80,7 +80,7 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"Built ResnetDeepSphereRegressor {encoder_name}")
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  n_side: {nside}, n_side_down: {nside_down}, num_pixels: {num_pixels}")
-        LOGGER.info(f"  model_args: {constructor_args}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
 
     else:
 

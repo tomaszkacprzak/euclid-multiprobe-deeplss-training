@@ -361,6 +361,8 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
         if wandb_info_dict.get("name") is not None and config_dict.get("wandb_run_name") is None:
             init_kwargs["name"] = wandb_info_dict["name"]
 
+    init_kwargs['settings'] = wandb.Settings(x_stats_sampling_interval=0.5)
+
     return wandb.init(**init_kwargs)
 
 
@@ -455,50 +457,6 @@ def load_checkpoint(
         list(checkpoint.get("train_losses", [])),
         list(checkpoint.get("val_losses", checkpoint.get("validation_losses", []))),
     )
-
-
-def _print_initial_model_summary(
-    model: nn.Module,
-    dataloader: Any,
-    device: torch.device | str,
-) -> Any:
-    """Print architecture and trainable-parameter table before training.
-
-    The summary needs one forward pass to collect layer input/output shapes.
-    The sampled batch is chained back onto the returned iterator so the first
-    training epoch still sees the same data item.
-    """
-    from .modelprofile import _print_model_specification_table, _register_model_specification_hooks
-
-    def _print_rank_zero(model, rows):
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        global_rank = int(os.environ.get("RANK", "0"))
-        if local_rank == 0 and global_rank == 0:
-            _print_model_specification_table(model, rows)
-            print()
-
-    iterator = iter(dataloader)
-    try:
-        first_batch = next(iterator)
-    except StopIteration:
-        LOGGER.warning("Skipping model parameter table because the training dataloader produced no batches.")
-        _print_rank_zero(model, [])
-        return iter(())
-
-    rows, hooks = _register_model_specification_hooks(model)
-    was_training = model.training
-    model.eval()
-    try:
-        maps, _labels = first_batch
-        with torch.no_grad():
-            model(maps.to(device))
-    finally:
-        for handle in hooks:
-            handle.remove()
-        model.train(was_training)
-
-    _print_rank_zero(model, rows)
-    return itertools.chain([first_batch], iterator)
 
 
 
@@ -613,23 +571,37 @@ def train(
     from .networks.builder import build_encoder, build_loss
     
 
+    # 
+    # Configuration
+    #
 
+    # read config
     config = _coerce_config(config_or_path)
-    ddp_enabled, rank, world_size, local_rank, device = _setup_ddp(config, device)
-    LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
-    LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
-    
     LOGGER.info(f"\n\nTag: {config.tag}\n")
+
+    # setup ddp
+    ddp_enabled, rank, world_size, local_rank, device = _setup_ddp(config, device)
     LOGGER.info(f"Training on {device} with config: {config}")
     if ddp_enabled:
         LOGGER.info(f"DDP enabled: rank={rank} local_rank={local_rank} world_size={world_size}")
 
+    # cuda info
+    LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
+    LOGGER.info(f"CUDA device count: {torch.cuda.device_count()}")
+    for i in range(torch.cuda.device_count()):
+        LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
+
+    # numerical precision
+    torch.set_float32_matmul_precision("medium")
+    LOGGER.info(f'Matmul precision: {torch.get_float32_matmul_precision()}')
+
+    # recompile models
+    # torch._dynamo.reset()
+
     # 
     # Data loaders
     #
-    nside_training = 256
+    nside_training = 512
     indices_pixels_healpix = load_pixel_indices(config.forward_model)
     import numpy as np
     indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
@@ -639,14 +611,17 @@ def train(
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
                         device=device,
-                        seed=seed).to(device)
-    physics_model = torch.compile(physics_model)
+                        seed=seed,
+                        nside=nside_training)
+    physics_model = physics_model.to(device)
+    # physics_model = torch.compile(physics_model, dynamic=True)
 
     # Downsample all maps to the same nside
     downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
                                   nside_base=config.forward_model["analysis"]["n_side_down"], 
-                                  nside_lower=nside_training).to(device)
-    downsampler = torch.compile(downsampler)
+                                  nside_lower=nside_training)
+    downsampler = downsampler.to(device)
+    # downsampler = torch.compile(downsampler, dynamic=True)
     
     # Downsample each channel to a different nside
     # smoother = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -683,14 +658,12 @@ def train(
                             batch_size=config.batch_size,
                             indices=indices_pixels_healpix,
                             device=device)
-    encoder.to(device)
+    encoder = encoder.to(device)
+    # encoder = torch.compile(encoder, dynamic=True)
+
+    # print some info
     torchinfo.summary(encoder, input_size=(loader_training.batch_size, loader_training.num_pixels, loader_training.num_channels))
-    encoder = torch.compile(encoder)
-    
-    
-
-
-    LOGGER.info(f'Encoder: {config.encoder_name}\n' + str(_unwrap_parallel_module(encoder)) + '\n')    
+    LOGGER.info(f'Encoder: {config.encoder_name}')    
 
     #
     # Loss function 
@@ -701,14 +674,13 @@ def train(
                       embed_dim=config.embed_dim,
                       loss_args=config.loss_args if hasattr(config, "loss_args") else {})
     loss = loss.to(device)
-    loss = torch.compile(loss)
-    LOGGER.info(f'Loss function: {config.loss_function}\n' + str(_unwrap_parallel_module(loss)) + '\n')
+    # loss = torch.compile(loss)
+    LOGGER.info(f'Loss function: {config.loss_function}')
 
 
     #
-    # Distribute the model
+    # Configure and distribute the model
     #
-
     if ddp_enabled and any(parameter.requires_grad for parameter in loss.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         encoder = DDP(encoder, **ddp_kwargs)
@@ -872,11 +844,6 @@ def train(
                         f'Train loss epoch={_epoch:>3d} step={step:>5d} '
                         f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
                     LOGGER.timer.reset("10steps")
-                    if run is not None:
-                        train_loss_components = loss_fn.loss_components(predictions, labels) if hasattr(loss_fn, "loss_components") else {}
-                        for key, value in train_loss_components.items():
-                            value = float(value.detach().cpu())
-                            wandb.log({f"Train/loss_component/{key}": value}, step=step)
                 
                 # infrequent metrics
                 if step % 100 == 0:
@@ -910,6 +877,7 @@ def train(
                             step=step,
                         )
 
+                # break dataloader loop if max steps is reached
                 if config.max_steps is not None and session_step >= config.max_steps:
                     LOGGER.debug('Breaking training loop due to max steps')
                     break
@@ -921,7 +889,7 @@ def train(
             #
             # Validation after each epoch
             #
-
+            LOGGER.info('Running validation')
             validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
             validation_metrics = evaluate(
                 encoder,
@@ -937,7 +905,7 @@ def train(
                 if run is not None:
                     validation_log: dict[str, Any] = {
                         "Validation/loss": validation_loss,
-                        "Validation/mse_loss": validation_metrics["mse_loss"],
+                        "Validation/prediction_loss": validation_metrics["prediction_loss"],
                         "step": step,
                         "learning_rate": optimizer.param_groups[0]["lr"],
                     }
@@ -955,7 +923,7 @@ def train(
                         wandb.log(plots_log, step=step)
                         LOGGER.debug(f'Logged validation plots for step {step}')
                     
-
+            # break epoch if max steps is reached
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
 

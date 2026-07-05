@@ -18,6 +18,11 @@ class NestDownsampler(nn.Module):
         self.nside = int(nside)
         self.nside_base = int(nside_base)
         self.nside_lower = int(nside_lower)
+        self.nord_lower = hp.nside2order(self.nside_lower)
+        self.nord_base = hp.nside2order(self.nside_base)
+        self.nord = hp.nside2order(self.nside)
+        self.npix = hp.nside2npix(self.nside)
+        self.npix_base = hp.nside2npix(self.nside_base)
         operators = {"sum": torch.sum, "mean": torch.mean}
 
         try:
@@ -28,13 +33,11 @@ class NestDownsampler(nn.Module):
     def forward(self, x):
 
         batch_size, npix, num_bins, num_fields = x.shape # assumes the same number of bins for each field
-        nord = hp.nside2order(self.nside)
-        nord_base = hp.nside2order(self.nside_base)
-        npix_base = npix // ( hp.nside2npix(self.nside) // hp.nside2npix(self.nside_base)) 
-        nord_lower = hp.nside2order(self.nside_lower)
+        npix_base = npix // ( self.npix // self.npix_base) 
+        
 
-        shape = [batch_size, npix_base] + [4] * (nord - nord_base) + [num_bins, num_fields]
-        dims_sum = tuple(range(1 + nord_lower - nord_base + 1, 1 + nord - nord_base + 1))  # 1+ because of the batch dimension
+        shape = [batch_size, npix_base] + [4] * (self.nord - self.nord_base) + [num_bins, num_fields]
+        dims_sum = tuple(range(1 + self.nord_lower - self.nord_base + 1, 1 + self.nord - self.nord_base + 1))  # 1+ because of the batch dimension
         x_lower = self.operator(x.reshape(shape), dim=dims_sum, keepdims=False)
                 
         return x_lower.reshape(batch_size, -1, num_bins, num_fields)
