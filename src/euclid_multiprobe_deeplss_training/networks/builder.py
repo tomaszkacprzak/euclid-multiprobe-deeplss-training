@@ -11,7 +11,7 @@ LOGGER = get_logger(__file__)
     
 def build_model(model_name: str,
                 num_channels: int,
-                num_targets: int,
+                embed_dim: int,
                 nside: int,
                 nside_down: int,
                 num_pixels: int,
@@ -43,12 +43,12 @@ def build_model(model_name: str,
             nside_down=nside_down,
             num_pixels=num_pixels,
             in_channels=num_channels,
-            num_outputs=num_targets,
+            num_outputs=embed_dim,
             **constructor_args,
         )
 
         LOGGER.info(f"Built HealpixNestedHierarchicalLocalWindowTransformer {model_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
 
 
     elif model_name == "deepsphere_resnet":
@@ -64,7 +64,7 @@ def build_model(model_name: str,
             "indices": indices,
             "batch_size": batch_size,
             "n_channels": num_channels,
-            "out_features": num_targets,
+            "out_features": embed_dim,
             "n_filters": 32,
             "downsampling_layers": 2,
             "cheby_layers": 2,
@@ -81,7 +81,7 @@ def build_model(model_name: str,
         )
 
         LOGGER.info(f"Built ResnetDeepSphereRegressor {model_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, num_targets: {num_targets}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  n_side: {nside}, n_side_down: {nside_down}, num_pixels: {num_pixels}")
         LOGGER.info(f"  model_args: {constructor_args}")
 

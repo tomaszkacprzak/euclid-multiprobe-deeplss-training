@@ -180,8 +180,6 @@ def evaluate(
     device: torch.device | str,
     num_examples: int | str | Path = 10000,
     predictions_path: str | Path | None = None,
-    *,
-    return_metrics: bool = False,
 ) -> float | dict[str, float] | None:
     """Evaluate one full validation stream pass and optionally save targets/predictions.
 
@@ -196,35 +194,50 @@ def evaluate(
 
     model.eval()
     losses: list[float] = []
-    mse_losses: list[float] = []
+    prediction_losses: list[float] = []
     target_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
     num_examples_seen = 0
+    
     for maps, labels in dataloader:
+
+        # Evaluatate model embeddings
         maps = maps.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.float32)
-        predictions = model(maps)
-        losses.append(float(loss_fn(predictions, labels).detach().cpu()))
-        mse_losses.append(float(F.mse_loss(predictions, labels).detach().cpu()))
+        embeddings = model(maps)
+
+        # Evaluate main loss function
+        loss = float(loss_fn(embeddings, labels).detach().cpu())
+        losses.append(loss)
+
+        # Evaluate predictions and their MSE loss
+        predictions = loss_fn.predict(embeddings)
+        prediction_loss = float(F.mse_loss(predictions, labels).detach().cpu())
+        prediction_losses.append(prediction_loss)
+
+        # Store targets and predictions
         if predictions_path is not None:
             target_batches.append(labels.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
+
+        # Housekeeping
         num_examples_seen += maps.shape[0]
         if num_examples_seen >= num_examples:
             break
+
     if not losses:
         return None
+
     if predictions_path is not None:
         _save_evaluation_predictions(predictions_path, target_batches, prediction_batches)
 
     metrics = {
         "loss": sum(losses) / len(losses),
-        "mse_loss": sum(mse_losses) / len(mse_losses),
+        "prediction_loss": sum(prediction_losses) / len(prediction_losses),
     }
-    if return_metrics:
-        return metrics
-    return metrics["loss"]
 
+    return metrics
+    
 
 def _save_evaluation_predictions(
     path: str | Path,
@@ -586,45 +599,6 @@ def get_gradient_stats(model, log_per_parameter=False):
     return logs
 
 
-
-
-# def train_one_step(
-#     model: nn.Module,
-#     batch: tuple[torch.Tensor, torch.Tensor],
-#     optimizer: torch.optim.Optimizer,
-#     loss_fn: nn.Module,
-#     device: torch.device | str,
-# ) -> float:
-#     """Run one optimization step and return the scalar loss."""
-#     model.train()
-#     maps, labels = batch
-#     LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-#     LOGGER.debug(f'Labels shape={labels.shape}')
-#     maps = maps.to(device=device, dtype=torch.float32)
-#     labels = labels.to(device=device, dtype=torch.float32)
-
-#     optimizer.zero_grad(set_to_none=True)
-#     LOGGER.debug('Running forward pass')
-#     predictions = model(maps)
-#     LOGGER.debug('Running loss')
-#     loss = loss_fn(predictions, labels)
-#     if not loss.requires_grad:
-#         raise RuntimeError(
-#             "The training loss is detached from the model parameters; "
-#             "check the model forward pass for torch.no_grad(), detach(), or non-PyTorch conversions."
-#         )
-
-#     LOGGER.debug('Running backward pass')
-#     loss.backward()
-
-#     LOGGER.debug('Clipping gradients')
-#     clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), 1.0)
-
-#     LOGGER.debug('Running optimizer step')
-#     optimizer.step()
-#     return float(loss.detach().cpu())
-
-
 def train(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
     model: nn.Module | None = None,
@@ -638,28 +612,14 @@ def train(
     supports deterministic seeking; for now, restarts resume model/loss/
     optimizer/global-step state rather than seeking to the prior stream item.
     """
-    global NestDownsampler, OntheflyPhysicsModelLinear, OntheflyPipeline, build_loss, build_model
+    from msfm.onthefly_pipeline import OntheflyPipeline
+    from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
+    from msfm.networks.smoothing import NestDownsampler
+    from msfm.networks.smoothing import NestChannelDownsampler
+    from msfm.losses.builder import build_loss
+    from msfm.networks.builder import build_model
+    
 
-    if OntheflyPhysicsModelLinear is None:
-        from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear as _OntheflyPhysicsModelLinear
-
-        OntheflyPhysicsModelLinear = _OntheflyPhysicsModelLinear
-    if OntheflyPipeline is None:
-        from msfm.onthefly_pipeline import OntheflyPipeline as _OntheflyPipeline
-
-        OntheflyPipeline = _OntheflyPipeline
-    if build_loss is None:
-        from .losses.builder import build_loss as _build_loss
-
-        build_loss = _build_loss
-    if build_model is None:
-        from .networks.builder import build_model as _build_model
-
-        build_model = _build_model
-    if NestDownsampler is None:
-        from .networks.smoothing import NestDownsampler as _NestDownsampler
-
-        NestDownsampler = _NestDownsampler
 
     config = _coerce_config(config_or_path)
     ddp_enabled, rank, world_size, local_rank, device = _setup_ddp(config, device)
@@ -687,13 +647,13 @@ def train(
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
                         device=device,
-                        seed=seed).to(device)
+                        seed=seed).to('cpu')
 
     # Downsample all maps to the same nside
     smoothing_model = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
                             nside_base=config.forward_model["analysis"]["n_side_down"], 
                             nside_lower=nside_training, 
-                            operator="mean").to(device)
+                            operator="mean").to('cpu')
     
     # Downsample each channel to a different nside
     # smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -720,15 +680,15 @@ def train(
     #
  
     model = build_model(config.model_name, 
-                    num_channels=physics_model.num_channels,
-                    num_targets=physics_model.num_targets,
-                    num_pixels=loader_training.num_pixels,
-                    nside=nside_training,
-                    nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                    model_args=config.model_args if hasattr(config, "model_args") else {},
-                    batch_size=config.batch_size,
-                    indices=indices_pixels_healpix,
-                    device=device)
+                        num_channels=physics_model.num_channels,
+                        embed_dim=config.embed_dim,
+                        num_pixels=loader_training.num_pixels,
+                        nside=nside_training,
+                        nside_down=int(config.forward_model["analysis"]["n_side_down"]),
+                        model_args=config.model_args if hasattr(config, "model_args") else {},
+                        batch_size=config.batch_size,
+                        indices=indices_pixels_healpix,
+                        device=device)
     model.to(device)
 
     # Some models, including DeepSphere's HealpyGCNN layers and lazy PyTorch
@@ -748,8 +708,9 @@ def train(
     #
 
     loss_fn = build_loss(config.loss_function, 
-                    num_targets=physics_model.num_targets, 
-                    loss_args=config.loss_args if hasattr(config, "loss_args") else {})
+                         num_targets=physics_model.num_targets, 
+                         embed_dim=config.embed_dim,
+                         loss_args=config.loss_args if hasattr(config, "loss_args") else {})
 
     loss_fn = loss_fn.to(device)
     if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
@@ -822,10 +783,6 @@ def train(
             LOGGER.timer.start("10steps")
             train_timer.start()   
             for batch in epoch_batches:
-
-                
-
-            
 
             # overfit on a single batch
             # batch = next(iter(epoch_batches))

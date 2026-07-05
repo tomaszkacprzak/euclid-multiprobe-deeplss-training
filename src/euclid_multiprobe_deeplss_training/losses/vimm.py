@@ -4,17 +4,17 @@ import torch.nn.functional as F
 from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal
 
 
-class FullCovMixtureDensityRegressor(nn.Module):
+class VIMMGMMHead(nn.Module):
     """
-    Multivariate Gaussian-mixture density regressor with full covariance matrices.
+    Multivariate Gaussian-mixture density head with full covariance matrices.
 
-    The module maps an input feature vector ``x`` to the parameters of
-    ``q_phi(y | x)``, a ``K``-component mixture of multivariate Gaussian
+    The module maps an input feature vector ``z`` to the parameters of
+    ``q_phi(y | z)``, a ``K``-component mixture of multivariate Gaussian
     distributions. Each component has its own mean vector and full covariance
     matrix parameterized through a lower-triangular Cholesky factor.
 
     Args:
-        x_dim: Number of features in each input sample ``x``.
+        z_dim: Number of features in each input sample ``x``.
         y_dim: Number of regression targets in each output/event sample ``y``.
         hidden_dim: Width of the two hidden encoder layers.
         n_components: Number of Gaussian mixture components ``K``.
@@ -22,7 +22,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
             ``softplus`` to keep component covariance matrices positive definite.
 
     Inputs:
-        x: Tensor with shape ``[batch_size, x_dim]`` containing input features.
+        z: Tensor with shape ``[batch_size, z_dim]`` containing input features.
         y: Tensor with shape ``[batch_size, y_dim]`` containing target values;
             used by :meth:`nll` when computing the negative conditional
             log-likelihood.
@@ -35,14 +35,14 @@ class FullCovMixtureDensityRegressor(nn.Module):
             ``[batch_size, n_components, y_dim]`` and Cholesky factors with shape
             ``[batch_size, n_components, y_dim, y_dim]``.
         nll: Scalar tensor containing the mean negative log-likelihood
-            ``-log q_phi(y | x)`` across the batch.
+            ``-log q_phi(y | z)`` across the batch.
         predict_mean: Tensor with shape ``[batch_size, y_dim]`` containing the
-            mixture mean ``E[Y | x]``.
+            mixture mean ``E[Y | z]``.
     """
 
     def __init__(
         self,
-        x_dim: int,
+        z_dim: int,
         y_dim: int,
         hidden_dim: int = 128,
         n_components: int = 5,
@@ -50,7 +50,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
     ):
         super().__init__()
 
-        self.x_dim = x_dim
+        self.z_dim = z_dim
         self.y_dim = y_dim
         self.n_components = n_components
         self.min_scale = min_scale
@@ -59,7 +59,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
         self.n_tril = y_dim * (y_dim + 1) // 2
 
         self.encoder = nn.Sequential(
-            nn.Linear(x_dim, hidden_dim),
+            nn.Linear(z_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -82,7 +82,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
         Build ``q_phi(y | x)`` or score targets with its mean NLL.
 
         Args:
-            x: Tensor with shape ``[batch_size, x_dim]`` containing input
+            x: Tensor with shape ``[batch_size, z_dim]`` containing input
                 features. The tensor device and dtype are used for all generated
                 distribution parameters.
 
@@ -144,7 +144,7 @@ class FullCovMixtureDensityRegressor(nn.Module):
         ``I(Z; Y)``, ignoring the constant ``H(Y)``.
 
         Args:
-            x: Tensor with shape ``[batch_size, x_dim]`` containing input
+            x: Tensor with shape ``[batch_size, z_dim]`` containing input
                 features.
             y: Tensor with shape ``[batch_size, y_dim]`` containing regression
                 targets/events to score under ``q_phi(y | x)``.
@@ -165,16 +165,16 @@ class FullCovMixtureDensityRegressor(nn.Module):
         return self.nll(x, y)
 
     @torch.no_grad()
-    def predict_mean(self, x: torch.Tensor) -> torch.Tensor:
+    def predict(self, z: torch.Tensor) -> torch.Tensor:
         """
-        Predict the conditional mixture mean ``E[Y | x]``.
+        Predict the conditional mixture mean ``E[Y | z]``.
 
         Args:
-            x: Tensor with shape ``[batch_size, x_dim]`` containing input
+            z: Tensor with shape ``[batch_size, z_dim]`` containing input
                 features.
 
         Returns:
             Tensor with shape ``[batch_size, y_dim]`` containing the weighted
             mean across Gaussian mixture components.
         """
-        return self.distribution(x).mean
+        return self.distribution(z).mean

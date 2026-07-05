@@ -1,24 +1,23 @@
 from ..utils.logger import get_logger
-from .vimm import FullCovMixtureDensityRegressor
 from torch import nn
 
 LOGGER = get_logger(__file__)
-    
+
+
 def build_loss(loss_name: str,
+               embed_dim: int,
                num_targets: int,
                loss_args: dict = {}):
 
     if loss_name == "mse":
 
-        loss_fn = nn.MSELoss()
+        from .mse import MSEHead
+        loss_fn = MSEHead(embed_dim, num_targets)
 
     elif loss_name == "vimm_gmm":
 
-        loss_fn = FullCovMixtureDensityRegressor(
-            x_dim=num_targets,
-            y_dim=num_targets,
-            **loss_args,
-        )
+        from .vimm import GMMHead
+        loss_fn = VIMMGMMHead(embed_dim, num_targets, **loss_args)
         
     else:
 
@@ -26,4 +25,3 @@ def build_loss(loss_name: str,
 
 
     return loss_fn
-
