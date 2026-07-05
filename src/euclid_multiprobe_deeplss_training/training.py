@@ -38,8 +38,8 @@ class TrainingConfig:
     """
     
     records_pattern: str
-    model_name: str = "nested_transformer"
-    model_args: dict[str, Any] = field(default_factory=dict)
+    encoder_name: str = "nested_transformer"
+    encoder_args: dict[str, Any] = field(default_factory=dict)
     embed_dim: int = 64
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
@@ -104,8 +104,8 @@ class TrainingConfig:
             raise ValueError("num_workers must be non-negative.")
         if self.checkpoint_every_steps < 0:
             raise ValueError("checkpoint_every_steps must be non-negative.")
-        if not isinstance(self.model_args, Mapping):
-            raise TypeError("model_args must be a mapping.")
+        if not isinstance(self.encoder_args, Mapping):
+            raise TypeError("encoder_args must be a mapping.")
 
 
 
@@ -634,7 +634,6 @@ def train(
     import numpy as np
     indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
    
-
     # use non-reproducible seed, TODO: fix to reproducible
     seed = int(time.time())
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 

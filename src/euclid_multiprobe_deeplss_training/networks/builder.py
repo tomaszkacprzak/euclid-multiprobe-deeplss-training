@@ -98,12 +98,12 @@ def build_loss(loss_name: str,
 
     if loss_name == "mse":
 
-        from .mse import MSEHead
+        from .mse_loss import MSEHead
         loss_fn = MSEHead(embed_dim, num_targets)
 
     elif loss_name == "vimm_gmm":
 
-        from .vimm import VIMMGMMHead
+        from .vimm_loss import VIMMGMMHead
         loss_fn = VIMMGMMHead(embed_dim, num_targets, **loss_args)
         
     else:
