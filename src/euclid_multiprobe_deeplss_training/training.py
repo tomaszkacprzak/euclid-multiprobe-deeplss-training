@@ -1016,7 +1016,8 @@ def train(
                         plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
                         import matplotlib.pyplot as plt
                         plt.close(fig)
-                        wandb.log(plots_log, step=_epoch)
+                        wandb.log(plots_log, step=step)
+                        LOGGER.info(f'Logged validation plots for step {step}')
                     
 
             if config.max_steps is not None and session_step >= config.max_steps:
