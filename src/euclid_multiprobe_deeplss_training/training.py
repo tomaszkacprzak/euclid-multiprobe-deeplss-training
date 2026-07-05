@@ -609,7 +609,7 @@ def train(
     """
     from msfm.onthefly_pipeline import OntheflyPipeline
     from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-    from .networks.smoothing import NestDownsampler, NestChannelDownsampler, NestDownsamplerChannelOperators
+    from .networks.smoothing import NestDownsampler, NestChannelDownsampler
     from .losses.builder import build_loss
     from .networks.builder import build_model
     
@@ -640,13 +640,15 @@ def train(
     seed = int(time.time())
     physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
                         scalers=True,
-                        device='cpu',
+                        device=device,
                         seed=seed).to(device)
+    physics_model = torch.compile(physics_model)
 
     # Downsample all maps to the same nside
     downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
                                   nside_base=config.forward_model["analysis"]["n_side_down"], 
                                   nside_lower=nside_training).to(device)
+    downsampler = torch.compile(downsampler)
     
     # Downsample each channel to a different nside
     # smoother = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
@@ -684,6 +686,7 @@ def train(
                         indices=indices_pixels_healpix,
                         device=device)
     model.to(device)
+    model = torch.compile(model)
 
     # Some models, including DeepSphere's HealpyGCNN layers and lazy PyTorch
     # heads, register/materialize parameters during the first forward pass.
@@ -705,8 +708,9 @@ def train(
                          num_targets=physics_model.num_targets, 
                          embed_dim=config.embed_dim,
                          loss_args=config.loss_args if hasattr(config, "loss_args") else {})
-
     loss_fn = loss_fn.to(device)
+    loss_fn = torch.compile(loss_fn)
+
     if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         loss_fn = DDP(loss_fn, **ddp_kwargs)
