@@ -16,7 +16,7 @@ def build_loss(loss_name: str,
 
     elif loss_name == "vimm_gmm":
 
-        from .vimm import GMMHead
+        from .vimm import VIMMGMMHead
         loss_fn = VIMMGMMHead(embed_dim, num_targets, **loss_args)
         
     else:

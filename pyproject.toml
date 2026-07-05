@@ -35,7 +35,10 @@ dependencies = [
   "pyyaml",
   "wandb",
   "psutil",
-  "deepsphere"
+  "deepsphere",
+  "torchview",
+  "graphviz",
+  "torchinfo"
 ]
 
 [project.optional-dependencies]

@@ -610,8 +610,7 @@ def train(
     from msfm.onthefly_pipeline import OntheflyPipeline
     from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
     from .networks.smoothing import NestDownsampler, NestChannelDownsampler
-    from .losses.builder import build_loss
-    from .networks.builder import build_model
+    from .networks.builder import build_network
     
 
 
@@ -675,46 +674,35 @@ def train(
     # Build neural network
     #
  
-    model = build_model(config.model_name, 
+    encoder = build_encoder(config.encoder_name, 
                         num_channels=physics_model.num_channels,
                         embed_dim=config.embed_dim,
                         num_pixels=loader_training.num_pixels,
                         nside=nside_training,
                         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                        model_args=config.model_args if hasattr(config, "model_args") else {},
+                        model_args=config.encoder_args if hasattr(config, "encoder_args") else {},
                         batch_size=config.batch_size,
                         indices=indices_pixels_healpix,
                         device=device)
-    model.to(device)
-    model = torch.compile(model)
+    encoder.to(device)
 
-    # Some models, including DeepSphere's HealpyGCNN layers and lazy PyTorch
-    # heads, register/materialize parameters during the first forward pass.
-    # Do this before wrapping in DDP, building the optimizer, or restoring a
-    # checkpoint so all checkpoint keys are expected by the model state_dict.
-    training_batches = _print_initial_model_summary(model, loader_training, device)
-
-    if ddp_enabled:
-        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        model = DDP(model, **ddp_kwargs)
-
-    LOGGER.info(f'Model: {config.model_name}\n' + str(_unwrap_parallel_module(model)) + '\n')    
+    LOGGER.info(f'Encoder: {config.encoder_name}\n' + str(_unwrap_parallel_module(encoder)) + '\n')    
 
     #
     # Loss function 
     #
 
-    loss_fn = build_loss(config.loss_function, 
+    loss = build_loss(config.loss_function, 
                          num_targets=physics_model.num_targets, 
                          embed_dim=config.embed_dim,
                          loss_args=config.loss_args if hasattr(config, "loss_args") else {})
-    loss_fn = loss_fn.to(device)
-    loss_fn = torch.compile(loss_fn)
-
-    if ddp_enabled and any(parameter.requires_grad for parameter in loss_fn.parameters()):
+    loss = loss.to(device)
+    model = torch.nn.Sequential(encoder, loss)
+    
+    if ddp_enabled and any(parameter.requires_grad for parameter in loss.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        loss_fn = DDP(loss_fn, **ddp_kwargs)
-    LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss_fn)}')
+        loss = DDP(loss, **ddp_kwargs)
+    LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss)}')
 
     # 
     # Build optimizer
@@ -774,13 +762,13 @@ def train(
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
     for _epoch in range(config.num_epochs or 10**12):
 
-        epoch_batches = training_batches if _epoch == 0 else loader_training
+        # epoch_batches = training_batches if _epoch == 0 else loader_training
         # with DeviceTraceMode(only_cpu=True):
         with torch.profiler.record_function("training_loop"):
 
             LOGGER.timer.start("10steps")
             train_timer.start()   
-            for batch in epoch_batches:
+            for batch in loader_training:
 
             # overfit on a single batch
             # batch = next(iter(epoch_batches))
