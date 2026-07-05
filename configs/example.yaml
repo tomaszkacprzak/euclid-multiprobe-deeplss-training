@@ -2,12 +2,29 @@
 records_pattern: "webdataset_EuclidDR1F/EuclidDR1F_grid_dmb_*.tar"
 config_forward_model: "config_msfm_EuclidDR1F_onthefly.yaml"
 
-# Training settings.
-batch_size: 4
-num_workers: 4
-max_steps: 10000
+# Training settings shared by every sweep element.
+sweep:
+  - sweep_tag: default
+    model_name: "nested_transformer"
+    model_args:
+      base_embed_dim: 128
+      growth: "128"
+    loss_function: "mse"
+    learning_rate: 0.00001
+  - sweep_tag: vimm
+    model_name: "nested_transformer"
+    model_args:
+      base_embed_dim: 64
+      growth: "128"
+    loss_function: "vimm_gmm"
+    loss_args:
+      hidden_dim: 128
+    learning_rate: 0.00001
+num_epochs: 1
+batch_size: 16
+num_workers: 8
+max_steps: 100
 validation_fraction: 0.1
-learning_rate: 0.0001
 seed: 42
 device: "cuda"
 
