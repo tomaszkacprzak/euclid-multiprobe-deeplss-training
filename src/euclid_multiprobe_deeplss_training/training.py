@@ -610,7 +610,7 @@ def train(
     from msfm.onthefly_pipeline import OntheflyPipeline
     from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
     from .networks.smoothing import NestDownsampler, NestChannelDownsampler
-    from .networks.builder import build_network
+    from .networks.builder import build_encoder, build_loss
     
 
 
@@ -671,7 +671,7 @@ def train(
                                                      device=device)
 
     # 
-    # Build neural network
+    # Build encoder neural network
     #
  
     encoder = build_encoder(config.encoder_name, 
@@ -685,6 +685,7 @@ def train(
                         indices=indices_pixels_healpix,
                         device=device)
     encoder.to(device)
+    encoder = torch.compile(encoder)
 
     LOGGER.info(f'Encoder: {config.encoder_name}\n' + str(_unwrap_parallel_module(encoder)) + '\n')    
 
@@ -693,34 +694,41 @@ def train(
     #
 
     loss = build_loss(config.loss_function, 
-                         num_targets=physics_model.num_targets, 
-                         embed_dim=config.embed_dim,
-                         loss_args=config.loss_args if hasattr(config, "loss_args") else {})
+                      num_targets=physics_model.num_targets, 
+                      embed_dim=config.embed_dim,
+                      loss_args=config.loss_args if hasattr(config, "loss_args") else {})
     loss = loss.to(device)
-    model = torch.nn.Sequential(encoder, loss)
-    
-    if ddp_enabled and any(parameter.requires_grad for parameter in loss.parameters()):
-        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        loss = DDP(loss, **ddp_kwargs)
-    LOGGER.info(f'Loss function: {_unwrap_parallel_module(loss)}')
+    loss = torch.compile(loss)
+    LOGGER.info(f'Loss function: {config.loss_function}\n' + str(_unwrap_parallel_module(loss)) + '\n')
 
-    # 
-    # Build optimizer
+
+    #
+    # Distribute the model
     #
 
-    # Optimizer
-    trainable_parameters = itertools.chain(model.parameters(), loss_fn.parameters())
-    # optimizer = torch.optim.Adam(trainable_parameters, lr=config.learning_rate)
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=config.learning_rate, weight_decay=1e-4)
+    if ddp_enabled and any(parameter.requires_grad for parameter in loss.parameters()):
+        ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
+        model = DDP(model, **ddp_kwargs)
+    
 
+    # 
+    # Optimizer
+    #
+
+    trainable_parameters = itertools.chain(encoder.parameters(), loss.parameters())
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=config.learning_rate, weight_decay=1e-4)
+    LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
+
+
+    #
+    # Checkpoint management
+    #
 
     step = 0
     session_step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
-    LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
-
-    # Checkpoints
+    
     checkpoint_wandb_info = None
     if config.resume_from_checkpoint:
         
@@ -732,10 +740,10 @@ def train(
         else:
             step, train_losses, validation_losses = load_checkpoint(
                 config.resume_from_checkpoint,
-                model,
+                encoder,
                 optimizer,
                 device,
-                loss_fn,
+                loss,
             )
             checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
 
@@ -748,15 +756,10 @@ def train(
     #
 
     # Housekeeping
-    # loader_prefetcher = CUDAPrefetcher(loader, device=device)
     run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_examples_seen = 0
     train_timer = Timer()
-    timer_batch_prep = Timer()
-    timer_model_update = Timer()
-
-    # grad_scaler = torch.amp.GradScaler("cuda")
 
     # Training loop.
     LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
@@ -770,39 +773,33 @@ def train(
             train_timer.start()   
             for batch in loader_training:
 
-            # overfit on a single batch
-            # batch = next(iter(epoch_batches))
-            # for _ in range(10000):
-
                 step += 1
                 session_step += 1
                 LOGGER.debug(f"====================================== step {step}")
-
-
-                # LOGGER.warning('continuing training loop')
-                # continue
-
 
                 prev_t = time.perf_counter()
                 prev_read, prev_write = tree_io_counters()
 
                 #
-                # Main magic - update model
+                # Forward pass
                 #
 
-                model.train()
+                encoder.train()
+                loss.train()
                 maps, labels = batch
-                LOGGER.debug(f'Maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-                LOGGER.debug(f'Labels shape={labels.shape}')
+                LOGGER.debug(f'Labels shape={labels.shape}, maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
                 maps = maps.to(device=device, dtype=torch.float32)
                 labels = labels.to(device=device, dtype=torch.float32)
                 optimizer.zero_grad(set_to_none=True)
                 LOGGER.debug('Running forward pass')
-                # with torch.autocast("cuda", dtype=torch.bfloat16):
-                predictions = model(maps)
+                embeddings = encoder(maps)
                 LOGGER.debug('Running loss')
-                train_loss = loss_fn(predictions, labels)
-                # train_loss = grad_scaler.scale(train_loss)
+                train_loss = loss(embeddings, labels)
+                
+
+                #
+                # Backward pass
+                #
 
                 if not train_loss.requires_grad:
                     raise RuntimeError(
@@ -813,29 +810,23 @@ def train(
                 LOGGER.debug('Running backward pass')
                 train_loss.backward()
 
+                #
+                # Optimizer step
+                #
+
                 LOGGER.debug('Clipping gradients')
-                clip_grad_norm_(itertools.chain(model.parameters(), loss_fn.parameters()), config.grad_clip_max_norm)
+                clip_grad_norm_(itertools.chain(encoder.parameters(), loss.parameters()), config.grad_clip_max_norm)
 
                 LOGGER.debug('Running optimizer step')
-                # grad_scaler.step(optimizer)
-                # grad_scaler.update()
                 optimizer.step()
-
-                global_train_loss = reduce_mean(train_loss)
                 
-
-                # LOGGER.warning('Skipping step housekeeping due to DeviceTraceMode')
-                # continue
-                
-                train_loss = train_loss.detach().cpu()
-
                 #
                 # Step housekeeping
                 # 
 
                 # every step housekeeping
                 LOGGER.debug('Running housekeeping')
-                train_losses.append(train_loss)
+                train_losses.append(train_loss.detach().cpu())
                 maps, _labels = batch
                 train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
                 train_timer.stop()
@@ -855,7 +846,7 @@ def train(
 
                     wandb.log(
                         {
-                            "Train/loss": global_train_loss.item(),
+                            "Train/loss": reduce_mean(train_loss).item(),
                             "step": step,
                             "learning_rate": current_learning_rate,
                             **get_examples_stats(train_examples_seen, train_timer.elapsed()),
@@ -900,13 +891,13 @@ def train(
                     for checkpoint_path in [checkpoint_path_latest, checkpoint_path_step]:
                         save_checkpoint(
                             checkpoint_path,
-                            model,
+                            encoder,
                             optimizer,
                             step,
                             config,
                             train_losses,
                             validation_losses,
-                            loss_fn,
+                            loss,
                             active_wandb_info,
                         )
 
@@ -925,14 +916,14 @@ def train(
 
 
             #
-            # Validatio after each epoch
+            # Validation after each epoch
             #
 
             validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
             validation_metrics = evaluate(
-                model,
+                encoder,
                 loader_validation,
-                loss_fn,
+                loss,
                 device,
                 num_examples=2000,
                 predictions_path=validation_predictions_path,
@@ -959,7 +950,7 @@ def train(
                         import matplotlib.pyplot as plt
                         plt.close(fig)
                         wandb.log(plots_log, step=step)
-                        LOGGER.info(f'Logged validation plots for step {step}')
+                        LOGGER.debug(f'Logged validation plots for step {step}')
                     
 
             if config.max_steps is not None and session_step >= config.max_steps:
@@ -974,13 +965,13 @@ def train(
         latest_checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
         save_checkpoint(
             latest_checkpoint_path,
-            model,
+            encoder,
             optimizer,
             step,
             config,
             train_losses,
             validation_losses,
-            loss_fn,
+            loss,
             active_wandb_info,
         )
         if run is not None:

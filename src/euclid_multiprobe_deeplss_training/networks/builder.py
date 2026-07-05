@@ -5,22 +5,19 @@ from torch.nn import functional as F
 
 LOGGER = get_logger(__file__)
 
-
-
-
     
-def build_model(model_name: str,
-                num_channels: int,
-                embed_dim: int,
-                nside: int,
-                nside_down: int,
-                num_pixels: int,
-                batch_size: int = None,
-                indices: list[int] = None,
-                model_args: dict | None = None,
-                device: torch.device | str | None = None):
+def build_encoder(encoder_name: str,
+                  num_channels: int,
+                  embed_dim: int,
+                  nside: int,
+                  nside_down: int,
+                  num_pixels: int,
+                  batch_size: int = None,
+                  indices: list[int] = None,
+                  model_args: dict | None = None,
+                  device: torch.device | str | None = None):
 
-    if model_name == "nested_transformer":
+    if encoder_name == "nested_transformer":
 
         from .healpix_transformer import HealpixNestedHierarchicalLocalWindowTransformer
 
@@ -47,11 +44,11 @@ def build_model(model_name: str,
             **constructor_args,
         )
 
-        LOGGER.info(f"Built HealpixNestedHierarchicalLocalWindowTransformer {model_name}")
+        LOGGER.info(f"Built HealpixNestedHierarchicalLocalWindowTransformer {encoder_name}")
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
 
 
-    elif model_name == "deepsphere_resnet":
+    elif encoder_name == "deepsphere_resnet":
 
         assert batch_size is not None, "batch_size is required for deepsphere_resnet"
         assert indices is not None, "indices are required for deepsphere_resnet"
@@ -80,14 +77,38 @@ def build_model(model_name: str,
             **constructor_args,
         )
 
-        LOGGER.info(f"Built ResnetDeepSphereRegressor {model_name}")
+        LOGGER.info(f"Built ResnetDeepSphereRegressor {encoder_name}")
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  n_side: {nside}, n_side_down: {nside_down}, num_pixels: {num_pixels}")
         LOGGER.info(f"  model_args: {constructor_args}")
 
     else:
 
-        raise ValueError(f"Model {model_name} not supported")
+        raise ValueError(f"Encoder {encoder_name} not supported")
 
 
     return model
+
+
+
+def build_loss(loss_name: str,
+               embed_dim: int,
+               num_targets: int,
+               loss_args: dict = {}):
+
+    if loss_name == "mse":
+
+        from .mse import MSEHead
+        loss_fn = MSEHead(embed_dim, num_targets)
+
+    elif loss_name == "vimm_gmm":
+
+        from .vimm import VIMMGMMHead
+        loss_fn = VIMMGMMHead(embed_dim, num_targets, **loss_args)
+        
+    else:
+
+        raise ValueError(f"Loss {loss_name} not supported")
+
+
+    return loss_fn
