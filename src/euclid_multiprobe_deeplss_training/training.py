@@ -983,10 +983,9 @@ def train(
                             parameter_names_from_physics_model(physics_model),
                         )
                         plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
-                        # fig.close()
                         import matplotlib.pyplot as plt
                         plt.close(fig)
-                        wandb.log(plots_log, epoch=_epoch)
+                        wandb.log(plots_log, step=_epoch)
                     
 
             if config.max_steps is not None and session_step >= config.max_steps:
