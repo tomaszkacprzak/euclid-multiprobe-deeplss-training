@@ -639,10 +639,8 @@ def train(
                                                      batch_size=config.batch_size, 
                                                      physics_model=physics_model, 
                                                      downsampler=downsampler,
-                                                     smoother=None, 
-                                                     num_workers=config.num_workers, 
-                                                     prefetch_factor=1, 
-                                                     device=device)
+                                                     smoother=None,
+                                                     num_workers=config.num_workers)
 
     # 
     # Build encoder neural network
