@@ -600,10 +600,12 @@ def train(
     # 
     # Data loaders
     #
-    nside_training = 512
+
     indices_pixels_healpix = load_pixel_indices(config.forward_model)
-    import numpy as np
-    indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
+    nside_training = config.forward_model["analysis"]["n_side"]
+    # nside_training = 512
+    # import numpy as np
+    # indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
    
     # use non-reproducible seed, TODO: fix to reproducible
     seed = int(time.time())
@@ -617,10 +619,10 @@ def train(
     # physics_model = torch.compile(physics_model, dynamic=True)
 
     # Downsample all maps to the same nside
-    downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-                                  nside_base=config.forward_model["analysis"]["n_side_down"], 
-                                  nside_lower=nside_training)
-    downsampler = downsampler.to(device)
+    # downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
+    #                               nside_base=config.forward_model["analysis"]["n_side_down"], 
+    #                               nside_lower=nside_training)
+    # downsampler = downsampler.to(device)
     # downsampler = torch.compile(downsampler, dynamic=True)
     
     # Downsample each channel to a different nside
@@ -638,7 +640,7 @@ def train(
     loader_training, loader_validation = get_loaders(webds_pattern=config.records_pattern, 
                                                      batch_size=config.batch_size, 
                                                      physics_model=physics_model, 
-                                                     downsampler=downsampler,
+                                                     downsampler=None,
                                                      smoother=None,
                                                      num_workers=config.num_workers)
 
