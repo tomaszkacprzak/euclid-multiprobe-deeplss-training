@@ -566,7 +566,6 @@ def train(
     optimizer/global-step state rather than seeking to the prior stream item.
     """
     from msfm.onthefly_pipeline import OntheflyPipeline
-    from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
     from .networks.smoothing import NestDownsampler, NestChannelDownsampler
     from .networks.builder import build_encoder, build_loss
     
@@ -608,7 +607,8 @@ def train(
    
     # use non-reproducible seed, TODO: fix to reproducible
     seed = int(time.time())
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
+    OntheflyPhysicsModel = load_physics_model_class(config.physics_model)
+    physics_model = OntheflyPhysicsModel(config.forward_model, 
                         scalers=True,
                         device=device,
                         seed=seed,
@@ -1269,3 +1269,27 @@ def reduce_mean(x: torch.Tensor) -> torch.Tensor:
 
     return x
 
+#
+# Physics model helpers
+#
+
+def load_physics_model_class(model_name: str):
+
+    class_names = {'onthefly_linear': 'OntheflyPhysicsModelLinear',
+                   'onthefly_linkappa': 'OntheflyPhysicsModelLinkappa'}
+    
+    if model_name not in class_names:
+        raise ValueError(f"Invalid model name: {model_name}")
+
+    module_name = f"msfm.onthefly_physics.{model_name}"
+    import importlib
+    module = importlib.import_module(module_name)
+    try:
+        return getattr(module, class_names[model_name])
+    except AttributeError as exc:
+        raise ImportError(
+            f"Could not find class {class_names[model_name]} in module {module_name}"
+        ) from exc
+
+
+    
