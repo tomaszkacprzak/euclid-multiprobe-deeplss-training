@@ -1,7 +1,6 @@
 import torch
-from ..utils.logger import get_logger
-from torch.nn import functional as F
 
+from ..utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
@@ -17,25 +16,38 @@ def build_encoder(encoder_name: str,
                   encoder_args: dict | None = None,
                   device: torch.device | str | None = None):
 
-    if encoder_name == "nested_transformer":
+    if encoder_name in {"nested_transformer", "deep_nested_transformer"}:
+        if encoder_name == "nested_transformer":
+            from .healpix_transformer import HealpixNestedHierarchicalLocalWindowTransformer as TransformerClass
 
-        from .healpix_transformer import HealpixNestedHierarchicalLocalWindowTransformer
+            constructor_args = {
+                "base_embed_dim": 256,
+                "growth": "128",
+                "num_heads": 4,
+                "window_levels": 3,
+                "local_blocks_per_level": 1,
+                "global_blocks": 1,
+                "mlp_ratio": 4,
+            }
+        else:
+            from .healpix_deep_transformer import HealpixDeepNestedHierarchicalLocalWindowTransformer as TransformerClass
 
-        # Defaults
-        constructor_args = {
-            "base_embed_dim": 256,
-            "growth": "128",
-            "num_heads": 4,
-            "window_levels": 3,
-            "local_blocks_per_level": 1,
-            "global_blocks": 1,
-            "mlp_ratio": 4,
-        }
-        # Update with model_args
+            constructor_args = {
+                "base_embed_dim": 256,
+                "growth": "128",
+                "num_heads": 4,
+                "window_levels": 3,
+                "local_blocks_per_level": 2,
+                "global_blocks": 2,
+                "mlp_ratio": 4,
+                "drop_path_rate": 0.1,
+                "drop_path_schedule": "linear",
+                "pre_norm": True,
+                "residual_dropout": 0.0,
+            }
+
         constructor_args.update(encoder_args or {})
-        
-        # Build model
-        model = HealpixNestedHierarchicalLocalWindowTransformer(
+        model = TransformerClass(
             nside=nside,
             nside_down=nside_down,
             num_pixels=num_pixels,
@@ -44,8 +56,9 @@ def build_encoder(encoder_name: str,
             **constructor_args,
         )
 
-        LOGGER.info(f"Built HealpixNestedHierarchicalLocalWindowTransformer {encoder_name}")
+        LOGGER.info(f"Built {TransformerClass.__name__} {encoder_name}")
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
 
 
     elif encoder_name == "deepsphere_resnet":
@@ -94,7 +107,7 @@ def build_encoder(encoder_name: str,
 def build_loss(loss_name: str,
                embed_dim: int,
                num_targets: int,
-               loss_args: dict = {}):
+               loss_args: dict | None = None):
 
     if loss_name == "mse":
 
@@ -104,7 +117,7 @@ def build_loss(loss_name: str,
     elif loss_name == "vimm_gmm":
 
         from .vimm_loss import VIMMGMMHead
-        loss_fn = VIMMGMMHead(embed_dim, num_targets, **loss_args)
+        loss_fn = VIMMGMMHead(embed_dim, num_targets, **(loss_args or {}))
         
     else:
 
