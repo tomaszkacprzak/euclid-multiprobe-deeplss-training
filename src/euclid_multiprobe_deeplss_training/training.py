@@ -44,6 +44,7 @@ class TrainingConfig:
     embed_dim: int = 64
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
+    physics_model: str = "onthefly_linear"
     loss_function: str = "mse"
     batch_size: int = 32
     num_epochs: int | None = 1
