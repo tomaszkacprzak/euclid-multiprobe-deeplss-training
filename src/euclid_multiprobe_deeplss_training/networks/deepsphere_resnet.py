@@ -19,7 +19,7 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
         indices, 
         batch_size, 
         n_channels, 
-        out_features, 
+        embed_dim: int, 
         n_filters=32, 
         downsampling_layers=3, 
         cheby_layers=2, 
@@ -28,6 +28,11 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
         n_neighbors=20):
 
         activation = F.relu
+        
+        self.embed_dim = embed_dim
+        self.batch_size = batch_size
+        self.n_channels = n_channels
+
         
         # HealpyGCNN validates that the footprint can be reduced by the layers that
         # downsample. Extend sparse footprints to full NEST parent-pixel groups
@@ -65,13 +70,13 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
                 )
             )
 
-        # Dense regression head: Flatten -> LayerNorm -> Dense(out_features).
+        # Dense regression head: Flatten -> LayerNorm -> Dense(embed_dim).
         # All dimensions are derived at construction time so no head components
         # are created or initialized lazily during forward.
         flattened_features = int(output_pixels * n_filters)
         layers.append(nn.Flatten())
         layers.append(nn.LayerNorm(flattened_features))
-        layers.append(nn.Linear(flattened_features, out_features))
+        layers.append(nn.Linear(flattened_features, embed_dim))
 
         super().__init__(
             nside=n_side,
@@ -82,12 +87,3 @@ class ResnetDeepSphereRegressor(HealpyGCNN):
             initial_Fin=n_channels,
         )
 
-        # model = HealpyGCNN(
-        #     nside=n_side,
-        #     indices=indices,
-        #     layers=layers,
-        #     n_neighbors=n_neighbors,
-        #     max_batch_size=batch_size,
-        #     initial_Fin=n_channels,
-        # )
-        # return model

@@ -3,6 +3,15 @@ import torch
 import torch.nn as nn
 
 
+class CNFFMModel(nn.Module):
+
+    def __init__(self, encoder: nn.Module, loss_args: dict):
+        super().__init__()
+        self.encoder = encoder
+        assert hasattr(encoder, 'embed_dim'), "Encoder must have an embed_dim attribute"
+        self.loss = PosteriorFlowMatchingModel(y_dim=encoder.embed_dim, batch_size=encoder.batch_size, **loss_args)
+
+
 class SinusoidalTimeEmbedding(nn.Module):
     """
     Fixed-shape sinusoidal embedding for scalar flow time t.
@@ -497,7 +506,7 @@ class PosteriorFlowMatchingModel(nn.Module):
         u0 = torch.randn_like(u1)
         
         # t: [B, 1]
-        t = torch.rand(batch, 1, device=u1.device, dtype=u1.dtype)
+        t = torch.rand(self.batch_size, 1, device=u1.device, dtype=u1.dtype)
 
         # Avoid exact t = 0 or t = 1.
         eps = 1e-4

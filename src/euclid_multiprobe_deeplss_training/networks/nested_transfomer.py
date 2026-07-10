@@ -301,7 +301,7 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
     def __init__(
         self,
         in_channels,
-        num_outputs,
+        embed_dim,
         num_nested_levels,
         base_embed_dim=128,
         growth="constant",
@@ -323,6 +323,7 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
             raise ValueError("global_blocks must be >= 1")
 
         self.in_channels = in_channels
+        self.embed_dim = embed_dim
         self.num_nested_levels = num_nested_levels
         self.base_embed_dim = base_embed_dim
         self.growth = growth
@@ -411,7 +412,7 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
         )
 
         self.norm = nn.LayerNorm(final_dim)
-        self.head = nn.Linear(final_dim, num_outputs)
+        self.head = nn.Linear(final_dim, embed_dim)
 
     def forward(self, x):
         """
@@ -419,7 +420,7 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
             x: (B, C, N, 4, 4, ..., 4)
 
         Output:
-            y: (B, num_outputs)
+            y: (B, embed_dim)
         """
         expected_ndim = 3 + self.num_nested_levels
 
@@ -490,7 +491,7 @@ class NestedHierarchicalLocalWindowTransformer(nn.Module):
 
         # Classification or regression head:
         #
-        #   (B, final_dim) -> (B, num_outputs)
+        #   (B, final_dim) -> (B, embed_dim)
         x = self.head(x)
 
         return x

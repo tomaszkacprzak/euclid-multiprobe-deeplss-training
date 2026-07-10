@@ -133,7 +133,7 @@ class DeepNestedHierarchicalLocalWindowTransformer(nn.Module):
     def __init__(
         self,
         in_channels,
-        num_outputs,
+        embed_dim,
         num_nested_levels,
         base_embed_dim=128,
         growth="constant",
@@ -160,6 +160,7 @@ class DeepNestedHierarchicalLocalWindowTransformer(nn.Module):
             raise ValueError("drop_path_schedule must be 'linear' or 'constant'")
 
         self.in_channels = in_channels
+        self.embed_dim = embed_dim
         self.num_nested_levels = num_nested_levels
         self.base_embed_dim = base_embed_dim
         self.growth = growth
@@ -222,7 +223,7 @@ class DeepNestedHierarchicalLocalWindowTransformer(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(final_dim)
-        self.head = nn.Linear(final_dim, num_outputs)
+        self.head = nn.Linear(final_dim, embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         expected_ndim = 3 + self.num_nested_levels

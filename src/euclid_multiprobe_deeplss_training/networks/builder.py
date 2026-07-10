@@ -36,7 +36,7 @@ def build_encoder(encoder_name: str,
             nside_down=nside_down,
             num_pixels=num_pixels,
             in_channels=num_channels,
-            num_outputs=embed_dim,
+            embed_dim=embed_dim,
             **constructor_args,
         )
 
@@ -71,7 +71,7 @@ def build_encoder(encoder_name: str,
             nside_down=nside_down,
             num_pixels=num_pixels,
             in_channels=num_channels,
-            num_outputs=embed_dim,
+            embed_dim=embed_dim,
             **constructor_args,
         )
 
@@ -93,7 +93,7 @@ def build_encoder(encoder_name: str,
             "indices": indices,
             "batch_size": batch_size,
             "n_channels": num_channels,
-            "out_features": embed_dim,
+            "embed_dim": embed_dim,
             "n_filters": 32,
             "downsampling_layers": 2,
             "cheby_layers": 2,
@@ -131,15 +131,14 @@ def build_loss(loss_name: str,
 
     if loss_name == "mse":
 
-        from .mse_loss import MSEHead, MSEModel
-        loss_head = MSEHead(embed_dim, num_targets)
-        model = MSEModel(encoder, loss_head)
+        from .mse_loss import MSEModel
+        model = MSEModel(encoder, num_targets)
         
 
     elif loss_name == "vimm_gmm":
 
-        from .vimm_loss import VIMMGMMHead
-        loss_head = VIMMGMMHead(embed_dim, num_targets, **(loss_args or {}))
+        from .vimm_loss import VIMMGMMModel
+        model = VIMMGMMModel(encoder, num_targets, loss_args)
         
 
     else:

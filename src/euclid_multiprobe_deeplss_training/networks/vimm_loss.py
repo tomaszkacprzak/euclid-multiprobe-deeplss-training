@@ -5,10 +5,11 @@ from torch.distributions import Categorical, MixtureSameFamily, MultivariateNorm
 
 class VIMMGMMModel(nn.Module):
 
-    def __init__(self, encoder: nn.Module, loss: nn.Module):
+    def __init__(self, encoder: nn.Module, num_targets: int, loss_args: dict):
         super().__init__()
         self.encoder = encoder
-        self.loss = loss
+        assert hasattr(encoder, 'embed_dim'), "Encoder must have an embed_dim attribute"
+        self.loss = VIMMGMMHead(z_dim=encoder.embed_dim, y_dim=num_targets, **loss_args)
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         embeddings = self.encoder(inputs)
@@ -17,7 +18,7 @@ class VIMMGMMModel(nn.Module):
     @torch.no_grad()
     def predict(self, inputs: torch.Tensor) -> torch.Tensor:
         embeddings = self.encoder(inputs)
-        return self.loss(embeddings)
+        return self.loss.predict(embeddings)
 
 
 class VIMMGMMHead(nn.Module):
