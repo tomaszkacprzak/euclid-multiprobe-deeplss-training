@@ -1,7 +1,7 @@
 import torch
+import torch.nn as nn
 
 from ..utils.logger import get_logger
-
 LOGGER = get_logger(__file__)
 
     
@@ -124,23 +124,30 @@ def build_encoder(encoder_name: str,
 
 
 def build_loss(loss_name: str,
+               encoder: nn.Module,
                embed_dim: int,
                num_targets: int,
                loss_args: dict | None = None):
 
     if loss_name == "mse":
 
-        from .mse_loss import MSEHead
-        loss_fn = MSEHead(embed_dim, num_targets)
+        from .mse_loss import MSEHead, MSEModel
+        loss_head = MSEHead(embed_dim, num_targets)
+        model = MSEModel(encoder, loss_head)
+        
 
     elif loss_name == "vimm_gmm":
 
         from .vimm_loss import VIMMGMMHead
-        loss_fn = VIMMGMMHead(embed_dim, num_targets, **(loss_args or {}))
+        loss_head = VIMMGMMHead(embed_dim, num_targets, **(loss_args or {}))
         
+
     else:
 
         raise ValueError(f"Loss {loss_name} not supported")
 
+    
 
-    return loss_fn
+
+    return model
+

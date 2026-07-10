@@ -15,3 +15,18 @@ class MSEHead(nn.Module):
     @torch.no_grad()
     def predict(self, z: torch.Tensor) -> torch.Tensor:
         return self.linear(z)
+
+class MSEModel(nn.Module):
+
+    def __init__(self, encoder: nn.Module, loss: nn.Module):
+        super().__init__()
+        self.encoder = encoder
+        self.loss = loss
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        predictions = self.encoder(inputs)
+        return self.loss(predictions, targets)
+
+    @torch.no_grad()
+    def predict(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.encoder(inputs)

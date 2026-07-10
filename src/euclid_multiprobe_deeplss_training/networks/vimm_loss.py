@@ -3,6 +3,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal
 
+class VIMMGMMModel(nn.Module):
+
+    def __init__(self, encoder: nn.Module, loss: nn.Module):
+        super().__init__()
+        self.encoder = encoder
+        self.loss = loss
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        embeddings = self.encoder(inputs)
+        return self.loss(embeddings, targets)
+
+    @torch.no_grad()
+    def predict(self, inputs: torch.Tensor) -> torch.Tensor:
+        embeddings = self.encoder(inputs)
+        return self.loss(embeddings)
+
 
 class VIMMGMMHead(nn.Module):
     """

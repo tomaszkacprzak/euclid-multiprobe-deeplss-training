@@ -173,7 +173,6 @@ _with_forward_model_config = with_forward_model_config
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader,
-    loss_fn: nn.Module,
     device: torch.device | str,
     num_examples: int | str | Path = 10000,
     predictions_path: str | Path | None = None,
@@ -204,11 +203,11 @@ def evaluate(
         embeddings = model(maps)
 
         # Evaluate main loss function
-        loss = float(loss_fn(embeddings, labels).detach().cpu())
+        loss = float(model(embeddings, labels).detach().cpu())
         losses.append(loss)
 
         # Evaluate predictions and their MSE loss
-        predictions = loss_fn.predict(embeddings)
+        predictions = model.predict(embeddings)
         prediction_loss = float(F.mse_loss(predictions, labels).detach().cpu())
         prediction_losses.append(prediction_loss)
 
@@ -391,8 +390,6 @@ def save_checkpoint(
     }
     if wandb_info is not None:
         checkpoint["wandb"] = dict(wandb_info)
-    if loss_fn is not None:
-        checkpoint["loss_state_dict"] = _unwrap_parallel_module(loss_fn).state_dict()
     torch.save(checkpoint, path)
 
 
@@ -434,7 +431,6 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device | str,
-    loss_fn: nn.Module | None = None,
 ) -> tuple[int, list[float], list[float]]:
     """Restore model/loss/optimizer state and return step plus loss histories.
 
@@ -445,12 +441,6 @@ def load_checkpoint(
     """
     checkpoint = torch.load(Path(path), map_location=device)
     _unwrap_parallel_module(model).load_state_dict(checkpoint["model_state_dict"])
-    if loss_fn is not None:
-        loss_state_dict = checkpoint.get("loss_state_dict")
-        if loss_state_dict is None:
-            LOGGER.warning("Checkpoint does not contain loss_state_dict; using the initialized loss function state.")
-        else:
-            _unwrap_parallel_module(loss_fn).load_state_dict(loss_state_dict)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     LOGGER.info(f"Loaded checkpoint from {path} with step {checkpoint['step']}")
     return (
@@ -670,11 +660,12 @@ def train(
     # Loss function 
     #
 
-    loss = build_loss(config.loss_function, 
+    model_loss = build_loss(config.loss_function,     
+                      encoder=encoder,
                       num_targets=physics_model.num_targets, 
                       embed_dim=config.embed_dim,
                       loss_args=config.loss_args if hasattr(config, "loss_args") else {})
-    loss = loss.to(device)
+    model_loss = model_loss.to(device)
     # loss = torch.compile(loss)
     LOGGER.info(f'Loss function: {config.loss_function}')
 
@@ -682,16 +673,15 @@ def train(
     #
     # Configure and distribute the model
     #
-    if ddp_enabled and any(parameter.requires_grad for parameter in loss.parameters()):
+    if ddp_enabled and any(parameter.requires_grad for parameter in model_loss.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
-        encoder = DDP(encoder, **ddp_kwargs)
-        loss = DDP(loss, **ddp_kwargs)
+        model_loss = DDP(model_loss, **ddp_kwargs)
     
     # 
     # Optimizer
     #
 
-    trainable_parameters = itertools.chain(encoder.parameters(), loss.parameters())
+    trainable_parameters = itertools.chain(encoder.parameters(), model_loss.parameters())
     optimizer = torch.optim.AdamW(trainable_parameters, lr=config.learning_rate, weight_decay=1e-4)
     LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
 
@@ -716,10 +706,9 @@ def train(
         else:
             step, train_losses, validation_losses = load_checkpoint(
                 config.resume_from_checkpoint,
-                encoder,
+                model_loss,
                 optimizer,
                 device,
-                loss,
             )
             checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
 
@@ -760,17 +749,15 @@ def train(
                 # Forward pass
                 #
 
-                encoder.train()
-                loss.train()
+                model_loss.train()
                 maps, labels = batch
                 LOGGER.debug(f'Labels shape={labels.shape}, maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
                 maps = maps.to(device=device, dtype=torch.float32)
                 labels = labels.to(device=device, dtype=torch.float32)
                 optimizer.zero_grad(set_to_none=True)
                 LOGGER.debug('Running forward pass')
-                embeddings = encoder(maps)
+                train_loss = model_loss(maps, labels)
                 LOGGER.debug('Running loss')
-                train_loss = loss(embeddings, labels)
                 
 
                 #
@@ -862,13 +849,12 @@ def train(
                     for checkpoint_path in [checkpoint_path_latest, checkpoint_path_step]:
                         save_checkpoint(
                             checkpoint_path,
-                            encoder,
+                            model_loss,
                             optimizer,
                             step,
                             config,
                             train_losses,
                             validation_losses,
-                            loss,
                             active_wandb_info,
                         )
 
@@ -893,9 +879,8 @@ def train(
             LOGGER.info('Running validation')
             validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
             validation_metrics = evaluate(
-                encoder,
+                model_loss,
                 loader_validation,
-                loss,
                 device,
                 num_examples=2000,
                 predictions_path=validation_predictions_path,
@@ -937,13 +922,12 @@ def train(
         latest_checkpoint_path = _latest_checkpoint_path(checkpoint_dir)
         save_checkpoint(
             latest_checkpoint_path,
-            encoder,
+            model_loss,
             optimizer,
             step,
             config,
             train_losses,
             validation_losses,
-            loss,
             active_wandb_info,
         )
         if run is not None:
