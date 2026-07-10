@@ -29,4 +29,7 @@ class MSEModel(nn.Module):
 
     @torch.no_grad()
     def predict(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.encoder(inputs)
+        
+        embeddings = self.encoder(inputs)
+        predictions = self.loss.predict(embeddings)
+        return predictions

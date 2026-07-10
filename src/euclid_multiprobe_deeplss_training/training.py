@@ -195,29 +195,28 @@ def evaluate(
     prediction_batches: list[torch.Tensor] = []
     num_examples_seen = 0
     
-    for maps, labels in dataloader:
+    for inputs, targets in dataloader:
 
-        # Evaluatate model embeddings
-        maps = maps.to(device=device, dtype=torch.float32)
-        labels = labels.to(device=device, dtype=torch.float32)
-        embeddings = model(maps)
+        # Evaluatate model 
+        inputs = inputs.to(device=device, dtype=torch.float32)
+        targets = targets.to(device=device, dtype=torch.float32)
 
         # Evaluate main loss function
-        loss = float(model(embeddings, labels).detach().cpu())
+        loss = float(model(inputs, targets).detach().cpu())
         losses.append(loss)
 
         # Evaluate predictions and their MSE loss
-        predictions = model.predict(embeddings)
-        prediction_loss = float(F.mse_loss(predictions, labels).detach().cpu())
+        predictions = model.predict(inputs)
+        prediction_loss = float(F.mse_loss(predictions, targets).detach().cpu())
         prediction_losses.append(prediction_loss)
 
         # Store targets and predictions
         if predictions_path is not None:
-            target_batches.append(labels.detach().cpu())
+            target_batches.append(targets.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
 
         # Housekeeping
-        num_examples_seen += maps.shape[0]
+        num_examples_seen += inputs.shape[0]
         if num_examples_seen >= num_examples:
             break
 
@@ -778,7 +777,7 @@ def train(
                 #
 
                 LOGGER.debug('Clipping gradients')
-                clip_grad_norm_(itertools.chain(encoder.parameters(), loss.parameters()), config.grad_clip_max_norm)
+                clip_grad_norm_(model_loss.parameters(), config.grad_clip_max_norm)
 
                 LOGGER.debug('Running optimizer step')
                 optimizer.step()
