@@ -127,6 +127,7 @@ def build_loss(loss_name: str,
                encoder: nn.Module,
                embed_dim: int,
                num_targets: int,
+               batch_size: int,
                loss_args: dict | None = None):
 
     if loss_name == "mse":
@@ -139,7 +140,11 @@ def build_loss(loss_name: str,
 
         from .vimm_loss import VIMMGMMModel
         model = VIMMGMMModel(encoder, num_targets, loss_args)
-        
+
+    elif loss_name == "flowmatching":
+
+        from .flowmatching_loss import CNFFMModel
+        model = CNFFMModel(encoder, y_dim=num_targets, batch_size=batch_size, vectorfield_kwargs=loss_args)
 
     else:
 

@@ -1,16 +1,8 @@
 import math
 import torch
 import torch.nn as nn
-
-
-class CNFFMModel(nn.Module):
-
-    def __init__(self, encoder: nn.Module, loss_args: dict):
-        super().__init__()
-        self.encoder = encoder
-        assert hasattr(encoder, 'embed_dim'), "Encoder must have an embed_dim attribute"
-        self.loss = PosteriorFlowMatchingModel(y_dim=encoder.embed_dim, batch_size=encoder.batch_size, **loss_args)
-
+from torchdiffeq import odeint
+from typing import Callable, Optional, Literal
 
 class SinusoidalTimeEmbedding(nn.Module):
     """
@@ -127,7 +119,7 @@ class PosteriorVectorFieldTransformer(nn.Module):
         self,
         batch_size: int,
         y_dim: int,
-        h_img_dim: int,
+        h_dim: int = 128,
         d_model: int = 128,
         n_heads: int = 4,
         n_layers: int = 3,
@@ -142,7 +134,7 @@ class PosteriorVectorFieldTransformer(nn.Module):
 
         assert batch_size > 0
         assert y_dim > 0
-        assert h_img_dim > 0
+        assert h_dim > 0
         assert d_model > 0
         assert n_heads > 0
         assert d_model % n_heads == 0
@@ -154,7 +146,7 @@ class PosteriorVectorFieldTransformer(nn.Module):
 
         self.batch_size = batch_size                  # B
         self.y_dim = y_dim                            # M
-        self.h_img_dim = h_img_dim                    # H_img
+        self.h_dim = h_dim                    # H_img
         self.d_model = d_model                        # D
         self.n_heads = n_heads
         self.n_layers = n_layers
@@ -236,9 +228,9 @@ class PosteriorVectorFieldTransformer(nn.Module):
         # global image embedding.
 
         self.condition_projection = nn.Sequential(
-            nn.LayerNorm(h_img_dim, **factory_kwargs),
+            nn.LayerNorm(h_dim, **factory_kwargs),
             nn.Linear(
-                h_img_dim,
+                h_dim,
                 num_condition_tokens * d_model,
                 **factory_kwargs,
             ),
@@ -314,7 +306,7 @@ class PosteriorVectorFieldTransformer(nn.Module):
             Shape: [B, 1]
 
         h:
-            Global image embedding from image_encoder(X).
+            Global image embedding from encoder(X).
             Shape: [B, H_img]
 
         Returns
@@ -338,7 +330,7 @@ class PosteriorVectorFieldTransformer(nn.Module):
 
         # h: [B, H_img]
         assert h.ndim == 2
-        assert h.shape == (self.batch_size, self.h_img_dim)
+        assert h.shape == (self.batch_size, self.h_dim)
 
         # Enforce shared dtype/device.
         assert t.dtype == u_t.dtype
@@ -407,7 +399,7 @@ class PosteriorVectorFieldTransformer(nn.Module):
         # ------------------------------------------------------------
 
         # h: [B, H_img]
-        assert h.shape == (B, self.h_img_dim)
+        assert h.shape == (B, self.h_dim)
 
         # memory_flat: [B, K * D]
         memory_flat = self.condition_projection(h)
@@ -461,27 +453,129 @@ class PosteriorVectorFieldTransformer(nn.Module):
         return pred_v
 
 
-class PosteriorFlowMatchingModel(nn.Module):
+
+
+
+class PosteriorODEFunc(nn.Module):
+    """
+    ODE function wrapper for torchdiffeq.
+
+    Converts torchdiffeq's scalar time t into the fixed-shape
+    time tensor expected by PosteriorVectorFieldTransformer.
+
+    Input from torchdiffeq:
+        scalar_t: []
+        u:        [B, M]
+
+    Internal model call:
+        posterior_vector_field(
+            u_t=u,        # [B, M]
+            t=t_batch,    # [B, 1]
+            h=h           # [B, H_img]
+        )
+
+    Output:
+        du_dt: [B, M]
+    """
+
+    def __init__(
+        self,
+        posterior_vector_field: nn.Module,
+        h: torch.Tensor,
+    ):
+        super().__init__()
+
+        self.posterior_vector_field = posterior_vector_field
+        self.h = h
+
+        # Fixed dimensions from the trained vector field.
+        self.batch_size = posterior_vector_field.batch_size  # B
+        self.y_dim = posterior_vector_field.y_dim            # M
+
+        # h: [B, H_img]
+        assert h.ndim == 2
+        assert h.shape == (
+            posterior_vector_field.batch_size,
+            posterior_vector_field.h_dim,
+        )
+
+    def forward(
+        self,
+        scalar_t: torch.Tensor,
+        u: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        scalar_t:
+            Scalar ODE time from torchdiffeq.
+            Shape: []
+
+        u:
+            Current label-space state.
+            Shape: [B, M]
+
+        Returns
+        -------
+        du_dt:
+            Velocity.
+            Shape: [B, M]
+        """
+
+        # u: [B, M]
+        assert u.ndim == 2
+        assert u.shape == (self.batch_size, self.y_dim)
+
+        # scalar_t: []
+        assert scalar_t.ndim == 0
+
+        # t_batch: [B, 1]
+        t_batch = scalar_t.expand(self.batch_size, 1)
+
+        assert t_batch.shape == (self.batch_size, 1)
+        assert t_batch.dtype == u.dtype
+        assert t_batch.device == u.device
+
+        # du_dt: [B, M]
+        du_dt = self.posterior_vector_field(
+            u_t=u,
+            t=t_batch,
+            h=self.h,
+        )
+
+        assert du_dt.shape == (self.batch_size, self.y_dim)
+
+        return du_dt
+
+    
+
+
+class CNFFMModel(nn.Module):
     """
     Posterior flow matching model.
     """
 
-    def __init__(self, y_dim, batch_size, encoder, vectorfield_kwargs):
+    def __init__(self, encoder, y_dim, batch_size, vectorfield_kwargs):
         super().__init__()
 
         self.y_dim = y_dim
         self.batch_size = batch_size
         self.encoder = encoder
-        self.vector_field = PosteriorVectorFieldTransformer(y_dim=y_dim, batch_size=batch_size, **vectorfield_kwargs)
+        self.vector_field = PosteriorVectorFieldTransformer(y_dim=y_dim, batch_size=batch_size, h_dim=encoder.embed_dim, **vectorfield_kwargs)
+        self.loss = nn.MSELoss()
 
     def forward(self, X, y):
+        """
+        X: input image data [B, N, C]
+        y: target vector labels [B, M]
+        """
 
         #
         # check inputs
         #
 
-        # X: [B, C, N, N]
-        assert X.ndim == 4
+        # X: [B, N, C]
+        assert X.ndim == 3
         assert X.shape[0] == self.batch_size
 
         # y: [B, M]
@@ -531,3 +625,116 @@ class PosteriorFlowMatchingModel(nn.Module):
         # pred_v: [B, M]
         pred_v = self.vector_field(u_t=ut, t=t, h=h)
         assert pred_v.shape == (self.batch_size, self.y_dim)
+
+        #
+        # compute loss
+        #
+
+        # loss: scalar
+        loss = self.loss(pred_v, target_v)
+
+        return loss
+
+    @torch.no_grad()
+    def predict(self, X, num_samples: int = 4, method: Literal["dopri5", "rk4", "euler", "midpoint"] = "dopri5", rtol: float = 1e-5, atol: float = 1e-5):
+        """
+        Sample y ~ q_phi(y | X) using torchdiffeq.odeint.
+
+        Assumed fixed shapes:
+            X_batch: [B, C, N, N]
+            h:       [B, H_img]
+            u0:      [B, M]
+            u1:      [B, M]
+            y:       [B, M]
+
+        Returns
+        -------
+        y_batch: [B, M]
+
+        """
+
+        #
+        # check inputs
+        #
+
+        # X: [B, N, C]
+        assert X.ndim == 3
+        assert X.shape[0] == self.batch_size
+
+        self.encoder.eval()
+        self.vector_field.eval()
+        
+        # 
+        # 1. Encode X once.
+        # 
+
+        # h: [B, H_img]
+        h = self.encoder(X)
+
+        # 
+        # 2. Build ODE function du/dt = v_phi(u, t, h).
+        # 
+
+        ode_func = PosteriorODEFunc(
+            posterior_vector_field=self.vector_field,
+            h=h,
+        )
+
+        # t_span: [2]
+        # Integrate from t = 0 to t = 1.
+        t_span = torch.tensor(
+            [0.0, 1.0],
+            device=X.device,
+            dtype=X.dtype,
+        )
+
+        all_samples = []
+        for _ in range(num_samples):
+
+            # 
+            # 3. Sample initial base noise.
+            # 
+
+            # u0: [B, M]
+            u0 = torch.randn(
+                self.batch_size,
+                self.y_dim,
+                device=X.device,
+                dtype=X.dtype,
+            )
+
+            # 
+            # 4. Solve ODE.
+            # 
+            #
+            # trajectory: [2, B, M]
+            #
+            # trajectory[0] is approximately u(t=0)
+            # trajectory[1] is approximately u(t=1)
+
+            trajectory = odeint(
+                func=ode_func,
+                y0=u0,
+                t=t_span,
+                method=method,
+                rtol=rtol,
+                atol=atol,
+            )
+
+            assert trajectory.shape == (2, self.batch_size, self.y_dim)
+
+            # u1: [B, M]
+            u1 = trajectory[-1]
+
+            assert u1.shape == (self.batch_size, self.y_dim)
+
+            all_samples.append(u1)
+
+        all_samples = torch.stack(all_samples, dim=0)
+
+        y_sample = torch.mean(all_samples, dim=0)
+
+        # [B, M]
+        return y_sample
+
+

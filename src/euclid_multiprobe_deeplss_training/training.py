@@ -604,7 +604,8 @@ def train(
                         scalers=True,
                         device=device,
                         seed=seed,
-                        nside=nside_training)
+                        nside=nside_training,
+                        **config.physics_model_args if hasattr(config, "physics_model_args") else {})
     physics_model = physics_model.to(device)
     # physics_model = torch.compile(physics_model, dynamic=True)
 
@@ -663,6 +664,7 @@ def train(
                       encoder=encoder,
                       num_targets=physics_model.num_targets, 
                       embed_dim=config.embed_dim,
+                      batch_size=config.batch_size,
                       loss_args=config.loss_args if hasattr(config, "loss_args") else {})
     model_loss = model_loss.to(device)
     # loss = torch.compile(loss)
