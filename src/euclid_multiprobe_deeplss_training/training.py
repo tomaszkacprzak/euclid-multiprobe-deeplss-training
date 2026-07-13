@@ -796,6 +796,7 @@ def train(
                 train_timer.stop()
                 
                 current_learning_rate = optimizer.param_groups[0]["lr"]
+                global_train_loss = reduce_mean(train_loss)
                 if run is not None:
 
                     # IO statistics    
@@ -810,7 +811,7 @@ def train(
 
                     wandb.log(
                         {
-                            "Train/loss": reduce_mean(train_loss).item(),
+                            "Train/loss": global_train_loss.item(),
                             "step": step,
                             "learning_rate": current_learning_rate,
                             **get_examples_stats(train_examples_seen, train_timer.elapsed()),
@@ -878,38 +879,42 @@ def train(
             # Validation after each epoch
             #
             LOGGER.info('Running validation')
-            validation_predictions_path = _evaluation_predictions_path(config, _epoch) if _is_main_process() else None
-            validation_metrics = evaluate(
-                model_loss,
-                loader_validation,
-                device,
-                num_examples=2000,
-                predictions_path=validation_predictions_path,
-            )
-            if validation_metrics is not None:
-                validation_loss = validation_metrics["loss"]
-                validation_losses.append(validation_loss)
-                if run is not None:
-                    validation_log: dict[str, Any] = {
-                        "Validation/loss": validation_loss,
-                        "Validation/prediction_loss": validation_metrics["prediction_loss"],
-                        "step": step,
-                        "learning_rate": optimizer.param_groups[0]["lr"],
-                    }
-                    wandb.log(validation_log, step=step)
-                    
-                    if validation_predictions_path is not None and validation_predictions_path.exists():
-                        plots_log = {}
-                        fig = plot_evaluation_file(
-                            validation_predictions_path,
-                            parameter_names_from_physics_model(physics_model),
-                        )
-                        plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
-                        import matplotlib.pyplot as plt
-                        plt.close(fig)
-                        wandb.log(plots_log, step=step)
-                        LOGGER.debug(f'Logged validation plots for step {step}')
-                    
+
+            if _is_main_process():
+
+                model_loss_eval = _unwrap_parallel_module(model_loss)
+                validation_predictions_path = _evaluation_predictions_path(config, _epoch)
+                validation_metrics = evaluate(
+                    model_loss_eval,
+                    loader_validation,
+                    device,
+                    num_examples=1000,
+                    predictions_path=validation_predictions_path,
+                )
+                if validation_metrics is not None:
+                    validation_loss = validation_metrics["loss"]
+                    validation_losses.append(validation_loss)
+                    if run is not None:
+                        validation_log: dict[str, Any] = {
+                            "Validation/loss": validation_loss,
+                            "Validation/prediction_loss": validation_metrics["prediction_loss"],
+                            "step": step,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        }
+                        wandb.log(validation_log, step=step)
+                        
+                        if validation_predictions_path is not None and validation_predictions_path.exists():
+                            plots_log = {}
+                            fig = plot_evaluation_file(
+                                validation_predictions_path,
+                                parameter_names_from_physics_model(physics_model),
+                            )
+                            plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
+                            import matplotlib.pyplot as plt
+                            plt.close(fig)
+                            wandb.log(plots_log, step=step)
+                            LOGGER.debug(f'Logged validation plots for step {step}')
+                        
             # break epoch if max steps is reached
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
