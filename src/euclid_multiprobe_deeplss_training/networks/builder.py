@@ -144,7 +144,7 @@ def build_loss(loss_name: str,
     elif loss_name == "flowmatching":
 
         from .flowmatching_loss import CNFFMModel
-        model = CNFFMModel(encoder, y_dim=num_targets, batch_size=batch_size, vectorfield_kwargs=loss_args)
+        model = CNFFMModel(encoder, y_dim=num_targets, vectorfield_kwargs=loss_args)
 
     else:
 

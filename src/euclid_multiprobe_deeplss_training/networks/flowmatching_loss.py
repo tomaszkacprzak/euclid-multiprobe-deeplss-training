@@ -52,6 +52,7 @@ class SinusoidalTimeEmbedding(nn.Module):
             emb = F.pad(emb, (0, self.dim - emb.shape[-1]))
 
         return emb
+
 class StandardTransformerBlock(nn.Module):
     """
     Standard pre-norm transformer block.
@@ -403,15 +404,11 @@ class PosteriorODEFunc(nn.Module):
         self.h = h
 
         # Fixed dimensions from the trained vector field.
-        self.batch_size = posterior_vector_field.batch_size  # B
-        self.y_dim = posterior_vector_field.y_dim            # M
+        self.y_dim = posterior_vector_field.label_dims            # M
 
         # h: [B, H_img]
         assert h.ndim == 2
-        assert h.shape == (
-            posterior_vector_field.batch_size,
-            posterior_vector_field.h_dim,
-        )
+        assert h.shape[1] == posterior_vector_field.embedding_dim
 
     def forward(
         self,
@@ -438,15 +435,15 @@ class PosteriorODEFunc(nn.Module):
 
         # u: [B, M]
         assert u.ndim == 2
-        assert u.shape == (self.batch_size, self.y_dim)
-
+        
         # scalar_t: []
         assert scalar_t.ndim == 0
 
         # t_batch: [B, 1]
-        t_batch = scalar_t.expand(self.batch_size, 1)
+        batch_size = u.shape[0]
+        t_batch = scalar_t.expand(batch_size, 1)
 
-        assert t_batch.shape == (self.batch_size, 1)
+        assert t_batch.shape == (batch_size, 1)
         assert t_batch.dtype == u.dtype
         assert t_batch.device == u.device
 
@@ -457,7 +454,7 @@ class PosteriorODEFunc(nn.Module):
             h=self.h,
         )
 
-        assert du_dt.shape == (self.batch_size, self.y_dim)
+        assert du_dt.shape == (batch_size, self.y_dim)
 
         return du_dt
 
@@ -467,11 +464,10 @@ class CNFFMModel(nn.Module):
     Posterior flow matching model.
     """
 
-    def __init__(self, encoder, y_dim, batch_size, vectorfield_kwargs):
+    def __init__(self, encoder, y_dim, vectorfield_kwargs):
         super().__init__()
 
         self.y_dim = y_dim
-        self.batch_size = batch_size
         self.encoder = encoder
         self.vector_field = PosteriorVectorFieldTransformer(label_dims=y_dim, embedding_dim=encoder.embed_dim, **vectorfield_kwargs)
         self.loss = nn.MSELoss()
@@ -565,16 +561,17 @@ class CNFFMModel(nn.Module):
 
         """
 
+        self.encoder.eval()
+        self.vector_field.eval()
+        batch_size = X.shape[0]
+
         #
         # check inputs
         #
 
         # X: [B, N, C]
         assert X.ndim == 3
-        assert X.shape[0] == self.batch_size
-
-        self.encoder.eval()
-        self.vector_field.eval()
+        
         
         # 
         # 1. Encode X once.
@@ -609,7 +606,7 @@ class CNFFMModel(nn.Module):
 
             # u0: [B, M]
             u0 = torch.randn(
-                self.batch_size,
+                batch_size,
                 self.y_dim,
                 device=X.device,
                 dtype=X.dtype,
@@ -633,12 +630,12 @@ class CNFFMModel(nn.Module):
                 atol=atol,
             )
 
-            assert trajectory.shape == (2, self.batch_size, self.y_dim)
+            assert trajectory.shape == (2, batch_size, self.y_dim)
 
             # u1: [B, M]
             u1 = trajectory[-1]
 
-            assert u1.shape == (self.batch_size, self.y_dim)
+            assert u1.shape == (batch_size, self.y_dim)
 
             all_samples.append(u1)
 
