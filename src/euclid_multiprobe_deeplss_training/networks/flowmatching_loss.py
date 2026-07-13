@@ -488,11 +488,12 @@ class CNFFMModel(nn.Module):
 
         # X: [B, N, C]
         assert X.ndim == 3
-        assert X.shape[0] == self.batch_size
+        batch_size = X.shape[0]
 
         # y: [B, M]
         assert y.ndim == 2
-        assert y.shape == (self.batch_size, self.y_dim)
+        assert y.shape[0] == batch_size
+
 
         # u1: [B, M]
         # Assumes y is already normalized and unconstrained.
@@ -512,7 +513,7 @@ class CNFFMModel(nn.Module):
         u0 = torch.randn_like(u1)
         
         # t: [B, 1]
-        t = torch.rand(self.batch_size, 1, device=u1.device, dtype=u1.dtype)
+        t = torch.rand(batch_size, 1, device=u1.device, dtype=u1.dtype)
 
         # Avoid exact t = 0 or t = 1.
         eps = 1e-4
@@ -536,7 +537,6 @@ class CNFFMModel(nn.Module):
 
         # pred_v: [B, M]
         pred_v = self.vector_field(u_t=ut, t=t, h=h)
-        assert pred_v.shape == (self.batch_size, self.y_dim)
 
         #
         # compute loss
