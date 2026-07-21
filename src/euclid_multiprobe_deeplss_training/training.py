@@ -54,6 +54,7 @@ class TrainingConfig:
     num_workers: int = 1
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
+    validation_every_steps: int | None = None
     evaluation_predictions_dir: str | None = None
     resume_from_checkpoint: str | None = None
     tag: str = "test-run"
@@ -261,11 +262,11 @@ def _save_evaluation_predictions(
         handle.create_dataset("predictions", data=predictions)
 
 
-def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
-    """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
+def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | None:
+    """Return the run-specific HDF5 path for per-step evaluation arrays, if enabled."""
     if config.checkpoint_dir is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-epoch-{epoch + 1:04d}.h5"
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step + 1:04d}.h5"
 
 
 def _latest_checkpoint_path(checkpoint_dir: Path) -> Path:
@@ -343,17 +344,17 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
 
     wandb_info_dict = dict(wandb_info or {})
     wandb_project = wandb_info_dict.get("project") or config_dict.get("wandb_project")
+    wandb_entity = wandb_info_dict.get("entity") or config_dict.get("wandb_entity")
     if not wandb_project:
         return None
 
     init_kwargs = {
         "project": wandb_project,
+        "entity": wandb_entity,
         "name": config_dict.get("wandb_run_name") or config_dict.get("tag"),
         "mode": wandb_mode or "offline",
         "config": config_dict,
     }
-    if wandb_info_dict.get("entity") is not None:
-        init_kwargs["entity"] = wandb_info_dict["entity"]
     if wandb_info_dict.get("id") is not None:
         init_kwargs["id"] = wandb_info_dict["id"]
         init_kwargs["resume"] = "allow"
@@ -361,6 +362,8 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
             init_kwargs["name"] = wandb_info_dict["name"]
 
     init_kwargs['settings'] = wandb.Settings(x_stats_sampling_interval=0.5)
+
+    LOGGER.info(f"Initializing W&B run with kwargs: {init_kwargs}")
 
     return wandb.init(**init_kwargs)
 
@@ -713,6 +716,8 @@ def train(
             )
             checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
 
+    LOGGER.info("checkpoint_wandb_info: " + str(checkpoint_wandb_info))
+
     checkpoint_dir = _prepare_checkpoint_dir(config) if _is_main_process() else None
     _write_reproducibility_config(checkpoint_dir, config)
     _ddp_barrier()
@@ -723,6 +728,7 @@ def train(
 
     # Housekeeping
     run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
+    print(run, flush=True)
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_examples_seen = 0
     train_timer = Timer()
@@ -844,8 +850,14 @@ def train(
                         grad_hist = log_selected_gradient_histograms(encoder)
                         wandb.log({**grad_logs, **grad_hist}, step=step)
 
-                # very infrequent, checkpoint management
+                #
+                # Checkpoint management
+                #
+
                 if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+
+                    LOGGER.info(f'Saving checkpoint at step {step}')
+
                     checkpoint_path_latest = _latest_checkpoint_path(checkpoint_dir)
                     checkpoint_path_step = _step_checkpoint_path(checkpoint_dir, step)
                     for checkpoint_path in [checkpoint_path_latest, checkpoint_path_step]:
@@ -866,6 +878,48 @@ def train(
                             step=step,
                         )
 
+                #
+                # Validation after each epoch
+                #
+
+                if _is_main_process() and config.validation_every_steps and step % config.validation_every_steps == 0:
+
+                    LOGGER.info(f'Running validation at step {step}')
+
+                    model_loss_eval = _unwrap_parallel_module(model_loss)
+                    validation_predictions_path = _evaluation_predictions_path(config, step)
+                    validation_metrics = evaluate(
+                        model_loss_eval,
+                        loader_validation,
+                        device,
+                        num_examples=1000,
+                        predictions_path=validation_predictions_path,
+                    )
+                    if validation_metrics is not None:
+                        validation_loss = validation_metrics["loss"]
+                        validation_losses.append(validation_loss)
+                        if run is not None:
+                            validation_log: dict[str, Any] = {
+                                "Validation/loss": validation_loss,
+                                "Validation/prediction_loss": validation_metrics["prediction_loss"],
+                                "step": step,
+                                "learning_rate": optimizer.param_groups[0]["lr"],
+                            }
+                            wandb.log(validation_log, step=step)
+                            
+                            if validation_predictions_path is not None and validation_predictions_path.exists():
+                                plots_log = {}
+                                fig = plot_evaluation_file(
+                                    validation_predictions_path,
+                                    parameter_names_from_physics_model(physics_model),
+                                )
+                                plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
+                                import matplotlib.pyplot as plt
+                                plt.close(fig)
+                                wandb.log(plots_log, step=step)
+                                LOGGER.debug(f'Logged validation plots for step {step}')
+
+
                 # break dataloader loop if max steps is reached
                 if config.max_steps is not None and session_step >= config.max_steps:
                     LOGGER.debug('Breaking training loop due to max steps')
@@ -873,48 +927,7 @@ def train(
 
                 train_timer.start()
                 LOGGER.debug('End of step')
-
-
-            #
-            # Validation after each epoch
-            #
-            LOGGER.info('Running validation')
-
-            if _is_main_process():
-
-                model_loss_eval = _unwrap_parallel_module(model_loss)
-                validation_predictions_path = _evaluation_predictions_path(config, _epoch)
-                validation_metrics = evaluate(
-                    model_loss_eval,
-                    loader_validation,
-                    device,
-                    num_examples=1000,
-                    predictions_path=validation_predictions_path,
-                )
-                if validation_metrics is not None:
-                    validation_loss = validation_metrics["loss"]
-                    validation_losses.append(validation_loss)
-                    if run is not None:
-                        validation_log: dict[str, Any] = {
-                            "Validation/loss": validation_loss,
-                            "Validation/prediction_loss": validation_metrics["prediction_loss"],
-                            "step": step,
-                            "learning_rate": optimizer.param_groups[0]["lr"],
-                        }
-                        wandb.log(validation_log, step=step)
-                        
-                        if validation_predictions_path is not None and validation_predictions_path.exists():
-                            plots_log = {}
-                            fig = plot_evaluation_file(
-                                validation_predictions_path,
-                                parameter_names_from_physics_model(physics_model),
-                            )
-                            plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
-                            import matplotlib.pyplot as plt
-                            plt.close(fig)
-                            wandb.log(plots_log, step=step)
-                            LOGGER.debug(f'Logged validation plots for step {step}')
-                        
+   
             # break epoch if max steps is reached
             if config.max_steps is not None and session_step >= config.max_steps:
                 break
