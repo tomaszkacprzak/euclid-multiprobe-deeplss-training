@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import shutil
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -357,6 +358,10 @@ def _wandb_info_from_run(run: Any | None) -> dict[str, Any] | None:
     if run is None:
         return None
 
+    stored_info = getattr(run, "_euclid_wandb_info", None)
+    if isinstance(stored_info, Mapping):
+        return dict(stored_info)
+
     info = {
         "id": getattr(run, "id", None),
         "project": getattr(run, "project", None),
@@ -364,6 +369,15 @@ def _wandb_info_from_run(run: Any | None) -> dict[str, Any] | None:
         "name": getattr(run, "name", None),
     }
     return {key: value for key, value in info.items() if value is not None}
+
+
+def _generate_wandb_run_id() -> str:
+    """Return a W&B-compatible run id even when tests stub the wandb module."""
+    wandb_util = getattr(wandb, "util", None)
+    generate_id = getattr(wandb_util, "generate_id", None)
+    if callable(generate_id):
+        return str(generate_id())
+    return uuid.uuid4().hex[:8]
 
 
 def _wandb_info_from_checkpoint(path: str | Path | None) -> dict[str, Any] | None:
@@ -398,22 +412,30 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
     if not wandb_project:
         return None
 
+    wandb_run_id = wandb_info_dict.get("id") or _generate_wandb_run_id()
     init_kwargs = {
         "project": wandb_project,
         "name": config_dict.get("wandb_run_name") or config_dict.get("tag"),
         "mode": wandb_mode or "offline",
         "config": config_dict,
         "reinit": "create_new",
+        "id": wandb_run_id,
+        "resume": "allow" if wandb_info_dict.get("id") is not None else None,
     }
     if wandb_info_dict.get("entity") is not None:
         init_kwargs["entity"] = wandb_info_dict["entity"]
-    if wandb_info_dict.get("id") is not None:
-        init_kwargs["id"] = wandb_info_dict["id"]
-        init_kwargs["resume"] = "allow"
-        if wandb_info_dict.get("name") is not None and config_dict.get("wandb_run_name") is None:
-            init_kwargs["name"] = wandb_info_dict["name"]
+    if wandb_info_dict.get("name") is not None and config_dict.get("wandb_run_name") is None:
+        init_kwargs["name"] = wandb_info_dict["name"]
+    init_kwargs = {key: value for key, value in init_kwargs.items() if value is not None}
 
-    return wandb.init(**init_kwargs)
+    run = wandb.init(**init_kwargs)
+    if run is not None:
+        run._euclid_wandb_info = {
+            key: init_kwargs[key]
+            for key in ("id", "project", "entity", "name")
+            if init_kwargs.get(key) is not None
+        }
+    return run
 
 
 def save_checkpoint(
