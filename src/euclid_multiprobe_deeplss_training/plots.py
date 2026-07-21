@@ -11,8 +11,8 @@ import numpy as np
 
 
 def parameter_names_from_physics_model(physics_model: Any) -> list[str]:
-    """Return target parameter names from ``OntheflyPhysicsModelLinear.all_params``."""
-    return [str(name) for name in physics_model.all_params]
+    """Return target parameter names from ``OntheflyPhysicsModelLinear.params``."""
+    return [str(name) for name in physics_model.params]
 
 
 def plot_targets_vs_predictions(

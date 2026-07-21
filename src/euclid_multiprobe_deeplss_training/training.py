@@ -55,6 +55,7 @@ class TrainingConfig:
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
     validation_every_steps: int | None = None
+    num_validation_examples: int = 100
     evaluation_predictions_dir: str | None = None
     resume_from_checkpoint: str | None = None
     tag: str = "test-run"
@@ -364,8 +365,6 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
             init_kwargs["name"] = wandb_info_dict["name"]
 
     init_kwargs['settings'] = wandb.Settings(x_stats_sampling_interval=0.5)
-
-    LOGGER.info(f"Initializing W&B run with kwargs: {init_kwargs}")
 
     return wandb.init(**init_kwargs)
 
@@ -892,7 +891,7 @@ def train(
                         model_loss_eval,
                         loader_validation,
                         device,
-                        num_examples=1000,
+                        num_examples=config.num_validation_examples,
                         predictions_path=validation_predictions_path,
                     )
                     if validation_metrics is not None:
