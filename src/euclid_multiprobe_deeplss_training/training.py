@@ -324,6 +324,8 @@ def _wandb_info_from_checkpoint(path: str | Path | None) -> dict[str, Any] | Non
     wandb_info = checkpoint.get("wandb")
     if isinstance(wandb_info, Mapping):
         return dict(wandb_info)
+
+
     return None
 
 
@@ -376,7 +378,6 @@ def save_checkpoint(
     config: TrainingConfig | Mapping[str, Any],
     train_losses: list[float],
     val_losses: list[float],
-    loss_fn: nn.Module | None = None,
     wandb_info: Mapping[str, Any] | None = None,
 ) -> None:
     """Save model, loss function, optimizer, config, loss history, and W&B resume metadata."""
@@ -728,7 +729,6 @@ def train(
 
     # Housekeeping
     run = init_wandb(config, checkpoint_wandb_info) if _is_main_process() else None
-    print(run, flush=True)
     active_wandb_info = _wandb_info_from_run(run) or checkpoint_wandb_info
     train_examples_seen = 0
     train_timer = Timer()
