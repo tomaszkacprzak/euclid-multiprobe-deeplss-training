@@ -270,6 +270,13 @@ def _evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | No
     return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step + 1:04d}.h5"
 
 
+def _training_evaluation_predictions_path(config: TrainingConfig, step: int) -> Path | None:
+    """Return the run-specific HDF5 path for per-step training evaluation arrays, if enabled."""
+    if config.checkpoint_dir is None:
+        return None
+    return Path(config.checkpoint_dir) / config.tag / f"evaluation-training-step-{step + 1:04d}.h5"
+
+
 def _latest_checkpoint_path(checkpoint_dir: Path) -> Path:
     """Return the rolling checkpoint path used for restarts and completed runs."""
     return checkpoint_dir / "checkpoint-latest.pt"
@@ -897,7 +904,17 @@ def train(
                     if validation_metrics is not None:
                         validation_loss = validation_metrics["loss"]
                         validation_losses.append(validation_loss)
+
+                        training_predictions_path = _training_evaluation_predictions_path(config, step)
                         if run is not None:
+                            evaluate(
+                                model_loss_eval,
+                                loader_training,
+                                device,
+                                num_examples=config.num_validation_examples,
+                                predictions_path=training_predictions_path,
+                            )
+
                             validation_log: dict[str, Any] = {
                                 "Validation/loss": validation_loss,
                                 "Validation/prediction_loss": validation_metrics["prediction_loss"],
@@ -906,8 +923,8 @@ def train(
                             }
                             wandb.log(validation_log, step=step)
                             
+                            plots_log = {}
                             if validation_predictions_path is not None and validation_predictions_path.exists():
-                                plots_log = {}
                                 fig = plot_evaluation_file(
                                     validation_predictions_path,
                                     parameter_names_from_physics_model(physics_model),
@@ -915,8 +932,19 @@ def train(
                                 plots_log["Plots/targets_vs_predictions"] = wandb.Image(fig)
                                 import matplotlib.pyplot as plt
                                 plt.close(fig)
+
+                            if training_predictions_path is not None and training_predictions_path.exists():
+                                fig = plot_evaluation_file(
+                                    training_predictions_path,
+                                    parameter_names_from_physics_model(physics_model),
+                                )
+                                plots_log["Plots/targets_vs_predictions_training"] = wandb.Image(fig)
+                                import matplotlib.pyplot as plt
+                                plt.close(fig)
+
+                            if plots_log:
                                 wandb.log(plots_log, step=step)
-                                LOGGER.debug(f'Logged validation plots for step {step}')
+                                LOGGER.debug(f'Logged evaluation plots for step {step}')
 
 
                 # break dataloader loop if max steps is reached
