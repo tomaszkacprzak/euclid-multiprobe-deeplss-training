@@ -17,7 +17,7 @@ def test_cuhpx_scalar_route_matches_healpy_spin_transform() -> None:
         CuHPXScalarRouteEB,
     )
 
-    nside = 32
+    nside = 64
     lmax = nside
     ell = np.arange(lmax + 1, dtype=np.float64)
     e_power = np.zeros(lmax + 1, dtype=np.float64)
