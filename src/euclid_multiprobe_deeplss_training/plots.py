@@ -46,6 +46,8 @@ def plot_targets_vs_predictions(
         ax.set_xlabel(f"Target: {name}")
         ax.set_ylabel(f"Prediction: {name}")
         ax.plot([x.min(), x.max()], [x.min(), x.max()], "r--", lw=1)
+        ax.set_ylim(x.min(), x.max())
+        ax.set_xlim(x.min(), x.max())
 
     for i in range(num_targets, nrows * ncols):
         row, col = divmod(i, ncols)
