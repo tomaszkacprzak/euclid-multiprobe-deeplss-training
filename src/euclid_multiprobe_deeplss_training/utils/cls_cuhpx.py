@@ -10,7 +10,7 @@ from cuhpx import SHTCUDA
 from torch import nn
 
 
-class ClsCuHPX(nn.Module):
+class AutoClsCuHPX(nn.Module):
     """Compute a scalar angular power spectrum with a cuHPX SHT.
 
     ``lmax`` and ``mmax`` follow the cuHPX convention: they are array extents,

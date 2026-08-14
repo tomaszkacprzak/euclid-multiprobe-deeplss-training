@@ -36,7 +36,7 @@ def cls_module(monkeypatch: pytest.MonkeyPatch):
 
 def test_cls_weights_nonnegative_m_modes(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
-    transform = cls_module.ClsCuHPX(nside=1, lmax=3)
+    transform = cls_module.AutoClsCuHPX(nside=1, lmax=3)
     maps = torch.zeros(2, 12)
 
     result = transform(maps)
@@ -61,8 +61,8 @@ def test_cls_weights_nonnegative_m_modes(cls_module, monkeypatch: pytest.MonkeyP
 
 def test_cls_validates_map_shape_and_full_m_range(cls_module) -> None:
     with pytest.raises(ValueError, match="mmax must equal lmax"):
-        cls_module.ClsCuHPX(nside=2, lmax=4, mmax=3)
+        cls_module.AutoClsCuHPX(nside=2, lmax=4, mmax=3)
 
-    transform = cls_module.ClsCuHPX(nside=2, lmax=4)
+    transform = cls_module.AutoClsCuHPX(nside=2, lmax=4)
     with pytest.raises(ValueError, match="Expected 48 pixels"):
         transform(torch.zeros(1, 47))

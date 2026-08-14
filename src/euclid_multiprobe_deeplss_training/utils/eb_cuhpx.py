@@ -69,6 +69,7 @@ class CuHPXScalarRouteEB(nn.Module):
         nside: int,
         lmax: int,
         *,
+        output_type: Literal["map", "alm"] = "map",
         quad_weights: str = "ring",
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
@@ -112,7 +113,9 @@ class CuHPXScalarRouteEB(nn.Module):
         self.L = lmax + 1
         self.M = lmax + 1
         self.num_pixels = 12 * nside * nside
+        self.output_type = output_type
         self.quad_weights = quad_weights
+
 
         # cuHPX constructs some internal tensors on the current CUDA device.
         with torch.cuda.device(target_device):
@@ -417,15 +420,24 @@ class CuHPXScalarRouteEB(nn.Module):
 
         eb_alm = torch.stack((e_alm, b_alm), dim=1).contiguous()
 
-        # The only inverse scalar SHT call.
-        eb_ring = self.isht(eb_alm)
+        if self.output_type == "alm":
+            return eb_alm
+ 
+        elif self.output_type == "map":
+            # The only inverse scalar SHT call.
+            eb_ring = self.isht(eb_alm)
 
-        # Return E/B in the same NESTED ordering as the input.
-        return torch.index_select(
-            eb_ring,
-            dim=-1,
-            index=self.ring_index_for_nest,
-        )
+            # Return E/B in the same NESTED ordering as the input.
+            eb_nest = torch.index_select(
+                eb_ring,
+                dim=-1,
+                index=self.ring_index_for_nest,
+            )
+
+            return eb_nest
+
+        else:
+            raise ValueError(f"Invalid output_type: {self.output_type}")
 
     def extra_repr(self) -> str:
         return (
