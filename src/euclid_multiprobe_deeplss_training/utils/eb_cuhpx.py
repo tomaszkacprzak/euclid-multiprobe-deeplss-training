@@ -16,16 +16,17 @@ Conventions
 
 from __future__ import annotations
 
-import torch
-from torch import nn
+from typing import Literal
 
 import cuhpx
+import torch
 from cuhpx import SHTCUDA, iSHTCUDA
+from torch import nn
 
 
 class CuHPXScalarRouteEB(nn.Module):
     """
-    Convert batched full-sky shear maps (g1, g2) to scalar (E, B) maps.
+    Convert batched full-sky shear maps (g1, g2) to scalar (E, B) maps or alms.
 
     Parameters
     ----------
@@ -37,6 +38,10 @@ class CuHPXScalarRouteEB(nn.Module):
         shape ``(..., L, M)`` with ell=0,...,L-1 and m=0,...,M-1.
     quad_weights:
         Scalar-analysis quadrature used by cuHPX. Use ``"ring"`` or ``"none"``.
+    output_type:
+        Return NESTED E/B maps when ``"map"``, or two-dimensional E/B alm
+        arrays with shape ``(batch_size, 2, lmax + 1, lmax + 1)`` when
+        ``"alm"``.
     device:
         CUDA device on which the module is constructed. Construct the module
         directly on its target GPU, especially in multi-GPU applications.
@@ -53,8 +58,10 @@ class CuHPXScalarRouteEB(nn.Module):
 
     Output
     ------
-    Real tensor with the same shape and ordering. Channel 0 is the scalar
-    E-mode map and channel 1 is the scalar B-mode map.
+    When ``output_type="map"``, a real tensor with the same shape and ordering
+    as the input. When ``output_type="alm"``, a complex tensor with shape
+    ``(batch_size, 2, lmax + 1, lmax + 1)``. Channel 0 is E mode and channel 1
+    is B mode in either case.
 
     Notes
     -----
@@ -93,6 +100,8 @@ class CuHPXScalarRouteEB(nn.Module):
             )
         if quad_weights not in {"ring", "none"}:
             raise ValueError("quad_weights must be either 'ring' or 'none'.")
+        if output_type not in {"map", "alm"}:
+            raise ValueError("output_type must be either 'map' or 'alm'.")
         if dtype not in {torch.float32, torch.float64}:
             raise TypeError("dtype must be torch.float32 or torch.float64.")
         if not torch.cuda.is_available():
