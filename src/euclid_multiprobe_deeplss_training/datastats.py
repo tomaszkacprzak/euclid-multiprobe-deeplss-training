@@ -84,12 +84,13 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
 
     data_iter = iter(dataloader)
     try:
-        maps, labels = next(data_iter)
+        maps, labels, inds = next(data_iter)
     except StopIteration:
         return map_stats, label_stats
 
     LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
     LOGGER.debug(f'Batch {batch_count} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
+    LOGGER.debug(f'Batch {batch_count} inds shape={inds.shape} size={inds.numel()*inds.itemsize/1024**2:.2f} MB')
 
     map_stats.append(_summarize_maps(maps, split=split))
     label_stats.append(_summarize_labels(labels, split=split))

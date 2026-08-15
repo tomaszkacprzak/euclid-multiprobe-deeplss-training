@@ -72,7 +72,7 @@ def calccls(
     # Opening in write mode creates an empty file before loader iteration and
     # deliberately replaces an earlier result at the requested path.
     with h5py.File(output_path, "w") as output_file, torch.no_grad():
-        for maps, _labels in loader:
+        for maps, labels, inds in loader:
             maps = maps.to(device=run_device, dtype=torch.float32)
             maps_list = physics_model.unstack_batch_channels(maps)
             batch_spectra = cls_calculator.forward(*maps_list)

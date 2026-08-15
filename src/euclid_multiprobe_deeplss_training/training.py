@@ -763,7 +763,7 @@ def train(
                 #
 
                 model_loss.train()
-                maps, labels = batch
+                maps, labels, inds = batch
                 LOGGER.debug(f'Labels shape={labels.shape}, maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
                 maps = maps.to(device=device, dtype=torch.float32)
                 labels = labels.to(device=device, dtype=torch.float32)
