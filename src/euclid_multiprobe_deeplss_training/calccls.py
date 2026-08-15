@@ -17,6 +17,7 @@ from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
+# inds: i_signal, i_sobol, i_cosmo, i_perm, i_patch, nside, nside_down
 
 def calccls(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
