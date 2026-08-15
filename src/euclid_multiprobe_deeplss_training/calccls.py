@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import html
+import json
+import math
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import h5py
+import numpy as np
 import torch
 
 from .training import TrainingConfig, load_physics_model_class
@@ -94,6 +98,18 @@ def calccls(
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
                 break
 
+    dashboard_path = output_path.with_suffix(".html")
+    create_power_spectra_dashboard(
+        output_path,
+        dashboard_path,
+        parameter_names=[str(name) for name in physics_model.params],
+        model_information={
+            "physics_model": config.physics_model,
+            "shape_noise_std": _find_config_value(config.forward_model, "shape_noise_std"),
+            "config_forward_model": config.config_forward_model,
+        },
+    )
+    LOGGER.info("Wrote interactive power-spectra dashboard to %s", dashboard_path)
     return output_path
 
 
@@ -146,6 +162,162 @@ def _append_tensor(output_file: h5py.File, dataset_name: str, tensor: torch.Tens
     old_size = dataset.shape[0]
     dataset.resize(old_size + values.shape[0], axis=0)
     dataset[old_size:] = values
+
+
+def create_power_spectra_dashboard(
+    spectra_path: str | Path,
+    dashboard_path: str | Path,
+    *,
+    parameter_names: list[str],
+    model_information: Mapping[str, Any],
+) -> Path:
+    """Create a self-contained Plotly dashboard from a calccls HDF5 file."""
+    import plotly.graph_objects as go
+    import plotly.io as pio
+    from plotly.colors import sample_colorscale
+    from plotly.subplots import make_subplots
+
+    with h5py.File(spectra_path, "r") as source:
+        labels = np.asarray(source["labels"])
+        probe_names = sorted(
+            (name for name in source if name.startswith("cls_")),
+            key=lambda name: int(name.removeprefix("cls_")),
+        )
+        spectra = [np.asarray(source[name]) for name in probe_names]
+
+    if labels.ndim != 2:
+        raise ValueError(f"labels must be a 2D array, got shape {labels.shape}.")
+    if labels.shape[1] != len(parameter_names):
+        raise ValueError(
+            f"Physics model supplies {len(parameter_names)} parameter names for {labels.shape[1]} label columns."
+        )
+    if not probe_names:
+        raise ValueError("No cls_<probe index> datasets were found.")
+
+    columns = 6
+    rows = math.ceil(len(probe_names) / columns)
+    figure = make_subplots(rows=rows, cols=columns, subplot_titles=[f"Probe {i}" for i in range(len(probe_names))])
+    label_colors: list[list[str]] = []
+    for parameter_index in range(labels.shape[1]):
+        values = labels[:, parameter_index]
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+        normalized = np.zeros_like(values, dtype=float) if high == low else (values - low) / (high - low)
+        label_colors.append(list(sample_colorscale("Viridis", normalized, colortype="rgb")))
+
+    line_trace_count = 0
+    for probe_index, values in enumerate(spectra):
+        if values.shape[0] != labels.shape[0]:
+            raise ValueError(f"{probe_names[probe_index]} and labels have different numbers of examples.")
+        row, column = divmod(probe_index, columns)
+        for example_index, spectrum in enumerate(values):
+            curves = np.asarray(spectrum).reshape(-1, spectrum.shape[-1])
+            ell = np.arange(curves.shape[-1])
+            scale = ell * (ell + 1) / (2 * np.pi)
+            for component_index, curve in enumerate(curves):
+                figure.add_trace(
+                    go.Scattergl(
+                        x=ell,
+                        y=curve * scale,
+                        mode="lines",
+                        line={"color": label_colors[0][example_index], "width": 1},
+                        name=f"Example {example_index}",
+                        legendgroup=f"example-{example_index}",
+                        showlegend=False,
+                        hovertemplate=(
+                            f"example={example_index}<br>component={component_index}<br>"
+                            "ell=%{x}<br>scaled Cℓ=%{y:.6g}<extra></extra>"
+                        ),
+                    ),
+                    row=row + 1,
+                    col=column + 1,
+                )
+                line_trace_count += 1
+        figure.update_xaxes(title_text="ell", row=row + 1, col=column + 1)
+        figure.update_yaxes(title_text="Cℓ × ell(ell+1)/(2π)", row=row + 1, col=column + 1)
+
+    # An invisible marker trace supplies the shared continuous color bar.
+    initial_values = labels[:, 0]
+    figure.add_trace(
+        go.Scatter(
+            x=[None] * len(initial_values),
+            y=[None] * len(initial_values),
+            mode="markers",
+            marker={
+                "color": initial_values,
+                "colorscale": "Viridis",
+                "showscale": True,
+                "colorbar": {"title": parameter_names[0]},
+            },
+            showlegend=False,
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=1,
+    )
+
+    buttons = []
+    trace_indices = list(range(line_trace_count + 1))
+    examples_per_trace = []
+    for values in spectra:
+        for example_index, spectrum in enumerate(values):
+            examples_per_trace.extend([example_index] * np.asarray(spectrum).reshape(-1, spectrum.shape[-1]).shape[0])
+    for parameter_index, parameter_name in enumerate(parameter_names):
+        values = labels[:, parameter_index]
+        line_colors = [label_colors[parameter_index][example] for example in examples_per_trace]
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+        buttons.append(
+            {
+                "label": parameter_name,
+                "method": "restyle",
+                "args": [
+                    {
+                        "line.color": [*line_colors, "rgba(0,0,0,0)"],
+                        "marker.color": [[float(values[example])] for example in examples_per_trace] + [values],
+                        "marker.cmin": [*[low] * line_trace_count, low],
+                        "marker.cmax": [*[high] * line_trace_count, high],
+                        "marker.colorbar.title.text": [*[parameter_name] * line_trace_count, parameter_name],
+                    },
+                    trace_indices,
+                ],
+            }
+        )
+    figure.update_layout(
+        title={"text": "Angular Power Spectra Across Cosmologies", "x": 0.5},
+        height=max(430, 360 * rows),
+        template="plotly_white",
+        hovermode="closest",
+        updatemenus=[{"buttons": buttons, "direction": "down", "x": 0, "xanchor": "left", "y": 1.12}],
+        annotations=[
+            *figure.layout.annotations,
+            {"text": "Color parameter:", "showarrow": False, "x": 0, "xanchor": "left", "xref": "paper", "y": 1.17, "yref": "paper"},
+        ],
+    )
+
+    information = html.escape(json.dumps(dict(model_information), indent=2, default=str))
+    plot_html = pio.to_html(figure, full_html=False, include_plotlyjs=True, config={"responsive": True})
+    document = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Angular Power Spectra Dashboard</title></head><body>
+<h1>Angular Power Spectra Dashboard</h1>
+<details><summary>Model information</summary><pre>{information}</pre></details>
+{plot_html}
+</body></html>"""
+    destination = Path(dashboard_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(document, encoding="utf-8")
+    return destination
+
+
+def _find_config_value(config: Mapping[str, Any], key: str) -> Any:
+    """Find the first nested config value named ``key``."""
+    if key in config:
+        return config[key]
+    for value in config.values():
+        if isinstance(value, Mapping):
+            found = _find_config_value(value, key)
+            if found is not None:
+                return found
+    return None
 
 
 def _coerce_config(

@@ -33,6 +33,7 @@ dependencies = [
   "healpy",
   "scikit-learn",
   "h5py",
+  "plotly",
   "pyyaml",
   "wandb",
   "psutil",
