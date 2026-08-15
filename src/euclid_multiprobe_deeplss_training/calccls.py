@@ -97,11 +97,11 @@ def calccls(
     return output_path
 
 
-def calccls_from_config(config_path: str | Path, *, output_path: str | Path = "cls.h5") -> Path:
+def calccls_from_config(config_path: str | Path, *, output_path: str | Path = "cls.h5", num_examples: int = 100) -> Path:
     """Load a YAML configuration file and calculate its training spectra."""
     path = Path(config_path)
     raw_config = with_forward_model_config(load_config(path), path.parent)
-    return calccls(raw_config, output_path=output_path)
+    return calccls(raw_config, output_path=output_path, num_examples=num_examples)
 
 
 def _append_batch(
