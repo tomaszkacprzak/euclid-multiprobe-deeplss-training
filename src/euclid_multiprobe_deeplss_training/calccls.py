@@ -205,15 +205,21 @@ def create_power_spectra_dashboard(
         raise ValueError(
             f"Physics model supplies {len(parameter_names)} parameter names for {labels.shape[1]} label columns."
         )
+    if labels.shape[1] < 2:
+        raise ValueError("At least two label columns (Om and s8) are required to calculate S8.")
     if not probe_names:
         raise ValueError("No cls_<probe index> datasets were found.")
+
+    s8 = labels[:, 1] * np.sqrt(labels[:, 0] / 0.3)
+    color_values = np.column_stack((labels, s8))
+    color_parameter_names = [*parameter_names, "S8"]
 
     columns = 6
     rows = math.ceil(len(probe_names) / columns)
     figure = make_subplots(rows=rows, cols=columns, subplot_titles=[f"Probe {i}" for i in range(len(probe_names))])
     label_colors: list[list[str]] = []
-    for parameter_index in range(labels.shape[1]):
-        values = labels[:, parameter_index]
+    for parameter_index in range(color_values.shape[1]):
+        values = color_values[:, parameter_index]
         low, high = float(np.nanmin(values)), float(np.nanmax(values))
         normalized = np.zeros_like(values, dtype=float) if high == low else (values - low) / (high - low)
         label_colors.append(list(sample_colorscale(COOLWARM_COLORSCALE, normalized, colortype="rgb")))
@@ -263,7 +269,7 @@ def create_power_spectra_dashboard(
         figure.update_yaxes(title_text=y_axis_title, range=y_axis_range, row=row + 1, col=column + 1)
 
     # An invisible marker trace supplies the shared continuous color bar.
-    initial_values = labels[:, 0]
+    initial_values = color_values[:, 0]
     figure.add_trace(
         go.Scatter(
             x=[None] * len(initial_values),
@@ -273,7 +279,7 @@ def create_power_spectra_dashboard(
                 "color": initial_values,
                 "colorscale": COOLWARM_COLORSCALE,
                 "showscale": True,
-                "colorbar": {"title": parameter_names[0]},
+                "colorbar": {"title": color_parameter_names[0]},
             },
             showlegend=False,
             hoverinfo="skip",
@@ -288,8 +294,8 @@ def create_power_spectra_dashboard(
     for values in spectra:
         for example_index, spectrum in enumerate(values):
             examples_per_trace.extend([example_index] * np.asarray(spectrum).reshape(-1, spectrum.shape[-1]).shape[0])
-    for parameter_index, parameter_name in enumerate(parameter_names):
-        values = labels[:, parameter_index]
+    for parameter_index, parameter_name in enumerate(color_parameter_names):
+        values = color_values[:, parameter_index]
         line_colors = [label_colors[parameter_index][example] for example in examples_per_trace]
         low, high = float(np.nanmin(values)), float(np.nanmax(values))
         buttons.append(
@@ -321,7 +327,32 @@ def create_power_spectra_dashboard(
     )
 
     information = html.escape(json.dumps(dict(model_information), indent=2, default=str))
-    plot_html = pio.to_html(figure, full_html=False, include_plotlyjs=True, config={"responsive": True})
+    hover_script = f"""
+const dashboard = document.getElementById('{{plot_id}}');
+let highlightedTrace = null;
+dashboard.on('plotly_hover', function(event) {{
+    const traceIndex = event.points[0].curveNumber;
+    if (traceIndex >= {line_trace_count}) return;
+    if (highlightedTrace !== null && highlightedTrace !== traceIndex) {{
+        Plotly.restyle(dashboard, {{'line.width': 1}}, [highlightedTrace]);
+    }}
+    Plotly.restyle(dashboard, {{'line.width': 4}}, [traceIndex]);
+    highlightedTrace = traceIndex;
+}});
+dashboard.on('plotly_unhover', function() {{
+    if (highlightedTrace !== null) {{
+        Plotly.restyle(dashboard, {{'line.width': 1}}, [highlightedTrace]);
+        highlightedTrace = null;
+    }}
+}});
+"""
+    plot_html = pio.to_html(
+        figure,
+        full_html=False,
+        include_plotlyjs=True,
+        config={"responsive": True},
+        post_script=hover_script,
+    )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Angular Power Spectra Dashboard</title></head><body>

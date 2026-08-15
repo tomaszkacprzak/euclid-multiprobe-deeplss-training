@@ -84,7 +84,10 @@ def test_power_spectra_dashboard_is_self_contained_and_includes_model_informatio
     assert "onthefly_linkappa" in document
     assert "shape_noise_std" in document
     assert "omega_m" in document and "sigma8" in document
+    assert '"label":"S8"' in document
     assert "plotly.js" in document
+    assert "plotly_hover" in document
+    assert "'line.width': 4" in document
     assert "https://cdn.plot.ly" not in document
     assert "#3b4cc0" in document and "#b40426" in document
 
