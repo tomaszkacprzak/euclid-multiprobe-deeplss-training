@@ -250,7 +250,8 @@ class PartSkyAutoCls(nn.Module):
             full_sky_shape = (*batch_map.shape[:-1], self.auto_cls.num_pixels)
             full_sky_map = batch_map.new_zeros(full_sky_shape)
             full_sky_map[..., self.indices] = batch_map
-            spectra.append(self.auto_cls(full_sky_map.unsqueeze(0)))
+            spectrum = self.auto_cls(full_sky_map.unsqueeze(0))
+            spectra.append(spectrum)
 
         if spectra:
             return torch.cat(spectra, dim=0)
