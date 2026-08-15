@@ -27,8 +27,9 @@ def calccls(
     """Calculate auto spectra for every batch in one training-set epoch.
 
     The output contains one extensible dataset per map probe, named
-    ``cls_0``, ``cls_1``, and so on. Each batch is appended immediately so
-    neither CPU nor GPU memory use grows over the epoch.
+    ``cls_0``, ``cls_1``, and so on, plus ``labels`` and ``inds`` datasets.
+    Each batch is appended immediately so neither CPU nor GPU memory use grows
+    over the epoch.
     """
     from msfm.onthefly_pipeline import OntheflyPipeline
 
@@ -78,7 +79,7 @@ def calccls(
             maps = maps.to(device=run_device, dtype=torch.float32)
             maps_list = physics_model.unstack_batch_channels(maps)
             batch_spectra_list = cls_calculator.forward(*maps_list)
-            _append_spectra(output_file, batch_spectra_list)
+            _append_batch(output_file, batch_spectra_list, labels, inds)
             output_file.flush()
             batch_spectra = torch.stack(batch_spectra_list, dim=-1)
             LOGGER.debug(f"Batch {j: 5d}: input maps shape: {maps.shape}, output spectra shape: {batch_spectra.shape}")
@@ -93,27 +94,48 @@ def calccls_from_config(config_path: str | Path, *, output_path: str | Path = "c
     return calccls(raw_config, output_path=output_path)
 
 
+def _append_batch(
+    output_file: h5py.File,
+    spectra: tuple[torch.Tensor, ...],
+    labels: torch.Tensor,
+    inds: torch.Tensor,
+) -> None:
+    """Append spectra and their corresponding metadata to an HDF5 file."""
+    batch_size = labels.shape[0]
+    if inds.shape[0] != batch_size or any(spectrum.shape[0] != batch_size for spectrum in spectra):
+        raise ValueError("Spectra, labels, and inds must have the same batch size.")
+
+    _append_spectra(output_file, spectra)
+    _append_tensor(output_file, "labels", labels)
+    _append_tensor(output_file, "inds", inds)
+
+
 def _append_spectra(output_file: h5py.File, spectra: tuple[torch.Tensor, ...]) -> None:
     """Append one spectra batch to an open HDF5 output file."""
-    if len(output_file) and len(output_file) != len(spectra):
-        raise ValueError(f"Expected {len(output_file)} spectra tensors, got {len(spectra)}.")
+    existing_spectra = [name for name in output_file if name.startswith("cls_")]
+    if existing_spectra and len(existing_spectra) != len(spectra):
+        raise ValueError(f"Expected {len(existing_spectra)} spectra tensors, got {len(spectra)}.")
 
     for probe_index, spectrum in enumerate(spectra):
-        values = spectrum.detach().cpu().numpy()
-        dataset_name = f"cls_{probe_index}"
-        if dataset_name not in output_file:
-            output_file.create_dataset(
-                dataset_name,
-                data=values,
-                maxshape=(None, *values.shape[1:]),
-                chunks=True,
-            )
-            continue
+        _append_tensor(output_file, f"cls_{probe_index}", spectrum)
 
-        dataset = output_file[dataset_name]
-        old_size = dataset.shape[0]
-        dataset.resize(old_size + values.shape[0], axis=0)
-        dataset[old_size:] = values
+
+def _append_tensor(output_file: h5py.File, dataset_name: str, tensor: torch.Tensor) -> None:
+    """Append a tensor along its batch dimension to an extensible dataset."""
+    values = tensor.detach().cpu().numpy()
+    if dataset_name not in output_file:
+        output_file.create_dataset(
+            dataset_name,
+            data=values,
+            maxshape=(None, *values.shape[1:]),
+            chunks=True,
+        )
+        return
+
+    dataset = output_file[dataset_name]
+    old_size = dataset.shape[0]
+    dataset.resize(old_size + values.shape[0], axis=0)
+    dataset[old_size:] = values
 
 
 def _coerce_config(
