@@ -96,6 +96,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     modelprofile_parser.set_defaults(func=_run_modelprofile)
 
+    calccls_parser = subparsers.add_parser(
+        "calccls",
+        help="Calculate auto power spectra for one epoch of training data.",
+    )
+    calccls_parser.add_argument(
+        "--output-path",
+        type=str,
+        default="cls.h5",
+        help="HDF5 file to write spectra to (default: cls.h5).",
+    )
+    calccls_parser.set_defaults(func=_run_calccls)
+
     parser.set_defaults(func=_run_info)
     return parser
 
@@ -144,6 +156,17 @@ def _run_modelprofile(args: argparse.Namespace) -> int:
     from euclid_multiprobe_deeplss_training.modelprofile import modelprofile_from_config
 
     modelprofile_from_config(args.config)
+    return 0
+
+
+def _run_calccls(args: argparse.Namespace) -> int:
+    """Calculate training-set angular auto power spectra."""
+    if args.config is None:
+        raise ValueError("The calccls command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.calccls import calccls_from_config
+
+    calccls_from_config(args.config, output_path=args.output_path)
     return 0
 
 
