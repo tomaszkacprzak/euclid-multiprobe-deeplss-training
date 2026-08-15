@@ -194,3 +194,24 @@ def test_modelprofile_command_passes_config(monkeypatch) -> None:
 
     assert exit_code == 0
     assert calls == ["configs/example.yaml"]
+
+
+def test_calccls_command_requires_config() -> None:
+    with pytest.raises(ValueError, match="calccls command requires --config"):
+        main(["calccls"])
+
+
+def test_calccls_command_passes_config(monkeypatch) -> None:
+    calls = []
+    fake_calccls = types.ModuleType("euclid_multiprobe_deeplss_training.calccls")
+
+    def fake_calccls_from_config(config_path, **kwargs):
+        calls.append((config_path, kwargs))
+
+    fake_calccls.calccls_from_config = fake_calccls_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.calccls", fake_calccls)
+
+    exit_code = main(["--config", "configs/example.yaml", "calccls", "--output-path", "spectra/results.h5"])
+
+    assert exit_code == 0
+    assert calls == [("configs/example.yaml", {"output_path": "spectra/results.h5"})]
