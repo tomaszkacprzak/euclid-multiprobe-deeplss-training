@@ -106,6 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="cls.h5",
         help="HDF5 file to write spectra to (default: cls.h5).",
     )
+    calccls_parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=100,
+        help="Number of batches to calculate spectra for.",
+    )
     calccls_parser.set_defaults(func=_run_calccls)
 
     parser.set_defaults(func=_run_info)

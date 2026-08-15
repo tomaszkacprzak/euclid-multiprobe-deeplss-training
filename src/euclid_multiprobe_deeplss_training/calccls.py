@@ -73,10 +73,16 @@ def calccls(
     LOGGER.info("Calculating auto power spectra for one training epoch")
     # Opening in write mode creates an empty file before loader iteration and
     # deliberately replaces an earlier result at the requested path.
+    
+
+    num_examples = cls_config.get("num_examples", 10)
     j = 0
+    i = 0
+    
     with h5py.File(output_path, "w") as output_file, torch.no_grad():
         for maps, labels, inds in loader:
             j += 1
+            i += len(maps)
             maps = maps.to(device=run_device, dtype=torch.float32)
             maps_list = physics_model.unstack_batch_channels(maps)
             batch_spectra_list = cls_calculator.forward(*maps_list)
@@ -84,6 +90,10 @@ def calccls(
             output_file.flush()
             batch_spectra = torch.stack(batch_spectra_list, dim=-1)
             LOGGER.debug(f"Batch {j: 5d}: input maps shape: {maps.shape}, output spectra shape: {batch_spectra.shape}")
+
+            if i >= num_examples:
+                LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
+                break
 
     return output_path
 
