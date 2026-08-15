@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+np = pytest.importorskip("numpy")
 h5py = pytest.importorskip("h5py")
 torch = pytest.importorskip("torch")
 pytest.importorskip("cuhpx")
@@ -9,6 +10,7 @@ calccls_module = pytest.importorskip("euclid_multiprobe_deeplss_training.calccls
 _append_spectra = calccls_module._append_spectra
 _append_batch = calccls_module._append_batch
 create_power_spectra_dashboard = calccls_module.create_power_spectra_dashboard
+_smooth_spectrum = calccls_module._smooth_spectrum
 
 
 def test_append_spectra_creates_and_extends_probe_datasets(tmp_path) -> None:
@@ -84,6 +86,14 @@ def test_power_spectra_dashboard_is_self_contained_and_includes_model_informatio
     assert "omega_m" in document and "sigma8" in document
     assert "plotly.js" in document
     assert "https://cdn.plot.ly" not in document
+    assert "#3b4cc0" in document and "#b40426" in document
+
+
+def test_smooth_spectrum_uses_length_ten_uniform_kernel() -> None:
+    values = torch.arange(20, dtype=torch.float64).numpy()
+    expected = pytest.approx(np.convolve(values, np.ones(10) / 10, mode="same"))
+
+    assert _smooth_spectrum(values) == expected
 
 
 def test_power_spectra_dashboard_requires_parameter_name_for_each_label(tmp_path) -> None:

@@ -21,6 +21,20 @@ from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
+COOLWARM_COLORSCALE = [
+    [0.0, "#3b4cc0"],
+    [0.1, "#5977e3"],
+    [0.2, "#7b9ff9"],
+    [0.3, "#9ebeff"],
+    [0.4, "#c0d4f5"],
+    [0.5, "#dddddd"],
+    [0.6, "#f2cbb7"],
+    [0.7, "#f7a889"],
+    [0.8, "#ee8468"],
+    [0.9, "#d65244"],
+    [1.0, "#b40426"],
+]
+
 # inds: i_signal, i_sobol, i_cosmo, i_perm, i_patch, nside, nside_down
 
 def calccls(
@@ -202,22 +216,32 @@ def create_power_spectra_dashboard(
         values = labels[:, parameter_index]
         low, high = float(np.nanmin(values)), float(np.nanmax(values))
         normalized = np.zeros_like(values, dtype=float) if high == low else (values - low) / (high - low)
-        label_colors.append(list(sample_colorscale("Viridis", normalized, colortype="rgb")))
+        label_colors.append(list(sample_colorscale(COOLWARM_COLORSCALE, normalized, colortype="rgb")))
 
     line_trace_count = 0
     for probe_index, values in enumerate(spectra):
         if values.shape[0] != labels.shape[0]:
             raise ValueError(f"{probe_names[probe_index]} and labels have different numbers of examples.")
         row, column = divmod(probe_index, columns)
+        panel_maximum: float | None = None
         for example_index, spectrum in enumerate(values):
             curves = np.asarray(spectrum).reshape(-1, spectrum.shape[-1])
             ell = np.arange(curves.shape[-1])
             scale = ell * (ell + 1) / (2 * np.pi)
             for component_index, curve in enumerate(curves):
+                scaled_curve = curve * scale
+                smoothed_curve = _smooth_spectrum(scaled_curve)
+                maximum_slice = smoothed_curve[ell >= 100]
+                if maximum_slice.size == 0:
+                    maximum_slice = smoothed_curve
+                finite_values = maximum_slice[np.isfinite(maximum_slice)]
+                if finite_values.size:
+                    curve_maximum = float(np.max(finite_values))
+                    panel_maximum = curve_maximum if panel_maximum is None else max(panel_maximum, curve_maximum)
                 figure.add_trace(
                     go.Scattergl(
                         x=ell,
-                        y=curve * scale,
+                        y=smoothed_curve,
                         mode="lines",
                         line={"color": label_colors[0][example_index], "width": 1},
                         name=f"Example {example_index}",
@@ -232,8 +256,11 @@ def create_power_spectra_dashboard(
                     col=column + 1,
                 )
                 line_trace_count += 1
-        figure.update_xaxes(title_text="ell", row=row + 1, col=column + 1)
-        figure.update_yaxes(title_text="Cℓ × ell(ell+1)/(2π)", row=row + 1, col=column + 1)
+        x_axis_title = "ell" if probe_index + columns >= len(probe_names) else None
+        y_axis_title = "Cℓ × ell(ell+1)/(2π)" if column == 0 else None
+        figure.update_xaxes(title_text=x_axis_title, row=row + 1, col=column + 1)
+        y_axis_range = [0, panel_maximum] if panel_maximum is not None and panel_maximum > 0 else None
+        figure.update_yaxes(title_text=y_axis_title, range=y_axis_range, row=row + 1, col=column + 1)
 
     # An invisible marker trace supplies the shared continuous color bar.
     initial_values = labels[:, 0]
@@ -244,7 +271,7 @@ def create_power_spectra_dashboard(
             mode="markers",
             marker={
                 "color": initial_values,
-                "colorscale": "Viridis",
+                "colorscale": COOLWARM_COLORSCALE,
                 "showscale": True,
                 "colorbar": {"title": parameter_names[0]},
             },
@@ -318,6 +345,14 @@ def _find_config_value(config: Mapping[str, Any], key: str) -> Any:
             if found is not None:
                 return found
     return None
+
+
+def _smooth_spectrum(values: np.ndarray) -> np.ndarray:
+    """Smooth a spectrum with a length-ten uniform kernel without changing its length."""
+    kernel = np.ones(10) / 10
+    full_convolution = np.convolve(values, kernel, mode="full")
+    start = (kernel.size - 1) // 2
+    return full_convolution[start : start + values.size]
 
 
 def _coerce_config(
