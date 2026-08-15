@@ -210,7 +210,7 @@ def create_power_spectra_dashboard(
     if not probe_names:
         raise ValueError("No cls_<probe index> datasets were found.")
 
-    s8 = labels[:, 1] * np.sqrt(labels[:, 0] / 0.3)
+    s8 = labels[:, 1] * np.sqrt(labels[:, 0] / 0.3) ** 0.5
     color_values = np.column_stack((labels, s8))
     color_parameter_names = [*parameter_names, "S8"]
 
@@ -381,9 +381,8 @@ def _find_config_value(config: Mapping[str, Any], key: str) -> Any:
 def _smooth_spectrum(values: np.ndarray) -> np.ndarray:
     """Smooth a spectrum with a length-ten uniform kernel without changing its length."""
     kernel = np.ones(10) / 10
-    full_convolution = np.convolve(values, kernel, mode="full")
-    start = (kernel.size - 1) // 2
-    return full_convolution[start : start + values.size]
+    values_convolved = np.convolve(values, kernel, mode="same")
+    return values_convolved
 
 
 def _coerce_config(
