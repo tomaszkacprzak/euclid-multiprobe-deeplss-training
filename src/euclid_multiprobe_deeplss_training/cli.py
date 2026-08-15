@@ -172,7 +172,7 @@ def _run_calccls(args: argparse.Namespace) -> int:
 
     from euclid_multiprobe_deeplss_training.calccls import calccls_from_config
 
-    calccls_from_config(args.config, output_path=args.output_path)
+    calccls_from_config(args.config, output_path=args.output_path, num_examples=args.num_examples)
     return 0
 
 

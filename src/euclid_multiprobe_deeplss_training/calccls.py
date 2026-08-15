@@ -23,6 +23,7 @@ def calccls(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
     *,
     output_path: str | Path = "cls.h5",
+    num_examples: int = 100,
     device: torch.device | str | None = None,
 ) -> Path:
     """Calculate auto spectra for every batch in one training-set epoch.
@@ -75,10 +76,8 @@ def calccls(
     # deliberately replaces an earlier result at the requested path.
     
 
-    num_examples = cls_config.get("num_examples", 10)
     j = 0
     i = 0
-    
     with h5py.File(output_path, "w") as output_file, torch.no_grad():
         for maps, labels, inds in loader:
             j += 1
