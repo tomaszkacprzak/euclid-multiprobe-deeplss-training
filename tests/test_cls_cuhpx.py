@@ -108,3 +108,46 @@ def test_spin2_cls_validates_channels_and_lmax(cls_module, monkeypatch: pytest.M
         transform(torch.zeros(1, 3, 12))
     with pytest.raises(ValueError, match="at least 3"):
         transform(torch.zeros(1, 2, 12))
+
+
+def test_part_sky_cls_expands_and_processes_one_batch_item(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    class _FakeAutoCls:
+        num_pixels = 12
+        lmax = 3
+
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["nside"] == 1
+            assert kwargs["lmax"] == 3
+            assert kwargs["input_order"] == "nest"
+
+        def __call__(self, maps: torch.Tensor) -> torch.Tensor:
+            calls.append(maps.clone())
+            return maps.sum(dim=-1, keepdim=True).expand(*maps.shape[:-1], self.lmax)
+
+    monkeypatch.setattr(cls_module, "AutoClsCuHPX", _FakeAutoCls)
+    transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4, 8]), nside=1, lmax=3)
+    scalar = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spin2 = torch.arange(6.0).reshape(1, 2, 3)
+
+    scalar_cls, spin2_cls = transform(scalar, spin2)
+
+    assert scalar_cls.shape == (2, 3)
+    assert spin2_cls.shape == (1, 2, 3)
+    assert len(calls) == 3
+    assert all(call.shape[0] == 1 for call in calls)
+    torch.testing.assert_close(calls[0][0, [1, 4, 8]], scalar[0])
+    assert torch.count_nonzero(calls[0]) == 3
+
+
+def test_part_sky_cls_validates_indices_and_map_shape(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        cls_module.PartSkyAutoCls(torch.tensor([1, 1]), nside=1, lmax=3)
+    with pytest.raises(ValueError, match="range"):
+        cls_module.PartSkyAutoCls(torch.tensor([12]), nside=1, lmax=3)
+
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4]), nside=1, lmax=3)
+    with pytest.raises(ValueError, match="Expected 2 part-sky pixels"):
+        transform(torch.zeros(1, 3))

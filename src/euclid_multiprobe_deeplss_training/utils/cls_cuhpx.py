@@ -176,3 +176,83 @@ class AutoClsCuHPX(nn.Module):
         denominator = self._cl_denominator.to(device=power.device, dtype=power.dtype)
         # (..., L, M) -> (..., L).
         return (power * weights).sum(dim=-1) / denominator
+
+
+class PartSkyAutoCls(nn.Module):
+    """Compute auto spectra for batches of nested, partially observed maps.
+
+    Parameters are the same as :class:`AutoClsCuHPX`, except that ``indices``
+    gives the nested HEALPix pixel occupied by every value in a part-sky map.
+    Pixels absent from ``indices`` are treated as zero.  Maps are expanded and
+    transformed one batch item at a time so that only one full-sky map per
+    input is resident in temporary memory.
+
+    ``forward`` accepts any number of scalar ``(B, P)`` or spin-2
+    ``(B, 2, P)`` tensors and returns one spectrum for each argument, in the
+    same order.  The return value is always a tuple, including for one input.
+    """
+
+    def __init__(
+        self,
+        indices: torch.Tensor,
+        nside: int,
+        lmax: int,
+        mmax: int | None = None,
+        *,
+        quad_weights: str = "ring",
+        norm: str = "ortho",
+        csphase: bool = True,
+    ) -> None:
+        super().__init__()
+
+        indices = torch.as_tensor(indices)
+        if indices.ndim != 1:
+            raise ValueError("indices must be a one-dimensional tensor.")
+        if indices.dtype == torch.bool or indices.is_floating_point() or indices.is_complex():
+            raise TypeError("indices must contain integers.")
+
+        indices = indices.to(dtype=torch.long)
+        num_pixels = 12 * int(nside) ** 2
+        if indices.numel() and (indices.min() < 0 or indices.max() >= num_pixels):
+            raise ValueError(f"indices must be in the range [0, {num_pixels}).")
+        if indices.unique().numel() != indices.numel():
+            raise ValueError("indices must not contain duplicate pixels.")
+
+        self.register_buffer("indices", indices)
+        self.num_part_sky_pixels = indices.numel()
+        self.auto_cls = AutoClsCuHPX(
+            nside=nside,
+            lmax=lmax,
+            mmax=mmax,
+            input_order="nest",
+            quad_weights=quad_weights,
+            norm=norm,
+            csphase=csphase,
+        )
+
+    def forward(self, *maps: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Expand each batch item to the full sky and return its auto spectrum."""
+        return tuple(self._forward_map(part_sky_map) for part_sky_map in maps)
+
+    def _forward_map(self, part_sky_map: torch.Tensor) -> torch.Tensor:
+        """Process one input tensor while limiting full-sky temporary storage."""
+        if part_sky_map.ndim not in {2, 3}:
+            raise ValueError("maps must have shape (batch_size, num_pixels) or (batch_size, 2, num_pixels).")
+        if part_sky_map.ndim == 3 and part_sky_map.shape[1] != 2:
+            raise ValueError("spin-2 maps must have exactly two channels.")
+        if part_sky_map.shape[-1] != self.num_part_sky_pixels:
+            raise ValueError(f"Expected {self.num_part_sky_pixels} part-sky pixels, got {part_sky_map.shape[-1]}.")
+        if not part_sky_map.is_floating_point():
+            raise TypeError("maps must be a floating-point tensor.")
+
+        spectra = []
+        for batch_map in part_sky_map:
+            full_sky_shape = (*batch_map.shape[:-1], self.auto_cls.num_pixels)
+            full_sky_map = batch_map.new_zeros(full_sky_shape)
+            full_sky_map[..., self.indices] = batch_map
+            spectra.append(self.auto_cls(full_sky_map.unsqueeze(0)))
+
+        if spectra:
+            return torch.cat(spectra, dim=0)
+        output_shape = (0, *(part_sky_map.shape[1:-1]), self.auto_cls.lmax)
+        return part_sky_map.new_empty(output_shape)
