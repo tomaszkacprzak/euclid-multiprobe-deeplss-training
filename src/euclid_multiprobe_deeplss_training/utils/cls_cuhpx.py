@@ -240,7 +240,8 @@ class PartSkyAutoCls(nn.Module):
         for batch_index in range(max_batch_size):
             for map_index, part_sky_map in enumerate(maps):
                 if batch_index < part_sky_map.shape[0]:
-                    spectra[map_index].append(self._forward_batch_map(part_sky_map[batch_index]))
+                    spectrum = self._forward_batch_map(part_sky_map[batch_index])
+                    spectra[map_index].append(spectrum)
 
         return tuple(
             torch.cat(map_spectra, dim=0) if map_spectra else self._empty_spectra(part_sky_map)
