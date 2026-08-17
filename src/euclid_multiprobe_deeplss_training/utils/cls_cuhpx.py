@@ -128,6 +128,10 @@ class AutoClsCuHPX(nn.Module):
 
     def _forward_scalar(self, maps: torch.Tensor) -> torch.Tensor:
         """Calculate auto spectra for scalar maps."""
+        return self._auto_spectrum(self._scalar_alms(maps))
+
+    def _scalar_alms(self, maps: torch.Tensor) -> torch.Tensor:
+        """Transform scalar maps to alms."""
         if self.input_order == "nest":
             # (B, P) -> (B, P).
             maps = cuhpx.nest2ring(maps.contiguous(), self.nside)
@@ -135,10 +139,14 @@ class AutoClsCuHPX(nn.Module):
         # (B, P) -> (B, L, M).
         alms = self.sht(maps.contiguous())
         self._validate_alm_shape(alms)
-        return self._auto_spectrum(alms)
+        return alms
 
     def _forward_spin2(self, maps: torch.Tensor) -> torch.Tensor:
         """Calculate separate E- and B-mode auto spectra for spin-2 maps."""
+        return self._auto_spectrum(self._spin2_alms(maps))
+
+    def _spin2_alms(self, maps: torch.Tensor) -> torch.Tensor:
+        """Transform spin-2 maps to E- and B-mode alms."""
         if self.lmax < 3:
             raise ValueError("lmax must be at least 3 for spin-2 maps.")
 
@@ -159,7 +167,7 @@ class AutoClsCuHPX(nn.Module):
         # (B, 2, P) -> (B, 2, L, M).
         eb_alms = self._spin_sht(maps.contiguous())
         self._validate_alm_shape(eb_alms)
-        return self._auto_spectrum(eb_alms)
+        return eb_alms
 
     def _validate_alm_shape(self, alms: torch.Tensor) -> None:
         """Check the common trailing cuHPX alm dimensions."""
@@ -270,3 +278,59 @@ class PartSkyAutoCls(nn.Module):
         """Construct the spectrum output for an empty map batch."""
         output_shape = (0, *(part_sky_map.shape[1:-1]), self.auto_cls.lmax)
         return part_sky_map.new_empty(output_shape)
+
+
+class PartSkyCls(PartSkyAutoCls):
+    """Compute every auto- and cross-spectrum of part-sky map batches.
+
+    Inputs follow :class:`PartSkyAutoCls`: each positional argument is either
+    a scalar ``(B, P)`` map or a spin-2 ``(B, 2, P)`` map in NESTED ordering.
+    Unlike ``PartSkyAutoCls``, all inputs must have the same batch size.  The
+    output has shape ``(B, lmax, N * (N + 1) // 2)`` and is ordered as
+    ``(0, 0), (0, 1), ..., (0, N - 1), (1, 1), ...``.
+
+    All map alms are computed before the pair loop.  A spin-2 input contributes
+    only its E-mode alms, so spin-2 pairs produce E-E spectra and mixed pairs
+    produce E-scalar spectra.
+    """
+
+    def forward(self, *maps: torch.Tensor) -> torch.Tensor:
+        """Return all auto- and cross-spectra with batch first."""
+        if not maps:
+            raise ValueError("at least one map is required.")
+
+        for part_sky_map in maps:
+            self._validate_map(part_sky_map)
+
+        batch_size = maps[0].shape[0]
+        if any(part_sky_map.shape[0] != batch_size for part_sky_map in maps[1:]):
+            raise ValueError("all maps must have the same batch size.")
+
+        # First transform every input; do not recompute an alm for each pair.
+        alms = [self._part_sky_alms(part_sky_map) for part_sky_map in maps]
+
+        spectra = []
+        for i in range(len(alms)):
+            for j in range(i, len(alms)):
+                spectra.append(self._cross_spectrum(alms[i], alms[j]))
+
+        # N tensors of (B, L) -> (B, L, N).
+        return torch.stack(spectra, dim=-1)
+
+    def _part_sky_alms(self, part_sky_map: torch.Tensor) -> torch.Tensor:
+        """Expand one map batch and return scalar or E-mode alms."""
+        full_sky_shape = (*part_sky_map.shape[:-1], self.auto_cls.num_pixels)
+        full_sky_map = part_sky_map.new_zeros(full_sky_shape)
+        full_sky_map[..., self.indices] = part_sky_map
+        self.auto_cls._validate_maps(full_sky_map)
+
+        if full_sky_map.ndim == 2:
+            return self.auto_cls._scalar_alms(full_sky_map)
+        return self.auto_cls._spin2_alms(full_sky_map)[:, 0]
+
+    def _cross_spectrum(self, alm1: torch.Tensor, alm2: torch.Tensor) -> torch.Tensor:
+        """Reduce two real-field alm arrays to their real cross-spectrum."""
+        cross_power = alm1.real * alm2.real + alm1.imag * alm2.imag
+        weights = self.auto_cls._cl_weights.to(device=cross_power.device, dtype=cross_power.dtype)
+        denominator = self.auto_cls._cl_denominator.to(device=cross_power.device, dtype=cross_power.dtype)
+        return (cross_power * weights).sum(dim=-1) / denominator
