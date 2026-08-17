@@ -52,6 +52,8 @@ class LinearClsNetwork(nn.Module):
         if maps.shape[-1] != self.num_channels:
             raise ValueError(f"Expected {self.num_channels} input channels, got {maps.shape[-1]}.")
 
+        # TODO: custom unbind for spin2 maps
+        raise Exception("TODO: custom unbind for spin2 maps")
         channel_maps = maps.unbind(dim=-1)
         spectra = self.cls(*channel_maps)
         return self.linear(spectra.flatten(start_dim=1))

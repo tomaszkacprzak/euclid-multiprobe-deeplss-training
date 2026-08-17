@@ -106,8 +106,8 @@ def predict(
             i += evaluation_batch_size
             if i >= num_examples:
                 break
-
-            LOGGER.info(f"Predicted {i: 5d} examples out of {num_examples} [{i / num_examples * 100:.2f}%]")
+            if j % 10 == 0:
+                LOGGER.info(f"Predicted {i: 5d} examples out of {num_examples} [{i / num_examples * 100:.2f}%]")
 
     if not label_batches:
         raise ValueError("The validation set did not produce any examples.")
@@ -116,8 +116,8 @@ def predict(
     inds = torch.cat(inds_batches).numpy()
     if labels.shape != predictions.shape:
         raise ValueError(f"Labels and predictions have different shapes: {labels.shape} and {predictions.shape}.")
-    if inds.shape != labels.shape:
-        raise ValueError(f"Indices and labels have different shapes: {inds.shape} and {labels.shape}.")
+    if len(inds) != len(labels):
+        raise ValueError(f"Indices and labels have different lengths: {len(inds)} and {len(labels)}.")
     import h5py
 
     output_path = Path(output_file)
