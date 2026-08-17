@@ -29,6 +29,7 @@ class LinearClsNetwork(nn.Module):
         embed_dim: int,
         lmax: int | None = None,
         sub_batch_size: int = 1,
+        device: torch.device | str | None = None,
         unstack_function: callable | None = None,
         window_size: int | None = None,
     ) -> None:
@@ -46,6 +47,7 @@ class LinearClsNetwork(nn.Module):
             nside=nside,
             lmax=self.lmax,
             sub_batch_size=sub_batch_size,
+            device=device,
         )
         num_spectra = self.num_channels * (self.num_channels + 1) // 2
 

@@ -228,6 +228,7 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
         attention_dropout: float = 0.0,
+        device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
 
@@ -393,6 +394,7 @@ class ShiftedWindowTransformerClsNetwork(nn.Module):
             nside=nside,
             lmax=self.lmax,
             sub_batch_size=sub_batch_size,
+            device=device,
         )
         num_spectra = self.num_channels * (self.num_channels + 1) // 2
         self.transformer = ShiftedWindowTransformerRegressor(
