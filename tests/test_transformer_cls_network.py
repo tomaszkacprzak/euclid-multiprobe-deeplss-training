@@ -8,10 +8,13 @@ torch = pytest.importorskip("torch")
 def test_transformer_cls_network_passes_all_spectra_to_transformer(monkeypatch) -> None:
     import euclid_multiprobe_deeplss_training.networks.transformer_cls as module
 
+    captured = {}
+
     class FakePartSkyCls(torch.nn.Module):
         def __init__(self, indices, nside, lmax, sub_batch_size, device=None):
             super().__init__()
             self.lmax = lmax
+            captured["device"] = device
 
         def forward(self, *maps):
             num_spectra = len(maps) * (len(maps) + 1) // 2
@@ -30,6 +33,7 @@ def test_transformer_cls_network_passes_all_spectra_to_transformer(monkeypatch) 
         window_size=2,
         depth=2,
         dropout=0.0,
+        device="cuda:1",
     )
 
     output = network(torch.randn(2, 3, 3))
@@ -37,6 +41,7 @@ def test_transformer_cls_network_passes_all_spectra_to_transformer(monkeypatch) 
     assert network.tag == "cls_transformer"
     assert network.transformer.input_channels == 6
     assert network.transformer.max_length == 4
+    assert captured["device"] == "cuda:1"
     assert output.shape == (2, 5)
 
 

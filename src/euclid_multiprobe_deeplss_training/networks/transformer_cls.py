@@ -371,6 +371,7 @@ class ShiftedWindowTransformerClsNetwork(nn.Module):
         embed_dim: int,
         lmax: int | None = None,
         sub_batch_size: int = 16,
+        device: torch.device | str | None = None,
         unstack_function: callable | None = None,
         inner_embed_dim: int = 128,
         depth: int = 6,
