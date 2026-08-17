@@ -160,6 +160,29 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
+    elif encoder_name == "cls_cnn":
+
+        assert indices is not None, "indices are required for cls_cnn"
+
+        from .cnn_cls import ConvolutionalResidualClsNetwork
+        constructor_args = {
+            "indices": indices,
+            "nside": nside,
+            "num_channels": num_channels,
+            "embed_dim": embed_dim,
+            "unstack_function": unstack_function,
+            "inner_channels": 32,
+            "downsampling_layers": 3,
+            "residual_layers": 3,
+            "kernel_size": 3,
+        }
+        constructor_args.update(encoder_args or {})
+        model = ConvolutionalResidualClsNetwork(**constructor_args)
+
+        LOGGER.info(f"Built {ConvolutionalResidualClsNetwork.__name__} {encoder_name}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
+
 
     else:
 
