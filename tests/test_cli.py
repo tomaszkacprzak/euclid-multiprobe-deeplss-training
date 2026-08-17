@@ -62,6 +62,51 @@ def test_train_command_passes_cli_overrides(monkeypatch) -> None:
     ]
 
 
+def test_predict_command_passes_cli_arguments(monkeypatch) -> None:
+    calls = []
+    fake_prediction = types.ModuleType("euclid_multiprobe_deeplss_training.prediction")
+
+    def fake_predict_from_config(config_path, **kwargs):
+        calls.append((config_path, kwargs))
+
+    fake_prediction.predict_from_config = fake_predict_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.prediction", fake_prediction)
+
+    exit_code = main(
+        [
+            "--config",
+            "config.yaml",
+            "predict",
+            "--checkpoint",
+            "model.pt",
+            "--output-file",
+            "predictions.h5",
+            "--batch-size",
+            "64",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        (
+            "config.yaml",
+            {
+                "checkpoint": "model.pt",
+                "output_file": "predictions.h5",
+                "batch_size": 64,
+                "device": "cpu",
+            },
+        )
+    ]
+
+
+def test_predict_command_requires_config() -> None:
+    with pytest.raises(ValueError, match="predict command requires --config"):
+        main(["predict", "--checkpoint", "model.pt", "--output-file", "predictions.h5"])
+
+
 def test_train_from_config_loads_forward_model_config(tmp_path, monkeypatch) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("wandb")
