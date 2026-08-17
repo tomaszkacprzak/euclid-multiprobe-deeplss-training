@@ -329,8 +329,8 @@ class PartSkyCls(PartSkyAutoCls):
         return self.auto_cls._spin2_alms(full_sky_map)[:, 0]
 
     def _cross_spectrum(self, alm1: torch.Tensor, alm2: torch.Tensor) -> torch.Tensor:
-        """Reduce two real-field alm arrays to their real cross-spectrum."""
-        cross_power = alm1.real * alm2.real + alm1.imag * alm2.imag
+        """Reduce two alm arrays to their complex cross-spectrum."""
+        cross_power = alm1 * alm2.conj()
         weights = self.auto_cls._cl_weights.to(device=cross_power.device, dtype=cross_power.dtype)
         denominator = self.auto_cls._cl_denominator.to(device=cross_power.device, dtype=cross_power.dtype)
-        return (cross_power * weights).sum(dim=-1) / denominator
+        return torch.einsum("...lm,lm->...l", cross_power, weights) / denominator
