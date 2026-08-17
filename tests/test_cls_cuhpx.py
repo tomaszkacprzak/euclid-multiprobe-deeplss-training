@@ -259,7 +259,9 @@ def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module,
     expected = expected_pairs[:, None, :].expand(-1, 3, -1)
     torch.testing.assert_close(result, expected)
     assert result.shape == (2, 3, 6)
-    assert calls == {"scalar": 2, "spin2": 1}
+    # The default sub-batch size is one, so each transform runs once per map
+    # and batch item. Alms are still reused for every pair within a sub-batch.
+    assert calls == {"scalar": 4, "spin2": 2}
 
 
 def test_part_sky_cross_spectrum_uses_real_conjugate_product(cls_module) -> None:
