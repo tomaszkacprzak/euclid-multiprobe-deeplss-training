@@ -136,6 +136,7 @@ def predict_from_config(
     checkpoint: str | Path,
     output_file: str | Path,
     batch_size: int | None = None,
+    num_examples: int | None = None,
     device: torch.device | str | None = None,
 ) -> Path:
     """Load a training config and predict its complete validation set."""
@@ -146,5 +147,6 @@ def predict_from_config(
         checkpoint=checkpoint,
         output_file=output_file,
         batch_size=batch_size,
+        num_examples=num_examples,
         device=device,
     )
