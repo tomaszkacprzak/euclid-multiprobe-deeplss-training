@@ -37,10 +37,12 @@ class AutoClsCuHPX(nn.Module):
 
     Notes
     -----
-    Scalar inputs have shape ``(batch_size, 12 * nside**2)`` and produce
-    ``(batch_size, lmax)`` spectra. Spin-2 inputs have shape
-    ``(batch_size, 2, 12 * nside**2)``, with the two channels representing
-    the HEALPix/CMB Q/U convention, and produce ``(batch_size, 2, lmax)``;
+    Both scalar and spin-2 inputs have shape
+    ``(batch_size, 12 * nside**2)``. Real tensors represent scalar maps,
+    while complex tensors represent spin-2 maps with the real and imaginary
+    components holding the HEALPix/CMB Q and U values. Scalar maps produce
+    ``(batch_size, lmax)`` spectra and spin-2 maps produce
+    ``(batch_size, 2, lmax)`` spectra;
     output channels contain the E- and B-mode auto spectra respectively.
     Spin-2 transforms use :class:`CuHPXScalarRouteEB` and therefore require
     ``lmax >= 3``. The implementation is differentiable with respect to the
@@ -109,20 +111,18 @@ class AutoClsCuHPX(nn.Module):
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
         """Return scalar ``C_ell`` or spin-2 E/B ``C_ell`` auto spectra."""
         self._validate_maps(maps)
-        if maps.ndim == 2:
-            return self._forward_scalar(maps)
-        return self._forward_spin2(maps)
+        if maps.is_complex():
+            return self._forward_spin2(maps)
+        return self._forward_scalar(maps)
 
     def _validate_maps(self, maps: torch.Tensor) -> None:
         """Validate the shared scalar and spin-2 input requirements."""
-        if maps.ndim not in {2, 3}:
-            raise ValueError("maps must have shape (batch_size, num_pixels) or (batch_size, 2, num_pixels).")
-        if maps.ndim == 3 and maps.shape[1] != 2:
-            raise ValueError("spin-2 maps must have exactly two channels.")
+        if maps.ndim != 2:
+            raise ValueError("maps must have shape (batch_size, num_pixels).")
         if maps.shape[-1] != self.num_pixels:
             raise ValueError(f"Expected {self.num_pixels} pixels for nside={self.nside}, got {maps.shape[-1]}.")
-        if not maps.is_floating_point():
-            raise TypeError("maps must be a floating-point tensor.")
+        if not (maps.is_floating_point() or maps.is_complex()):
+            raise TypeError("maps must be a floating-point or complex tensor.")
         if not maps.is_cuda:
             raise ValueError("maps must be a CUDA tensor for cuHPX SHTCUDA.")
 
@@ -149,6 +149,10 @@ class AutoClsCuHPX(nn.Module):
         """Transform spin-2 maps to E- and B-mode alms."""
         if self.lmax < 3:
             raise ValueError("lmax must be at least 3 for spin-2 maps.")
+
+        # (B, P) complex -> (B, 2, P) real Q/U channels expected by the
+        # scalar-route E/B transform.
+        maps = torch.view_as_real(maps).movedim(-1, 1)
 
         if self.input_order == "ring":
             # (B, 2, P) -> (B, 2, P).
@@ -195,8 +199,8 @@ class PartSkyAutoCls(nn.Module):
     transformed ``sub_batch_size`` items at a time. The default of one retains
     the minimum-memory, one-item-at-a-time behaviour.
 
-    ``forward`` accepts any number of scalar ``(B, P)`` or spin-2
-    ``(B, 2, P)`` tensors and returns one spectrum for each argument, in the
+    ``forward`` accepts any number of scalar or complex spin-2 ``(B, P)``
+    tensors and returns one spectrum for each argument, in the
     same order.  The return value is always a tuple, including for one input.
     """
 
@@ -267,14 +271,12 @@ class PartSkyAutoCls(nn.Module):
 
     def _validate_map(self, part_sky_map: torch.Tensor) -> None:
         """Validate a part-sky scalar or spin-2 map batch."""
-        if part_sky_map.ndim not in {2, 3}:
-            raise ValueError("maps must have shape (batch_size, num_pixels) or (batch_size, 2, num_pixels).")
-        if part_sky_map.ndim == 3 and part_sky_map.shape[1] != 2:
-            raise ValueError("spin-2 maps must have exactly two channels.")
+        if part_sky_map.ndim != 2:
+            raise ValueError("maps must have shape (batch_size, num_pixels).")
         if part_sky_map.shape[-1] != self.num_part_sky_pixels:
             raise ValueError(f"Expected {self.num_part_sky_pixels} part-sky pixels, got {part_sky_map.shape[-1]}.")
-        if not part_sky_map.is_floating_point():
-            raise TypeError("maps must be a floating-point tensor.")
+        if not (part_sky_map.is_floating_point() or part_sky_map.is_complex()):
+            raise TypeError("maps must be a floating-point or complex tensor.")
 
     def _forward_sub_batch(self, sub_batch_map: torch.Tensor) -> torch.Tensor:
         """Expand and transform one sub-batch from one input map."""
@@ -285,7 +287,7 @@ class PartSkyAutoCls(nn.Module):
 
     def _empty_spectra(self, part_sky_map: torch.Tensor) -> torch.Tensor:
         """Construct the spectrum output for an empty map batch."""
-        output_shape = (0, *(part_sky_map.shape[1:-1]), self.auto_cls.lmax)
+        output_shape = (0, *((2,) if part_sky_map.is_complex() else ()), self.auto_cls.lmax)
         return part_sky_map.new_empty(output_shape)
 
 
@@ -293,7 +295,7 @@ class PartSkyCls(PartSkyAutoCls):
     """Compute every auto- and cross-spectrum of part-sky map batches.
 
     Inputs follow :class:`PartSkyAutoCls`: each positional argument is either
-    a scalar ``(B, P)`` map or a spin-2 ``(B, 2, P)`` map in NESTED ordering.
+    a real scalar or complex spin-2 ``(B, P)`` map in NESTED ordering.
     Unlike ``PartSkyAutoCls``, all inputs must have the same batch size.  The
     output has shape ``(B, lmax, N * (N + 1) // 2)`` and is ordered as
     ``(0, 0), (0, 1), ..., (0, N - 1), (1, 1), ...``.
@@ -347,9 +349,9 @@ class PartSkyCls(PartSkyAutoCls):
         full_sky_map[..., self.indices] = part_sky_map
         self.auto_cls._validate_maps(full_sky_map)
 
-        if full_sky_map.ndim == 2:
-            return self.auto_cls._scalar_alms(full_sky_map)
-        return self.auto_cls._spin2_alms(full_sky_map)[:, 0]
+        if full_sky_map.is_complex():
+            return self.auto_cls._spin2_alms(full_sky_map)[:, 0]
+        return self.auto_cls._scalar_alms(full_sky_map)
 
     def _cross_spectrum(self, alm1: torch.Tensor, alm2: torch.Tensor) -> torch.Tensor:
         """Reduce two alm arrays to their complex cross-spectrum."""

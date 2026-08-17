@@ -83,11 +83,12 @@ def test_spin2_cls_returns_e_and_b_auto_spectra(cls_module, monkeypatch: pytest.
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
     monkeypatch.setattr(cls_module, "CuHPXScalarRouteEB", _FakeEB)
     transform = cls_module.AutoClsCuHPX(nside=1, lmax=3)
-    maps = torch.zeros(2, 2, 12)
+    maps = torch.complex(torch.zeros(2, 12), torch.ones(2, 12))
 
     result = transform(maps)
 
-    alms = transform._spin_sht(maps.flip(-1))
+    qu_maps = torch.view_as_real(maps).movedim(-1, 1).flip(-1)
+    alms = transform._spin_sht(qu_maps)
     expected = torch.stack(
         (
             alms[..., 0, 0].abs().square(),
@@ -100,14 +101,14 @@ def test_spin2_cls_returns_e_and_b_auto_spectra(cls_module, monkeypatch: pytest.
     assert result.shape == (2, 2, 3)
 
 
-def test_spin2_cls_validates_channels_and_lmax(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spin2_cls_uses_complex_dtype_and_validates_lmax(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
     transform = cls_module.AutoClsCuHPX(nside=1, lmax=2)
 
-    with pytest.raises(ValueError, match="exactly two channels"):
+    with pytest.raises(ValueError, match="shape"):
         transform(torch.zeros(1, 3, 12))
     with pytest.raises(ValueError, match="at least 3"):
-        transform(torch.zeros(1, 2, 12))
+        transform(torch.zeros(1, 12, dtype=torch.complex64))
 
 
 def test_part_sky_cls_expands_and_processes_one_batch_item(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,16 +130,16 @@ def test_part_sky_cls_expands_and_processes_one_batch_item(cls_module, monkeypat
     monkeypatch.setattr(cls_module, "AutoClsCuHPX", _FakeAutoCls)
     transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4, 8]), nside=1, lmax=3)
     scalar = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-    spin2 = torch.arange(6.0).reshape(1, 2, 3)
+    spin2 = torch.complex(torch.arange(3.0).reshape(1, 3), torch.arange(3.0, 6.0).reshape(1, 3))
 
     scalar_cls, spin2_cls = transform(scalar, spin2)
 
     assert scalar_cls.shape == (2, 3)
-    assert spin2_cls.shape == (1, 2, 3)
+    assert spin2_cls.shape == (1, 3)
     assert len(calls) == 3
     assert all(call.shape[0] == 1 for call in calls)
     torch.testing.assert_close(calls[0][0, [1, 4, 8]], scalar[0])
-    torch.testing.assert_close(calls[1][0, :, [1, 4, 8]], spin2[0])
+    torch.testing.assert_close(calls[1][0, [1, 4, 8]], spin2[0])
     torch.testing.assert_close(calls[2][0, [1, 4, 8]], scalar[1])
     assert torch.count_nonzero(calls[0]) == 3
 
@@ -234,13 +235,13 @@ def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module,
 
     scalar1 = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     scalar2 = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
-    spin2 = torch.tensor([[[3.0, 4.0], [10.0, 20.0]], [[5.0, 6.0], [30.0, 40.0]]])
+    spin2 = torch.tensor([[3 + 10j, 4 + 20j], [5 + 30j, 6 + 40j]])
 
     result = transform(scalar1, scalar2, spin2)
 
     # Pair ordering is 00, 01, 02, 11, 12, 22. Constant alms make every
     # multipole equal to the product of its two map amplitudes.
-    amplitudes = torch.stack((scalar1.sum(-1), scalar2.sum(-1), spin2[:, 0].sum(-1)), dim=-1)
+    amplitudes = torch.stack((scalar1.sum(-1), scalar2.sum(-1), spin2.real.sum(-1)), dim=-1)
     expected_pairs = torch.stack(
         [amplitudes[:, i] * amplitudes[:, j] for i in range(3) for j in range(i, 3)],
         dim=-1,
