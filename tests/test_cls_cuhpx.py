@@ -72,6 +72,8 @@ def test_spin2_cls_returns_e_and_b_auto_spectra(cls_module, monkeypatch: pytest.
             assert kwargs["output_type"] == "alm"
 
         def __call__(self, maps: torch.Tensor) -> torch.Tensor:
+            assert maps.is_complex()
+            assert maps.ndim == 2
             batch_size = maps.shape[0]
             values = torch.arange(
                 batch_size * 2 * 3 * 3,
@@ -87,8 +89,8 @@ def test_spin2_cls_returns_e_and_b_auto_spectra(cls_module, monkeypatch: pytest.
 
     result = transform(maps)
 
-    qu_maps = torch.view_as_real(maps).movedim(-1, 1).flip(-1)
-    alms = transform._spin_sht(qu_maps)
+    nested_maps = maps.flip(-1)
+    alms = transform._spin_sht(nested_maps)
     expected = torch.stack(
         (
             alms[..., 0, 0].abs().square(),
@@ -223,7 +225,9 @@ def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module,
 
         def __call__(self, maps: torch.Tensor) -> torch.Tensor:
             calls["spin2"] += 1
-            amplitude = maps[:, 0].sum(dim=-1)
+            assert maps.is_complex()
+            assert maps.ndim == 2
+            amplitude = maps.real.sum(dim=-1)
             e_alms = amplitude[:, None, None].expand(-1, 3, 3)
             b_alms = torch.full_like(e_alms, 1000)
             return torch.stack((e_alms, b_alms), dim=1).to(torch.complex64)

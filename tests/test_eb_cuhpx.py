@@ -53,20 +53,22 @@ def test_cuhpx_scalar_route_matches_healpy_spin_transform() -> None:
     )
     eb_reference_nested = hp.reorder(eb_reference_ring, r2n=True)
 
-    # CUDA route: the module accepts a batched, channel-first NESTED map.
-    shear_nested = np.stack(
-        (hp.reorder(g1_ring, r2n=True), hp.reorder(g2_ring, r2n=True))
+    # CUDA route: the module accepts a batched complex NESTED map.
+    shear_nested = (
+        hp.reorder(g1_ring, r2n=True) + 1j * hp.reorder(g2_ring, r2n=True)
     )[None]
-    shear = torch.as_tensor(shear_nested, device="cuda", dtype=torch.float64)
+    shear = torch.as_tensor(shear_nested, device="cuda", dtype=torch.complex128)
     transform = CuHPXScalarRouteEB(
         nside=nside,
         lmax=lmax,
         device=shear.device,
-        dtype=shear.dtype,
+        dtype=shear.real.dtype,
     )
 
     with torch.no_grad():
-        eb_cuhpx = transform(shear)[0].cpu().numpy()
+        eb_cuhpx_complex = transform(shear)[0].cpu().numpy()
+
+    eb_cuhpx = np.stack((eb_cuhpx_complex.real, eb_cuhpx_complex.imag))
 
     assert eb_cuhpx.shape == eb_reference_nested.shape
     np.testing.assert_allclose(
