@@ -15,6 +15,8 @@ def build_encoder(encoder_name: str,
                   batch_size: int = None,
                   indices: list[int] = None,
                   encoder_args: dict | None = None,
+                  unstack_function
+                   = None,
                   device: torch.device | str | None = None):
 
     if encoder_name == "nested_transformer":
@@ -81,25 +83,6 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
 
-    elif encoder_name == "cls_linear":
-
-        assert indices is not None, "indices are required for cls_linear"
-
-        from .linear_cls import LinearClsNetwork
-
-        constructor_args = {
-            "indices": indices,
-            "nside": nside,
-            "num_channels": num_channels,
-            "embed_dim": embed_dim,
-        }
-        constructor_args.update(encoder_args or {})
-        model = LinearClsNetwork(**constructor_args)
-
-        LOGGER.info(f"Built {LinearClsNetwork.__name__} {encoder_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
-        LOGGER.info(f"  encoder_args: {constructor_args}")
-
     elif encoder_name == "deepsphere_resnet":
 
         assert batch_size is not None, "batch_size is required for deepsphere_resnet"
@@ -132,6 +115,26 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"Built ResnetDeepSphereRegressor {encoder_name}")
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  n_side: {nside}, n_side_down: {nside_down}, num_pixels: {num_pixels}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
+
+    elif encoder_name == "cls_linear":
+
+        assert indices is not None, "indices are required for cls_linear"
+
+        from .linear_cls import LinearClsNetwork
+
+        constructor_args = {
+            "indices": indices,
+            "nside": nside,
+            "num_channels": num_channels,
+            "embed_dim": embed_dim,
+            "unstack_function": unstack_function,
+        }
+        constructor_args.update(encoder_args or {})
+        model = LinearClsNetwork(**constructor_args)
+
+        LOGGER.info(f"Built {LinearClsNetwork.__name__} {encoder_name}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
     else:

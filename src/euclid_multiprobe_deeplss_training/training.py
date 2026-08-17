@@ -658,6 +658,7 @@ def train(
                             encoder_args=config.encoder_args if hasattr(config, "encoder_args") else {},
                             batch_size=config.batch_size,
                             indices=indices_pixels_healpix,
+                            unstack_function=physics_model.unstack_batch_channels,
                             device=device)
     encoder = encoder.to(device)
     # encoder = torch.compile(encoder, dynamic=True)
@@ -803,7 +804,6 @@ def train(
                 # every step housekeeping
                 LOGGER.debug('Running housekeeping')
                 train_losses.append(train_loss.detach().cpu())
-                maps, _labels = batch
                 train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
                 train_timer.stop()
                 

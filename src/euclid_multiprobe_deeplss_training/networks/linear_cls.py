@@ -28,6 +28,7 @@ class LinearClsNetwork(nn.Module):
         embed_dim: int,
         lmax: int | None = None,
         sub_batch_size: int = 1,
+        unstack_function: callable | None = None,
     ) -> None:
         super().__init__()
 
@@ -52,8 +53,8 @@ class LinearClsNetwork(nn.Module):
         if maps.shape[-1] != self.num_channels:
             raise ValueError(f"Expected {self.num_channels} input channels, got {maps.shape[-1]}.")
 
-        # TODO: custom unbind for spin2 maps
-        raise Exception("TODO: custom unbind for spin2 maps")
-        channel_maps = maps.unbind(dim=-1)
+       
+        channel_maps = self.unstack_function(maps)
+
         spectra = self.cls(*channel_maps)
         return self.linear(spectra.flatten(start_dim=1))
