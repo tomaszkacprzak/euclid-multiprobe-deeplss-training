@@ -369,14 +369,14 @@ class ShiftedWindowTransformerClsNetwork(nn.Module):
         num_channels: int,
         embed_dim: int,
         lmax: int | None = None,
-        sub_batch_size: int = 1,
+        sub_batch_size: int = 16,
         unstack_function: callable | None = None,
-        inner_embed_dim: int = 32,
+        inner_embed_dim: int = 128,
         depth: int = 6,
         num_heads: int = 8,
         window_size: int = 64,
         mlp_ratio: float = 4.0,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         attention_dropout: float = 0.0,
     ) -> None:
         super().__init__()

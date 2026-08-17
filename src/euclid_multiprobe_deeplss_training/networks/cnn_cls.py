@@ -47,7 +47,7 @@ class ConvolutionalResidualClsNetwork(nn.Module):
         num_channels: int,
         embed_dim: int,
         lmax: int | None = None,
-        sub_batch_size: int = 1,
+        sub_batch_size: int = 16,
         unstack_function: callable | None = None,
         inner_channels: int = 32,
         downsampling_layers: int = 3,

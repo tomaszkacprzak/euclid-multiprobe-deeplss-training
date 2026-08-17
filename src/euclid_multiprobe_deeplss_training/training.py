@@ -55,7 +55,7 @@ class TrainingConfig:
     checkpoint_dir: str | None = None
     checkpoint_every_steps: int = 0
     validation_every_steps: int | None = None
-    num_validation_examples: int = 10000
+    num_validation_examples: int = 1000
     evaluation_predictions_dir: str | None = None
     resume_from_checkpoint: str | None = None
     tag: str = "test-run"
