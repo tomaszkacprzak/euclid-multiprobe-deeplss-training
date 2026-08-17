@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import html
 import json
 import math
@@ -9,7 +10,6 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-import gc
 
 import h5py
 import numpy as np
@@ -37,6 +37,7 @@ COOLWARM_COLORSCALE = [
 ]
 
 # inds: i_signal, i_sobol, i_cosmo, i_perm, i_patch, nside, nside_down
+
 
 def calccls(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
@@ -116,8 +117,23 @@ def calccls(
             if i >= num_examples:
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
                 break
-    
-    del(cls_calculator)
+
+    parameter_names = [str(name) for name in physics_model.params]
+    model_information = {
+        "physics_model": config.physics_model,
+        "shape_noise_std": _find_config_value(config.forward_model, "shape_noise_std"),
+        "config_forward_model": config.config_forward_model,
+    }
+    dashboard_path = output_path.with_suffix(".html")
+    create_power_spectra_dashboard(
+        output_path,
+        dashboard_path,
+        parameter_names=parameter_names,
+        model_information=model_information,
+    )
+    LOGGER.info("Wrote interactive auto-power-spectra dashboard to %s", dashboard_path)
+
+    del cls_calculator
     gc.collect()
 
     LOGGER.info(f"Calculating cross power spectra for {num_examples} examples")
@@ -127,7 +143,6 @@ def calccls(
         nside=nside,
         lmax=lmax,
     ).to(run_device)
-
 
     j = 0
     i = 0
@@ -145,11 +160,19 @@ def calccls(
             if i >= num_examples:
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
                 break
-    
-    del(cross_cls_calculator)
+
+    del cross_cls_calculator
     gc.collect()
-    
+
+    cross_dashboard_path = cross_output_path.with_suffix(".html")
+    create_cross_power_spectra_dashboard(
+        cross_output_path,
+        cross_dashboard_path,
+        parameter_names=parameter_names,
+        model_information=model_information,
+    )
     LOGGER.info("Wrote cross power spectra to %s", cross_output_path)
+    LOGGER.info("Wrote interactive cross-power-spectra dashboard to %s", cross_dashboard_path)
     return output_path
 
 
@@ -233,9 +256,7 @@ def create_power_spectra_dashboard(
     if labels.ndim != 2:
         raise ValueError(f"labels must be a 2D array, got shape {labels.shape}.")
     if labels.shape[1] != len(parameter_names):
-        raise ValueError(
-            f"Physics model supplies {len(parameter_names)} parameter names for {labels.shape[1]} label columns."
-        )
+        raise ValueError(f"Physics model supplies {len(parameter_names)} parameter names for {labels.shape[1]} label columns.")
     if labels.shape[1] < 2:
         raise ValueError("At least two label columns (Om and s8) are required to calculate S8.")
     if not probe_names:
@@ -285,8 +306,7 @@ def create_power_spectra_dashboard(
                         legendgroup=f"example-{example_index}",
                         showlegend=False,
                         hovertemplate=(
-                            f"example={example_index}<br>component={component_index}<br>"
-                            "ell=%{x}<br>scaled Cℓ=%{y:.6g}<extra></extra>"
+                            f"example={example_index}<br>component={component_index}<br>ell=%{{x}}<br>scaled Cℓ=%{{y:.6g}}<extra></extra>"
                         ),
                     ),
                     row=row + 1,
@@ -389,6 +409,183 @@ dashboard.on('plotly_unhover', function() {{
 <title>Angular Power Spectra Dashboard</title></head><body>
 <h1>Angular Power Spectra Dashboard</h1>
 <details><summary>Model information</summary><pre>{information}</pre></details>
+{plot_html}
+</body></html>"""
+    destination = Path(dashboard_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(document, encoding="utf-8")
+    return destination
+
+
+def create_cross_power_spectra_dashboard(
+    spectra_path: str | Path,
+    dashboard_path: str | Path,
+    *,
+    parameter_names: list[str],
+    model_information: Mapping[str, Any],
+) -> Path:
+    """Create a single-panel dashboard for selectable cross spectra."""
+    import plotly.graph_objects as go
+    import plotly.io as pio
+    from plotly.colors import sample_colorscale
+
+    with h5py.File(spectra_path, "r") as source:
+        labels = np.asarray(source["labels"])
+        spectra = np.asarray(source["cls_0"])
+
+    if labels.ndim != 2:
+        raise ValueError(f"labels must be a 2D array, got shape {labels.shape}.")
+    if labels.shape[1] != len(parameter_names):
+        raise ValueError(f"Physics model supplies {len(parameter_names)} parameter names for {labels.shape[1]} label columns.")
+    if labels.shape[1] < 2:
+        raise ValueError("At least two label columns (Om and s8) are required to calculate S8.")
+    if spectra.ndim != 3 or spectra.shape[0] != labels.shape[0]:
+        raise ValueError("cls_0 must have shape (number of examples, number of multipoles, number of probe pairs).")
+
+    pair_count = spectra.shape[2]
+    probe_count = (math.isqrt(8 * pair_count + 1) - 1) // 2
+    if probe_count * (probe_count + 1) // 2 != pair_count:
+        raise ValueError(f"The cls_0 pair dimension ({pair_count}) is not triangular.")
+    probe_pairs = [(map1, map2) for map1 in range(probe_count) for map2 in range(map1, probe_count)]
+
+    s8 = labels[:, 1] * np.sqrt(labels[:, 0] / 0.3) ** 0.5
+    color_values = np.column_stack((labels, s8))
+    color_parameter_names = [*parameter_names, "S8"]
+    label_colors: list[list[str]] = []
+    for parameter_index in range(color_values.shape[1]):
+        values = color_values[:, parameter_index]
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+        normalized = np.zeros_like(values, dtype=float) if high == low else (values - low) / (high - low)
+        label_colors.append(list(sample_colorscale(COOLWARM_COLORSCALE, normalized, colortype="rgb")))
+
+    figure = go.Figure()
+    ell = np.arange(spectra.shape[1])
+    scale = ell * (ell + 1) / (2 * np.pi)
+    for pair_index, (map1, map2) in enumerate(probe_pairs):
+        for example_index in range(spectra.shape[0]):
+            figure.add_trace(
+                go.Scattergl(
+                    x=ell,
+                    y=_smooth_spectrum(spectra[example_index, :, pair_index] * scale),
+                    mode="lines",
+                    line={"color": label_colors[0][example_index], "width": 1},
+                    name=f"Example {example_index}",
+                    visible=pair_index == 0,
+                    meta={"map1": map1, "map2": map2},
+                    showlegend=False,
+                    hovertemplate=(f"example={example_index}<br>map1={map1}<br>map2={map2}<br>ell=%{{x}}<br>scaled Cℓ=%{{y:.6g}}<extra></extra>"),
+                )
+            )
+
+    line_trace_count = len(figure.data)
+    initial_values = color_values[:, 0]
+    figure.add_trace(
+        go.Scatter(
+            x=[None] * len(initial_values),
+            y=[None] * len(initial_values),
+            mode="markers",
+            marker={
+                "color": initial_values,
+                "colorscale": COOLWARM_COLORSCALE,
+                "showscale": True,
+                "colorbar": {"title": color_parameter_names[0]},
+            },
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+    buttons = []
+    trace_indices = list(range(line_trace_count + 1))
+    examples_per_trace = list(range(spectra.shape[0])) * pair_count
+    for parameter_index, parameter_name in enumerate(color_parameter_names):
+        values = color_values[:, parameter_index]
+        line_colors = [label_colors[parameter_index][example] for example in examples_per_trace]
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+        buttons.append(
+            {
+                "label": parameter_name,
+                "method": "restyle",
+                "args": [
+                    {
+                        "line.color": [*line_colors, "rgba(0,0,0,0)"],
+                        "marker.color": [[float(values[example])] for example in examples_per_trace] + [values],
+                        "marker.cmin": [*[low] * line_trace_count, low],
+                        "marker.cmax": [*[high] * line_trace_count, high],
+                        "marker.colorbar.title.text": [*[parameter_name] * line_trace_count, parameter_name],
+                    },
+                    trace_indices,
+                ],
+            }
+        )
+
+    figure.update_layout(
+        title={"text": "Cross Angular Power Spectra Across Cosmologies", "x": 0.5},
+        template="plotly_white",
+        hovermode="closest",
+        xaxis_title="ell",
+        yaxis_title="Cℓ × ell(ell+1)/(2π)",
+        updatemenus=[{"buttons": buttons, "direction": "down", "x": 0, "xanchor": "left", "y": 1.12}],
+        annotations=[
+            {"text": "Color parameter:", "showarrow": False, "x": 0, "xanchor": "left", "xref": "paper", "y": 1.17, "yref": "paper"},
+        ],
+    )
+
+    information = html.escape(json.dumps(dict(model_information), indent=2, default=str))
+    controls = f"""<div class="probe-controls">
+<label for="map1-probe">Map 1 probe: <output id="map1-value">0</output></label>
+<input id="map1-probe" type="range" min="0" max="{probe_count - 1}" value="0" step="1">
+<label for="map2-probe">Map 2 probe: <output id="map2-value">0</output></label>
+<input id="map2-probe" type="range" min="0" max="{probe_count - 1}" value="0" step="1">
+</div>"""
+    interaction_script = f"""
+const dashboard = document.getElementById('{{plot_id}}');
+const map1Slider = document.getElementById('map1-probe');
+const map2Slider = document.getElementById('map2-probe');
+function selectProbePair() {{
+    const selected1 = Number(map1Slider.value);
+    const selected2 = Number(map2Slider.value);
+    document.getElementById('map1-value').value = selected1;
+    document.getElementById('map2-value').value = selected2;
+    const low = Math.min(selected1, selected2);
+    const high = Math.max(selected1, selected2);
+    const visibility = dashboard.data.slice(0, {line_trace_count}).map(
+        trace => trace.meta.map1 === low && trace.meta.map2 === high
+    );
+    Plotly.restyle(dashboard, {{visible: visibility}}, [...Array({line_trace_count}).keys()]);
+}}
+map1Slider.addEventListener('input', selectProbePair);
+map2Slider.addEventListener('input', selectProbePair);
+let highlightedTrace = null;
+dashboard.on('plotly_hover', function(event) {{
+    const traceIndex = event.points[0].curveNumber;
+    if (traceIndex >= {line_trace_count}) return;
+    if (highlightedTrace !== null && highlightedTrace !== traceIndex) {{
+        Plotly.restyle(dashboard, {{'line.width': 1}}, [highlightedTrace]);
+    }}
+    Plotly.restyle(dashboard, {{'line.width': 4}}, [traceIndex]);
+    highlightedTrace = traceIndex;
+}});
+dashboard.on('plotly_unhover', function() {{
+    if (highlightedTrace !== null) {{
+        Plotly.restyle(dashboard, {{'line.width': 1}}, [highlightedTrace]);
+        highlightedTrace = null;
+    }}
+}});
+"""
+    plot_html = pio.to_html(
+        figure,
+        full_html=False,
+        include_plotlyjs=True,
+        config={"responsive": True},
+        post_script=interaction_script,
+    )
+    document = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cross Angular Power Spectra Dashboard</title></head><body>
+<h1>Cross Angular Power Spectra Dashboard</h1>
+<details><summary>Model information</summary><pre>{information}</pre></details>
+{controls}
 {plot_html}
 </body></html>"""
     destination = Path(dashboard_path)

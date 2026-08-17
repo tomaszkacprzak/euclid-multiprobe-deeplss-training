@@ -10,6 +10,7 @@ calccls_module = pytest.importorskip("euclid_multiprobe_deeplss_training.calccls
 _append_spectra = calccls_module._append_spectra
 _append_batch = calccls_module._append_batch
 _cross_output_path = calccls_module._cross_output_path
+create_cross_power_spectra_dashboard = calccls_module.create_cross_power_spectra_dashboard
 create_power_spectra_dashboard = calccls_module.create_power_spectra_dashboard
 _smooth_spectrum = calccls_module._smooth_spectrum
 
@@ -115,5 +116,50 @@ def test_power_spectra_dashboard_requires_parameter_name_for_each_label(tmp_path
             spectra_path,
             tmp_path / "spectra.html",
             parameter_names=["omega_m"],
+            model_information={},
+        )
+
+
+def test_cross_power_spectra_dashboard_has_probe_sliders_and_color_dropdown(tmp_path) -> None:
+    spectra_path = tmp_path / "spectra_cross.h5"
+    dashboard_path = tmp_path / "spectra_cross.html"
+    with h5py.File(spectra_path, "w") as output_file:
+        output_file["labels"] = [[0.2, 0.7], [0.4, 0.9]]
+        # Three probe pairs, ordered (0, 0), (0, 1), (1, 1).
+        output_file["cls_0"] = np.arange(2 * 4 * 3, dtype=float).reshape(2, 4, 3)
+
+    result = create_cross_power_spectra_dashboard(
+        spectra_path,
+        dashboard_path,
+        parameter_names=["omega_m", "sigma8"],
+        model_information={"physics_model": "onthefly_linkappa"},
+    )
+
+    document = dashboard_path.read_text(encoding="utf-8")
+    assert result == dashboard_path
+    assert "Cross Angular Power Spectra Dashboard" in document
+    assert 'id="map1-probe" type="range" min="0" max="1"' in document
+    assert 'id="map2-probe" type="range" min="0" max="1"' in document
+    assert "map1Slider.addEventListener('input', selectProbePair)" in document
+    assert "map2Slider.addEventListener('input', selectProbePair)" in document
+    assert '"map1":0,"map2":1' in document
+    assert '"label":"omega_m"' in document
+    assert '"label":"sigma8"' in document
+    assert '"label":"S8"' in document
+    assert "plotly.js" in document
+    assert "https://cdn.plot.ly" not in document
+
+
+def test_cross_power_spectra_dashboard_rejects_non_triangular_pair_count(tmp_path) -> None:
+    spectra_path = tmp_path / "spectra_cross.h5"
+    with h5py.File(spectra_path, "w") as output_file:
+        output_file["labels"] = [[0.2, 0.7]]
+        output_file["cls_0"] = np.ones((1, 4, 2))
+
+    with pytest.raises(ValueError, match="pair dimension .* is not triangular"):
+        create_cross_power_spectra_dashboard(
+            spectra_path,
+            tmp_path / "spectra_cross.html",
+            parameter_names=["omega_m", "sigma8"],
             model_information={},
         )
