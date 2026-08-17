@@ -197,7 +197,7 @@ def evaluate(
     prediction_batches: list[torch.Tensor] = []
     num_examples_seen = 0
     
-    for inputs, targets in dataloader:
+    for inputs, targets, inds in dataloader:
 
         # Evaluatate model 
         inputs = inputs.to(device=device, dtype=torch.float32)
