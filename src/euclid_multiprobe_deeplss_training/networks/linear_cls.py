@@ -33,7 +33,7 @@ class LinearClsNetwork(nn.Module):
         super().__init__()
 
         self.unstack_function = unstack_function
-
+        self.embed_dim = int(embed_dim)
         self.num_channels = int(num_channels)
         if self.num_channels <= 0:
             raise ValueError("num_channels must be positive.")

@@ -137,6 +137,26 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
+    elif encoder_name == "cls_transformer":
+
+        from .transformer_cls import ShiftedWindowTransformerRegressor
+        constructor_args = {
+            "input_channels": num_channels,
+            "output_dim": embed_dim,
+            "max_length": num_pixels,
+            "embed_dim": 128,
+            "depth": 6,
+            "num_heads": 8,
+            "window_size": 64,
+        }
+        constructor_args.update(encoder_args or {})
+        model = ShiftedWindowTransformerRegressor(**constructor_args)
+
+        LOGGER.info(f"Built {ShiftedWindowTransformerRegressor.__name__} {encoder_name}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
+
+
     else:
 
         raise ValueError(f"Encoder {encoder_name} not supported")
