@@ -9,7 +9,7 @@ def test_linear_cls_network_projects_all_auto_and_cross_spectra(monkeypatch) -> 
     import euclid_multiprobe_deeplss_training.networks.linear_cls as module
 
     class FakePartSkyCls(torch.nn.Module):
-        def __init__(self, indices, nside, lmax, sub_batch_size):
+        def __init__(self, indices, nside, lmax, sub_batch_size, device=None):
             super().__init__()
             self.lmax = lmax
 
@@ -32,7 +32,7 @@ def test_linear_cls_network_average_pools_along_ell(monkeypatch) -> None:
     import euclid_multiprobe_deeplss_training.networks.linear_cls as module
 
     class FakePartSkyCls(torch.nn.Module):
-        def __init__(self, indices, nside, lmax, sub_batch_size):
+        def __init__(self, indices, nside, lmax, sub_batch_size, device=None):
             super().__init__()
             self.lmax = lmax
 

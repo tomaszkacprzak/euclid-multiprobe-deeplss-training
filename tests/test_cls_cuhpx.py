@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from contextlib import contextmanager
 
 import pytest
 
@@ -54,6 +55,21 @@ def test_cls_weights_nonnegative_m_modes(cls_module, monkeypatch: pytest.MonkeyP
     )
     torch.testing.assert_close(result, expected)
     assert result.shape == (2, 3)
+
+
+def test_cls_constructs_cuhpx_on_requested_cuda_device(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    selected_devices = []
+
+    @contextmanager
+    def fake_cuda_device(device):
+        selected_devices.append(torch.device(device))
+        yield
+
+    monkeypatch.setattr(torch.cuda, "device", fake_cuda_device)
+
+    cls_module.AutoClsCuHPX(nside=1, lmax=3, device="cuda:1")
+
+    assert selected_devices == [torch.device("cuda:1")]
 
 
 def test_cls_validates_map_shape_and_full_m_range(cls_module) -> None:
