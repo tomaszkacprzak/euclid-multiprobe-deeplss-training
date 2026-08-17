@@ -192,8 +192,8 @@ class PartSkyAutoCls(nn.Module):
     Parameters are the same as :class:`AutoClsCuHPX`, except that ``indices``
     gives the nested HEALPix pixel occupied by every value in a part-sky map.
     Pixels absent from ``indices`` are treated as zero.  Maps are expanded and
-    transformed one batch item at a time so that only one full-sky map per
-    input is resident in temporary memory.
+    transformed ``sub_batch_size`` items at a time. The default of one retains
+    the minimum-memory, one-item-at-a-time behaviour.
 
     ``forward`` accepts any number of scalar ``(B, P)`` or spin-2
     ``(B, 2, P)`` tensors and returns one spectrum for each argument, in the
@@ -207,11 +207,16 @@ class PartSkyAutoCls(nn.Module):
         lmax: int,
         mmax: int | None = None,
         *,
+        sub_batch_size: int = 1,
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
     ) -> None:
         super().__init__()
+
+        self.sub_batch_size = int(sub_batch_size)
+        if self.sub_batch_size <= 0:
+            raise ValueError("sub_batch_size must be positive.")
 
         indices = torch.as_tensor(indices)
         if indices.ndim != 1:
@@ -243,12 +248,16 @@ class PartSkyAutoCls(nn.Module):
         for part_sky_map in maps:
             self._validate_map(part_sky_map)
 
+        for part_sky_map in maps:
+            if part_sky_map.shape[0] % self.sub_batch_size != 0:
+                raise ValueError("each batch size must be divisible by sub_batch_size.")
+
         spectra: list[list[torch.Tensor]] = [[] for _ in maps]
         max_batch_size = max((part_sky_map.shape[0] for part_sky_map in maps), default=0)
-        for batch_index in range(max_batch_size):
+        for batch_index in range(0, max_batch_size, self.sub_batch_size):
             for map_index, part_sky_map in enumerate(maps):
                 if batch_index < part_sky_map.shape[0]:
-                    spectrum = self._forward_batch_map(part_sky_map[batch_index])
+                    spectrum = self._forward_sub_batch(part_sky_map[batch_index : batch_index + self.sub_batch_size])
                     spectra[map_index].append(spectrum)
 
         return tuple(
@@ -267,12 +276,12 @@ class PartSkyAutoCls(nn.Module):
         if not part_sky_map.is_floating_point():
             raise TypeError("maps must be a floating-point tensor.")
 
-    def _forward_batch_map(self, batch_map: torch.Tensor) -> torch.Tensor:
-        """Expand and transform one batch item from one input map."""
-        full_sky_shape = (*batch_map.shape[:-1], self.auto_cls.num_pixels)
-        full_sky_map = batch_map.new_zeros(full_sky_shape)
-        full_sky_map[..., self.indices] = batch_map
-        return self.auto_cls(full_sky_map.unsqueeze(0))
+    def _forward_sub_batch(self, sub_batch_map: torch.Tensor) -> torch.Tensor:
+        """Expand and transform one sub-batch from one input map."""
+        full_sky_shape = (*sub_batch_map.shape[:-1], self.auto_cls.num_pixels)
+        full_sky_map = sub_batch_map.new_zeros(full_sky_shape)
+        full_sky_map[..., self.indices] = sub_batch_map
+        return self.auto_cls(full_sky_map)
 
     def _empty_spectra(self, part_sky_map: torch.Tensor) -> torch.Tensor:
         """Construct the spectrum output for an empty map batch."""
@@ -305,6 +314,20 @@ class PartSkyCls(PartSkyAutoCls):
         batch_size = maps[0].shape[0]
         if any(part_sky_map.shape[0] != batch_size for part_sky_map in maps[1:]):
             raise ValueError("all maps must have the same batch size.")
+        if batch_size % self.sub_batch_size != 0:
+            raise ValueError("batch size must be divisible by sub_batch_size.")
+
+        if batch_size == 0:
+            return self._forward_sub_batch_cls(*maps)
+
+        sub_batch_spectra = [
+            self._forward_sub_batch_cls(*(part_sky_map[start : start + self.sub_batch_size] for part_sky_map in maps))
+            for start in range(0, batch_size, self.sub_batch_size)
+        ]
+        return torch.cat(sub_batch_spectra, dim=0)
+
+    def _forward_sub_batch_cls(self, *maps: torch.Tensor) -> torch.Tensor:
+        """Return all spectra for one sub-batch of maps."""
 
         # First transform every input; do not recompute an alm for each pair.
         alms = [self._part_sky_alms(part_sky_map) for part_sky_map in maps]

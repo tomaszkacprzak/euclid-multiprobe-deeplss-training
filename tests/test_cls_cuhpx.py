@@ -143,7 +143,55 @@ def test_part_sky_cls_expands_and_processes_one_batch_item(cls_module, monkeypat
     assert torch.count_nonzero(calls[0]) == 3
 
 
+def test_part_sky_auto_cls_processes_sub_batches(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    class _FakeAutoCls:
+        num_pixels = 12
+        lmax = 3
+
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def __call__(self, maps: torch.Tensor) -> torch.Tensor:
+            calls.append(maps.clone())
+            return maps.sum(dim=-1, keepdim=True).expand(*maps.shape[:-1], self.lmax)
+
+    monkeypatch.setattr(cls_module, "AutoClsCuHPX", _FakeAutoCls)
+    transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4]), nside=1, lmax=3, sub_batch_size=2)
+    maps = torch.arange(8.0).reshape(4, 2)
+
+    (result,) = transform(maps)
+
+    assert transform.sub_batch_size == 2
+    assert [call.shape for call in calls] == [(2, 12), (2, 12)]
+    torch.testing.assert_close(torch.cat(calls)[..., [1, 4]], maps)
+    torch.testing.assert_close(result[:, 0], maps.sum(dim=-1))
+
+
+def test_part_sky_cls_processes_sub_batches(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    transform = cls_module.PartSkyCls(torch.tensor([1, 4]), nside=1, lmax=3, sub_batch_size=2)
+    calls = []
+
+    def fake_sub_batch(*maps: torch.Tensor) -> torch.Tensor:
+        calls.append(tuple(part_sky_map.clone() for part_sky_map in maps))
+        return maps[0].new_zeros((maps[0].shape[0], 3, 3))
+
+    monkeypatch.setattr(transform, "_forward_sub_batch_cls", fake_sub_batch)
+    maps1 = torch.arange(8.0).reshape(4, 2)
+    maps2 = maps1 + 10
+
+    result = transform(maps1, maps2)
+
+    assert result.shape == (4, 3, 3)
+    assert len(calls) == 2
+    assert all(call[0].shape == (2, 2) and call[1].shape == (2, 2) for call in calls)
+    torch.testing.assert_close(torch.cat([call[0] for call in calls]), maps1)
+
+
 def test_part_sky_cls_validates_indices_and_map_shape(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="sub_batch_size must be positive"):
+        cls_module.PartSkyAutoCls(torch.tensor([1]), nside=1, lmax=3, sub_batch_size=0)
     with pytest.raises(ValueError, match="duplicate"):
         cls_module.PartSkyAutoCls(torch.tensor([1, 1]), nside=1, lmax=3)
     with pytest.raises(ValueError, match="range"):
@@ -153,6 +201,10 @@ def test_part_sky_cls_validates_indices_and_map_shape(cls_module, monkeypatch: p
     transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4]), nside=1, lmax=3)
     with pytest.raises(ValueError, match="Expected 2 part-sky pixels"):
         transform(torch.zeros(1, 3))
+
+    transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4]), nside=1, lmax=3, sub_batch_size=2)
+    with pytest.raises(ValueError, match="divisible"):
+        transform(torch.zeros(3, 2))
 
 
 def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,3 +272,7 @@ def test_part_sky_all_cls_requires_matching_batches_and_maps(cls_module) -> None
         transform()
     with pytest.raises(ValueError, match="same batch size"):
         transform(torch.zeros(1, 2), torch.zeros(2, 2))
+
+    transform = cls_module.PartSkyCls(torch.tensor([1, 4]), nside=1, lmax=3, sub_batch_size=2)
+    with pytest.raises(ValueError, match="divisible"):
+        transform(torch.zeros(3, 2))
