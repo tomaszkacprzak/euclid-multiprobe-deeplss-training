@@ -9,7 +9,7 @@ def test_cnn_cls_network_passes_all_spectra_to_convolutions(monkeypatch) -> None
     import euclid_multiprobe_deeplss_training.networks.cnn_cls as module
 
     class FakePartSkyCls(torch.nn.Module):
-        def __init__(self, indices, nside, lmax, sub_batch_size):
+        def __init__(self, indices, nside, lmax, sub_batch_size, device=None):
             super().__init__()
             self.lmax = lmax
 

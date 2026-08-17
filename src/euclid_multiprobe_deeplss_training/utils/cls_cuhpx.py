@@ -59,6 +59,7 @@ class AutoClsCuHPX(nn.Module):
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
+        device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
 
@@ -78,14 +79,34 @@ class AutoClsCuHPX(nn.Module):
         if input_order not in {"ring", "nest"}:
             raise ValueError("input_order must be either 'ring' or 'nest'.")
 
-        self.sht = SHTCUDA(
-            nside=self.nside,
-            lmax=self.lmax,
-            mmax=self.mmax,
-            quad_weights=quad_weights,
-            norm=norm,
-            csphase=csphase,
-        )
+        target_device = None if device is None else torch.device(device)
+        if target_device is not None and target_device.type != "cuda":
+            raise ValueError("device must be a CUDA device.")
+
+        # SHTCUDA creates private work buffers on the current CUDA device.
+        # Those buffers are not registered PyTorch buffers and consequently
+        # are not moved by a later module.to(device).  Selecting the device at
+        # construction is therefore essential when one process per GPU is
+        # used by DistributedDataParallel.
+        if target_device is None:
+            self.sht = SHTCUDA(
+                nside=self.nside,
+                lmax=self.lmax,
+                mmax=self.mmax,
+                quad_weights=quad_weights,
+                norm=norm,
+                csphase=csphase,
+            )
+        else:
+            with torch.cuda.device(target_device):
+                self.sht = SHTCUDA(
+                    nside=self.nside,
+                    lmax=self.lmax,
+                    mmax=self.mmax,
+                    quad_weights=quad_weights,
+                    norm=norm,
+                    csphase=csphase,
+                )
 
         # (L,) -> (L, 1).
         ell = torch.arange(self.lmax).unsqueeze(1)
@@ -212,6 +233,7 @@ class PartSkyAutoCls(nn.Module):
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
+        device: torch.device | str | None = None,
     ) -> None:
         super().__init__()
 
@@ -242,6 +264,7 @@ class PartSkyAutoCls(nn.Module):
             quad_weights=quad_weights,
             norm=norm,
             csphase=csphase,
+            device=device,
         )
         self.f_sky = self.num_part_sky_pixels / self.auto_cls.num_pixels
 

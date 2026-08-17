@@ -48,6 +48,7 @@ class ConvolutionalResidualClsNetwork(nn.Module):
         embed_dim: int,
         lmax: int | None = None,
         sub_batch_size: int = 16,
+        device: torch.device | str | None = None,
         unstack_function: callable | None = None,
         inner_channels: int = 32,
         downsampling_layers: int = 3,
@@ -77,6 +78,7 @@ class ConvolutionalResidualClsNetwork(nn.Module):
             nside=nside,
             lmax=self.lmax,
             sub_batch_size=sub_batch_size,
+            device=device,
         )
 
         num_spectra = self.num_channels * (self.num_channels + 1) // 2
