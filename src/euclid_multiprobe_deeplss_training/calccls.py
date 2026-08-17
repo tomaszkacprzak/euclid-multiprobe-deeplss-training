@@ -609,8 +609,9 @@ def _find_config_value(config: Mapping[str, Any], key: str) -> Any:
 def _smooth_spectrum(values: np.ndarray) -> np.ndarray:
     """Smooth a spectrum with a length-ten uniform kernel without changing its length."""
     kernel = np.ones(10) / 10
-    values_convolved = np.convolve(values, kernel, mode="same")
-    return values_convolved
+    values_convolved = np.convolve(values, kernel, mode="full")
+    start = (kernel.size - 1) // 2
+    return values_convolved[start : start + values.size]
 
 
 def _coerce_config(

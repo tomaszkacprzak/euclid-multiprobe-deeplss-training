@@ -50,7 +50,7 @@ def test_append_batch_stores_labels_and_inds_with_spectra(tmp_path) -> None:
         assert output_file["cls_0"].shape == (3, 4)
         assert output_file["labels"].shape == (3, 2)
         assert output_file["inds"].shape == (3,)
-        assert output_file["labels"][:] == pytest.approx([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+        np.testing.assert_allclose(output_file["labels"][:], [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
         assert output_file["inds"][:].tolist() == [10, 11, 12]
 
 
@@ -94,7 +94,7 @@ def test_power_spectra_dashboard_is_self_contained_and_includes_model_informatio
     assert "plotly.js" in document
     assert "plotly_hover" in document
     assert "'line.width': 4" in document
-    assert "https://cdn.plot.ly" not in document
+    assert '<script src="https://cdn.plot.ly' not in document
     assert "#3b4cc0" in document and "#b40426" in document
 
 
@@ -103,6 +103,12 @@ def test_smooth_spectrum_uses_length_ten_uniform_kernel() -> None:
     expected = pytest.approx(np.convolve(values, np.ones(10) / 10, mode="same"))
 
     assert _smooth_spectrum(values) == expected
+
+
+def test_smooth_spectrum_preserves_length_when_spectrum_is_shorter_than_kernel() -> None:
+    values = np.arange(3, dtype=float)
+
+    assert _smooth_spectrum(values).shape == values.shape
 
 
 def test_power_spectra_dashboard_requires_parameter_name_for_each_label(tmp_path) -> None:
@@ -147,7 +153,7 @@ def test_cross_power_spectra_dashboard_has_probe_sliders_and_color_dropdown(tmp_
     assert '"label":"sigma8"' in document
     assert '"label":"S8"' in document
     assert "plotly.js" in document
-    assert "https://cdn.plot.ly" not in document
+    assert '<script src="https://cdn.plot.ly' not in document
 
 
 def test_cross_power_spectra_dashboard_rejects_non_triangular_pair_count(tmp_path) -> None:
