@@ -153,3 +153,56 @@ def test_part_sky_cls_validates_indices_and_map_shape(cls_module, monkeypatch: p
     transform = cls_module.PartSkyAutoCls(torch.tensor([1, 4]), nside=1, lmax=3)
     with pytest.raises(ValueError, match="Expected 2 part-sky pixels"):
         transform(torch.zeros(1, 3))
+
+
+def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"scalar": 0, "spin2": 0}
+
+    class _MapDependentSHT:
+        def __call__(self, maps: torch.Tensor) -> torch.Tensor:
+            calls["scalar"] += 1
+            amplitude = maps.sum(dim=-1)
+            return amplitude[:, None, None].expand(-1, 3, 3).to(torch.complex64)
+
+    class _MapDependentEB:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["output_type"] == "alm"
+
+        def __call__(self, maps: torch.Tensor) -> torch.Tensor:
+            calls["spin2"] += 1
+            amplitude = maps[:, 0].sum(dim=-1)
+            e_alms = amplitude[:, None, None].expand(-1, 3, 3)
+            b_alms = torch.full_like(e_alms, 1000)
+            return torch.stack((e_alms, b_alms), dim=1).to(torch.complex64)
+
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    monkeypatch.setattr(cls_module, "CuHPXScalarRouteEB", _MapDependentEB)
+    transform = cls_module.PartSkyCls(torch.tensor([1, 4]), nside=1, lmax=3)
+    transform.auto_cls.sht = _MapDependentSHT()
+
+    scalar1 = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    scalar2 = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
+    spin2 = torch.tensor([[[3.0, 4.0], [10.0, 20.0]], [[5.0, 6.0], [30.0, 40.0]]])
+
+    result = transform(scalar1, scalar2, spin2)
+
+    # Pair ordering is 00, 01, 02, 11, 12, 22. Constant alms make every
+    # multipole equal to the product of its two map amplitudes.
+    amplitudes = torch.stack((scalar1.sum(-1), scalar2.sum(-1), spin2[:, 0].sum(-1)), dim=-1)
+    expected_pairs = torch.stack(
+        [amplitudes[:, i] * amplitudes[:, j] for i in range(3) for j in range(i, 3)],
+        dim=-1,
+    )
+    expected = expected_pairs[:, None, :].expand(-1, 3, -1)
+    torch.testing.assert_close(result, expected)
+    assert result.shape == (2, 3, 6)
+    assert calls == {"scalar": 2, "spin2": 1}
+
+
+def test_part_sky_all_cls_requires_matching_batches_and_maps(cls_module) -> None:
+    transform = cls_module.PartSkyCls(torch.tensor([1, 4]), nside=1, lmax=3)
+
+    with pytest.raises(ValueError, match="at least one map"):
+        transform()
+    with pytest.raises(ValueError, match="same batch size"):
+        transform(torch.zeros(1, 2), torch.zeros(2, 2))
