@@ -119,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validation batch size (defaults to batch_size in the config).",
     )
     predict_parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=1000,
+        help="Number of examples to predict for.",
+    )
+    predict_parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -220,6 +226,7 @@ def _run_predict(args: argparse.Namespace) -> int:
         checkpoint=args.checkpoint,
         output_file=args.output_file,
         batch_size=args.batch_size,
+        num_examples=args.num_examples,
         device=args.device,
     )
     return 0

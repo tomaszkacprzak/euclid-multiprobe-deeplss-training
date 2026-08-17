@@ -31,6 +31,7 @@ def predict(
     checkpoint: str | Path,
     output_file: str | Path,
     batch_size: int | None = None,
+    num_examples: int | None = None,
     device: torch.device | str | None = None,
 ) -> Path:
     """Predict every example from the validation split and write an HDF5 file."""
@@ -89,19 +90,34 @@ def predict(
 
     label_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
-    for inputs, labels in validation_loader:
-        inputs = inputs.to(device=device, dtype=torch.float32)
-        predictions = model.predict(inputs)
-        label_batches.append(labels.detach().cpu())
-        prediction_batches.append(predictions.detach().cpu())
+    inds_batches: list[torch.Tensor] = []
+    j = 0
+    i = 0
+    while i < num_examples:
+        for batch in validation_loader:
+            inputs, labels, inds = batch
+            inputs = inputs.to(device=device, dtype=torch.float32)
+            predictions = model.predict(inputs)
+            label_batches.append(labels.detach().cpu())
+            inds_batches.append(inds.detach().cpu())
+            prediction_batches.append(predictions.detach().cpu())
+            LOGGER.debug(f"Batch {j: 5d}: input maps shape: {inputs.shape}, labels shape: {labels.shape}, predictions shape: {predictions.shape}, indices shape: {inds.shape}")
+            j += 1
+            i += evaluation_batch_size
+            if i >= num_examples:
+                break
+
+            LOGGER.info(f"Predicted {i: 5d} examples out of {num_examples} [{i / num_examples * 100:.2f}%]")
 
     if not label_batches:
         raise ValueError("The validation set did not produce any examples.")
     labels = torch.cat(label_batches).numpy()
     predictions = torch.cat(prediction_batches).numpy()
+    inds = torch.cat(inds_batches).numpy()
     if labels.shape != predictions.shape:
         raise ValueError(f"Labels and predictions have different shapes: {labels.shape} and {predictions.shape}.")
-
+    if inds.shape != labels.shape:
+        raise ValueError(f"Indices and labels have different shapes: {inds.shape} and {labels.shape}.")
     import h5py
 
     output_path = Path(output_file)
@@ -109,6 +125,7 @@ def predict(
     with h5py.File(output_path, "w") as handle:
         handle.create_dataset("labels", data=labels)
         handle.create_dataset("predictions", data=predictions)
+        handle.create_dataset("indices", data=inds)
     LOGGER.info("Wrote %d validation predictions to %s", len(labels), output_path)
     return output_path
 
