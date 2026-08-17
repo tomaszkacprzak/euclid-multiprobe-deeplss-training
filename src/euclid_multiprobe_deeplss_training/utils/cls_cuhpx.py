@@ -192,8 +192,9 @@ class PartSkyAutoCls(nn.Module):
     Parameters are the same as :class:`AutoClsCuHPX`, except that ``indices``
     gives the nested HEALPix pixel occupied by every value in a part-sky map.
     Pixels absent from ``indices`` are treated as zero.  Maps are expanded and
-    transformed ``sub_batch_size`` items at a time. The default of one retains
-    the minimum-memory, one-item-at-a-time behaviour.
+    transformed ``sub_batch_size`` items at a time. Spectra are divided by the
+    observed sky fraction, ``len(indices) / (12 * nside**2)``. The default of
+    one retains the minimum-memory, one-item-at-a-time behaviour.
 
     ``forward`` accepts any number of scalar or complex spin-2 ``(B, P)``
     tensors and returns one spectrum for each argument, in the
@@ -242,6 +243,7 @@ class PartSkyAutoCls(nn.Module):
             norm=norm,
             csphase=csphase,
         )
+        self.f_sky = self.num_part_sky_pixels / self.auto_cls.num_pixels
 
     def forward(self, *maps: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Expand each batch item to the full sky and return its auto spectrum."""
@@ -279,7 +281,7 @@ class PartSkyAutoCls(nn.Module):
         full_sky_shape = (*sub_batch_map.shape[:-1], self.auto_cls.num_pixels)
         full_sky_map = sub_batch_map.new_zeros(full_sky_shape)
         full_sky_map[..., self.indices] = sub_batch_map
-        return self.auto_cls(full_sky_map)
+        return self.auto_cls(full_sky_map) / self.f_sky
 
     def _empty_spectra(self, part_sky_map: torch.Tensor) -> torch.Tensor:
         """Construct the spectrum output for an empty map batch."""
@@ -357,4 +359,4 @@ class PartSkyCls(PartSkyAutoCls):
         cross_power = (alm1 * alm2.conj()).real
         weights = self.auto_cls._cl_weights.to(device=cross_power.device, dtype=cross_power.dtype)
         denominator = self.auto_cls._cl_denominator.to(device=cross_power.device, dtype=cross_power.dtype)
-        return torch.einsum("...lm,lm->...l", cross_power, weights) / denominator
+        return torch.einsum("...lm,lm->...l", cross_power, weights) / denominator / self.f_sky
