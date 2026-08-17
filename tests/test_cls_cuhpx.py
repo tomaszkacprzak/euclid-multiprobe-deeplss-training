@@ -138,6 +138,8 @@ def test_part_sky_cls_expands_and_processes_one_batch_item(cls_module, monkeypat
     assert len(calls) == 3
     assert all(call.shape[0] == 1 for call in calls)
     torch.testing.assert_close(calls[0][0, [1, 4, 8]], scalar[0])
+    torch.testing.assert_close(calls[1][0, :, [1, 4, 8]], spin2[0])
+    torch.testing.assert_close(calls[2][0, [1, 4, 8]], scalar[1])
     assert torch.count_nonzero(calls[0]) == 3
 
 

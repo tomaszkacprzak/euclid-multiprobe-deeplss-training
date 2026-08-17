@@ -232,10 +232,23 @@ class PartSkyAutoCls(nn.Module):
 
     def forward(self, *maps: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Expand each batch item to the full sky and return its auto spectrum."""
-        return tuple(self._forward_map(part_sky_map) for part_sky_map in maps)
+        for part_sky_map in maps:
+            self._validate_map(part_sky_map)
 
-    def _forward_map(self, part_sky_map: torch.Tensor) -> torch.Tensor:
-        """Process one input tensor while limiting full-sky temporary storage."""
+        spectra: list[list[torch.Tensor]] = [[] for _ in maps]
+        max_batch_size = max((part_sky_map.shape[0] for part_sky_map in maps), default=0)
+        for batch_index in range(max_batch_size):
+            for map_index, part_sky_map in enumerate(maps):
+                if batch_index < part_sky_map.shape[0]:
+                    spectra[map_index].append(self._forward_batch_map(part_sky_map[batch_index]))
+
+        return tuple(
+            torch.cat(map_spectra, dim=0) if map_spectra else self._empty_spectra(part_sky_map)
+            for part_sky_map, map_spectra in zip(maps, spectra, strict=True)
+        )
+
+    def _validate_map(self, part_sky_map: torch.Tensor) -> None:
+        """Validate a part-sky scalar or spin-2 map batch."""
         if part_sky_map.ndim not in {2, 3}:
             raise ValueError("maps must have shape (batch_size, num_pixels) or (batch_size, 2, num_pixels).")
         if part_sky_map.ndim == 3 and part_sky_map.shape[1] != 2:
@@ -245,14 +258,14 @@ class PartSkyAutoCls(nn.Module):
         if not part_sky_map.is_floating_point():
             raise TypeError("maps must be a floating-point tensor.")
 
-        spectra = []
-        for batch_map in part_sky_map:
-            full_sky_shape = (*batch_map.shape[:-1], self.auto_cls.num_pixels)
-            full_sky_map = batch_map.new_zeros(full_sky_shape)
-            full_sky_map[..., self.indices] = batch_map
-            spectra.append(self.auto_cls(full_sky_map.unsqueeze(0)))
+    def _forward_batch_map(self, batch_map: torch.Tensor) -> torch.Tensor:
+        """Expand and transform one batch item from one input map."""
+        full_sky_shape = (*batch_map.shape[:-1], self.auto_cls.num_pixels)
+        full_sky_map = batch_map.new_zeros(full_sky_shape)
+        full_sky_map[..., self.indices] = batch_map
+        return self.auto_cls(full_sky_map.unsqueeze(0))
 
-        if spectra:
-            return torch.cat(spectra, dim=0)
+    def _empty_spectra(self, part_sky_map: torch.Tensor) -> torch.Tensor:
+        """Construct the spectrum output for an empty map batch."""
         output_shape = (0, *(part_sky_map.shape[1:-1]), self.auto_cls.lmax)
         return part_sky_map.new_empty(output_shape)
