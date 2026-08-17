@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from ..utils.logger import get_logger
+
 LOGGER = get_logger(__file__)
 
     
@@ -80,6 +81,25 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
 
+    elif encoder_name == "cls_linear":
+
+        assert indices is not None, "indices are required for cls_linear"
+
+        from .linear_cls import LinearClsNetwork
+
+        constructor_args = {
+            "indices": indices,
+            "nside": nside,
+            "num_channels": num_channels,
+            "embed_dim": embed_dim,
+        }
+        constructor_args.update(encoder_args or {})
+        model = LinearClsNetwork(**constructor_args)
+
+        LOGGER.info(f"Built {LinearClsNetwork.__name__} {encoder_name}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
+
     elif encoder_name == "deepsphere_resnet":
 
         assert batch_size is not None, "batch_size is required for deepsphere_resnet"
@@ -154,4 +174,3 @@ def build_loss(loss_name: str,
 
 
     return model
-
