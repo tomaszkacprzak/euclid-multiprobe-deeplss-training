@@ -1,4 +1,4 @@
-"""Calculate auto power spectra for generated DeepLSS training maps."""
+"""Calculate auto and cross power spectra for generated training maps."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from .training import TrainingConfig, load_physics_model_class
-from .utils.cls_cuhpx import PartSkyAutoCls
+from .utils.cls_cuhpx import PartSkyAutoCls, PartSkyCls
 from .utils.config import load_config, load_pixel_indices, with_forward_model_config
 from .utils.logger import get_logger
 
@@ -44,12 +44,15 @@ def calccls(
     num_examples: int = 100,
     device: torch.device | str | None = None,
 ) -> Path:
-    """Calculate auto spectra for every batch in one training-set epoch.
+    """Calculate auto and cross spectra for batches in a training-set epoch.
 
-    The output contains one extensible dataset per map probe, named
+    ``output_path`` contains one extensible auto-spectrum dataset per map
+    probe, named
     ``cls_0``, ``cls_1``, and so on, plus ``labels`` and ``inds`` datasets.
-    Each batch is appended immediately so neither CPU nor GPU memory use grows
-    over the epoch.
+    A second file, whose name has ``_cross`` appended to the output stem,
+    contains all auto/cross pairs in ``cls_0`` in the ordering documented by
+    :class:`PartSkyCls`. Each batch is appended immediately so neither CPU nor
+    GPU memory use grows over either pass through the data.
     """
     from msfm.onthefly_pipeline import OntheflyPipeline
 
@@ -86,14 +89,18 @@ def calccls(
         nside=nside,
         lmax=lmax,
     ).to(run_device)
+    cross_cls_calculator = PartSkyCls(
+        indices=torch.as_tensor(indices, dtype=torch.long, device=run_device),
+        nside=nside,
+        lmax=lmax,
+    ).to(run_device)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    cross_output_path = _cross_output_path(output_path)
     LOGGER.info("Calculating auto power spectra for one training epoch")
     # Opening in write mode creates an empty file before loader iteration and
     # deliberately replaces an earlier result at the requested path.
-    
-
     j = 0
     i = 0
     with h5py.File(output_path, "w") as output_file, torch.no_grad():
@@ -112,19 +119,31 @@ def calccls(
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
                 break
 
-    dashboard_path = output_path.with_suffix(".html")
-    create_power_spectra_dashboard(
-        output_path,
-        dashboard_path,
-        parameter_names=[str(name) for name in physics_model.params],
-        model_information={
-            "physics_model": config.physics_model,
-            "shape_noise_std": _find_config_value(config.forward_model, "shape_noise_std"),
-            "config_forward_model": config.config_forward_model,
-        },
-    )
-    LOGGER.info("Wrote interactive power-spectra dashboard to %s", dashboard_path)
+    LOGGER.info("Calculating cross power spectra for one training epoch")
+    j = 0
+    i = 0
+    with h5py.File(cross_output_path, "w") as output_file, torch.no_grad():
+        for maps, labels, inds in loader:
+            j += 1
+            i += len(maps)
+            maps = maps.to(device=run_device, dtype=torch.float32)
+            maps_list = physics_model.unstack_batch_channels(maps)
+            batch_spectra = cross_cls_calculator.forward(*maps_list)
+            _append_batch(output_file, (batch_spectra,), labels, inds)
+            output_file.flush()
+            LOGGER.debug(f"Batch {j: 5d}: input maps shape: {maps.shape}, output cross spectra shape: {batch_spectra.shape}")
+
+            if i >= num_examples:
+                LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
+                break
+
+    LOGGER.info("Wrote cross power spectra to %s", cross_output_path)
     return output_path
+
+
+def _cross_output_path(output_path: Path) -> Path:
+    """Return the cross-spectrum HDF5 path associated with an auto path."""
+    return output_path.with_name(f"{output_path.stem}_cross{output_path.suffix}")
 
 
 def calccls_from_config(config_path: str | Path, *, output_path: str | Path = "cls.h5", num_examples: int = 100) -> Path:

@@ -9,6 +9,7 @@ pytest.importorskip("cuhpx")
 calccls_module = pytest.importorskip("euclid_multiprobe_deeplss_training.calccls")
 _append_spectra = calccls_module._append_spectra
 _append_batch = calccls_module._append_batch
+_cross_output_path = calccls_module._cross_output_path
 create_power_spectra_dashboard = calccls_module.create_power_spectra_dashboard
 _smooth_spectrum = calccls_module._smooth_spectrum
 
@@ -56,6 +57,10 @@ def test_append_batch_rejects_mismatched_batch_sizes(tmp_path) -> None:
     with h5py.File(tmp_path / "spectra.h5", "w") as output_file:
         with pytest.raises(ValueError, match="same batch size"):
             _append_batch(output_file, (torch.ones(2, 4),), torch.ones(2, 3), torch.ones(1))
+
+
+def test_cross_output_path_appends_cross_to_auto_spectrum_stem(tmp_path) -> None:
+    assert _cross_output_path(tmp_path / "spectra.h5") == tmp_path / "spectra_cross.h5"
 
 
 def test_power_spectra_dashboard_is_self_contained_and_includes_model_information(tmp_path) -> None:
