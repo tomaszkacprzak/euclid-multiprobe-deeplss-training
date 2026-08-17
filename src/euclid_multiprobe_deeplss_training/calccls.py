@@ -461,12 +461,24 @@ def create_cross_power_spectra_dashboard(
     figure = go.Figure()
     ell = np.arange(spectra.shape[1])
     scale = ell * (ell + 1) / (2 * np.pi)
+    plotted_spectra = np.empty_like(spectra, dtype=float)
+    for pair_index in range(pair_count):
+        for example_index in range(spectra.shape[0]):
+            plotted_spectra[example_index, :, pair_index] = _smooth_spectrum(spectra[example_index, :, pair_index] * scale)
+
+    finite_values = plotted_spectra[np.isfinite(plotted_spectra)]
+    high_ell_values = plotted_spectra[:, ell > 100, :]
+    finite_high_ell_values = high_ell_values[np.isfinite(high_ell_values)]
+    y_axis_range = None
+    if finite_values.size and finite_high_ell_values.size:
+        y_axis_range = [float(np.min(finite_values)), float(np.max(finite_high_ell_values))]
+
     for pair_index, (map1, map2) in enumerate(probe_pairs):
         for example_index in range(spectra.shape[0]):
             figure.add_trace(
                 go.Scattergl(
                     x=ell,
-                    y=_smooth_spectrum(spectra[example_index, :, pair_index] * scale),
+                    y=plotted_spectra[example_index, :, pair_index],
                     mode="lines",
                     line={"color": label_colors[0][example_index], "width": 1},
                     name=f"Example {example_index}",
@@ -525,6 +537,7 @@ def create_cross_power_spectra_dashboard(
         hovermode="closest",
         xaxis_title="ell",
         yaxis_title="Cℓ × ell(ell+1)/(2π)",
+        yaxis_range=y_axis_range,
         updatemenus=[{"buttons": buttons, "direction": "down", "x": 0, "xanchor": "left", "y": 1.12}],
         annotations=[
             {"text": "Color parameter:", "showarrow": False, "x": 0, "xanchor": "left", "xref": "paper", "y": 1.17, "yref": "paper"},
