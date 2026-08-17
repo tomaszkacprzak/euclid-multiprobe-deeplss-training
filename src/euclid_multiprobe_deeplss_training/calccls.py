@@ -9,6 +9,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+import gc
 
 import h5py
 import numpy as np
@@ -84,23 +85,20 @@ def calccls(
         smoother=None,
         num_workers=config.num_workers,
     )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cross_output_path = _cross_output_path(output_path)
+    LOGGER.info(f"Calculating auto power spectra for {num_examples} examples")
+    # Opening in write mode creates an empty file before loader iteration and
+    # deliberately replaces an earlier result at the requested path.
+
     cls_calculator = PartSkyAutoCls(
         indices=torch.as_tensor(indices, dtype=torch.long, device=run_device),
         nside=nside,
         lmax=lmax,
     ).to(run_device)
-    cross_cls_calculator = PartSkyCls(
-        indices=torch.as_tensor(indices, dtype=torch.long, device=run_device),
-        nside=nside,
-        lmax=lmax,
-    ).to(run_device)
 
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cross_output_path = _cross_output_path(output_path)
-    LOGGER.info("Calculating auto power spectra for one training epoch")
-    # Opening in write mode creates an empty file before loader iteration and
-    # deliberately replaces an earlier result at the requested path.
     j = 0
     i = 0
     with h5py.File(output_path, "w") as output_file, torch.no_grad():
@@ -118,8 +116,19 @@ def calccls(
             if i >= num_examples:
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
                 break
+    
+    del(cls_calculator)
+    gc.collect()
 
-    LOGGER.info("Calculating cross power spectra for one training epoch")
+    LOGGER.info(f"Calculating cross power spectra for {num_examples} examples")
+
+    cross_cls_calculator = PartSkyCls(
+        indices=torch.as_tensor(indices, dtype=torch.long, device=run_device),
+        nside=nside,
+        lmax=lmax,
+    ).to(run_device)
+
+
     j = 0
     i = 0
     with h5py.File(cross_output_path, "w") as output_file, torch.no_grad():
@@ -136,7 +145,10 @@ def calccls(
             if i >= num_examples:
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
                 break
-
+    
+    del(cross_cls_calculator)
+    gc.collect()
+    
     LOGGER.info("Wrote cross power spectra to %s", cross_output_path)
     return output_path
 
