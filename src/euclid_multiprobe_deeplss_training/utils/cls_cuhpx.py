@@ -350,8 +350,11 @@ class PartSkyCls(PartSkyAutoCls):
         return self.auto_cls._scalar_alms(full_sky_map)
 
     def _cross_spectrum(self, alm1: torch.Tensor, alm2: torch.Tensor) -> torch.Tensor:
-        """Reduce two alm arrays to their complex cross-spectrum."""
-        cross_power = alm1 * alm2.conj()
+        """Reduce two alm arrays to their real-valued cross-spectrum."""
+        # cuHPX stores only the non-negative m modes.  For real sky fields,
+        # each positive-m mode has an omitted negative-m conjugate whose sum
+        # with the stored mode is twice the real part of the cross-product.
+        cross_power = (alm1 * alm2.conj()).real
         weights = self.auto_cls._cl_weights.to(device=cross_power.device, dtype=cross_power.dtype)
         denominator = self.auto_cls._cl_denominator.to(device=cross_power.device, dtype=cross_power.dtype)
         return torch.einsum("...lm,lm->...l", cross_power, weights) / denominator

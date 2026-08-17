@@ -259,21 +259,24 @@ def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module,
     expected = expected_pairs[:, None, :].expand(-1, 3, -1)
     torch.testing.assert_close(result, expected)
     assert result.shape == (2, 3, 6)
-    assert calls == {"scalar": 2, "spin2": 1}
+    # The default sub-batch size is one, so each transform runs once per map
+    # and batch item. Alms are still reused for every pair within a sub-batch.
+    assert calls == {"scalar": 4, "spin2": 2}
 
 
-def test_part_sky_cross_spectrum_uses_complex_conjugate(cls_module) -> None:
+def test_part_sky_cross_spectrum_uses_real_conjugate_product(cls_module) -> None:
     transform = cls_module.PartSkyCls(torch.tensor([1, 4]), nside=1, lmax=2)
     alm1 = torch.tensor([[[1 + 2j, 0], [3 + 4j, 5 + 6j]]])
     alm2 = torch.tensor([[[7 + 8j, 0], [9 + 10j, 11 + 12j]]])
 
     result = transform._cross_spectrum(alm1, alm2)
 
-    weights = transform.auto_cls._cl_weights.to(dtype=alm1.dtype)
-    denominator = transform.auto_cls._cl_denominator.to(dtype=alm1.dtype)
-    expected = ((alm1 * alm2.conj()) * weights).sum(dim=-1) / denominator
+    cross_power = (alm1 * alm2.conj()).real
+    weights = transform.auto_cls._cl_weights.to(dtype=cross_power.dtype)
+    denominator = transform.auto_cls._cl_denominator.to(dtype=cross_power.dtype)
+    expected = (cross_power * weights).sum(dim=-1) / denominator
     torch.testing.assert_close(result, expected)
-    assert result.imag.abs().sum() > 0
+    assert not result.is_complex()
 
 
 def test_part_sky_all_cls_requires_matching_batches_and_maps(cls_module) -> None:
