@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     info_parser.set_defaults(func=_run_info)
 
+    #####################################################################################
+    #
+    # train
+    #
+    #####################################################################################
+
     train_parser = subparsers.add_parser(
         "train",
         help="Run training from the configuration file.",
@@ -84,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.set_defaults(func=_run_train)
 
+    #####################################################################################
+    #
+    # predict
+    #
+    #####################################################################################
+
     predict_parser = subparsers.add_parser(
         "predict",
         help="Run prediction on the full validation set.",
@@ -114,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     predict_parser.set_defaults(func=_run_predict)
 
+    #####################################################################################
+    #
+    # datastats
+    #
+    #####################################################################################
+
     datastats_parser = subparsers.add_parser(
         "datastats",
         help="Print per-channel statistics for input dataset batches.",
@@ -125,6 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Profile nested-transformer forward passes on input dataset batches.",
     )
     modelprofile_parser.set_defaults(func=_run_modelprofile)
+
+    #####################################################################################
+    #
+    # calccls
+    #
+    #####################################################################################
 
     calccls_parser = subparsers.add_parser(
         "calccls",
