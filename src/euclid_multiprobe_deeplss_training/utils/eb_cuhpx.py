@@ -9,7 +9,8 @@ and performs one batched scalar synthesis.
 Conventions
 -----------
 * Input and output maps use HEALPix NESTED ordering.
-* g1 and g2 use the HEALPix/CMB Q/U convention.
+* The real and imaginary input components are g1 and g2, using the
+  HEALPix/CMB Q/U convention.
 * ``lmax`` is the usual inclusive maximum multipole. cuHPX is therefore
   initialized with coefficient extents L = M = lmax + 1.
 """
@@ -39,8 +40,8 @@ class CuHPXScalarRouteEB(nn.Module):
     quad_weights:
         Scalar-analysis quadrature used by cuHPX. Use ``"ring"`` or ``"none"``.
     output_type:
-        Return NESTED E/B maps when ``"map"``, or two-dimensional E/B alm
-        arrays with shape ``(batch_size, 2, lmax + 1, lmax + 1)`` when
+        Return complex NESTED E/B maps when ``"map"``, or two-dimensional E/B
+        alm arrays with shape ``(batch_size, 2, lmax + 1, lmax + 1)`` when
         ``"alm"``.
     device:
         CUDA device on which the module is constructed. Construct the module
@@ -53,15 +54,16 @@ class CuHPXScalarRouteEB(nn.Module):
     Input
     -----
     x:
-        Real CUDA tensor with shape ``(batch_size, 2, 12*nside**2)`` in NESTED
-        ordering. Channel 0 is g1 and channel 1 is g2.
+        Complex CUDA tensor with shape ``(batch_size, 12*nside**2)`` in NESTED
+        ordering. Its real component is g1 and its imaginary component is g2.
 
     Output
     ------
-    When ``output_type="map"``, a real tensor with the same shape and ordering
-    as the input. When ``output_type="alm"``, a complex tensor with shape
-    ``(batch_size, 2, lmax + 1, lmax + 1)``. Channel 0 is E mode and channel 1
-    is B mode in either case.
+    When ``output_type="map"``, a complex tensor with the same shape and
+    ordering as the input, whose real and imaginary components are E and B. When
+    ``output_type="alm"``, a complex tensor with shape
+    ``(batch_size, 2, lmax + 1, lmax + 1)`` whose channels 0 and 1 are the E
+    and B modes.
 
     Notes
     -----
@@ -330,26 +332,31 @@ class CuHPXScalarRouteEB(nn.Module):
         return nest_index_for_ring, ring_index_for_nest
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3:
+        if x.ndim != 2:
             raise ValueError(
-                "Expected x with shape (batch_size, 2, num_pixels); "
+                "Expected x with shape (batch_size, num_pixels); "
                 f"received {tuple(x.shape)}."
             )
-        if x.shape[1] != 2 or x.shape[2] != self.num_pixels:
+        if x.shape[1] != self.num_pixels:
             raise ValueError(
                 "Expected x with shape "
-                f"(batch_size, 2, {self.num_pixels}); received {tuple(x.shape)}."
+                f"(batch_size, {self.num_pixels}); received {tuple(x.shape)}."
             )
         if not x.is_cuda:
             raise ValueError("x must be a CUDA tensor.")
-        if x.dtype not in {torch.float32, torch.float64}:
-            raise TypeError("x must have dtype torch.float32 or torch.float64.")
+        if x.dtype not in {torch.complex64, torch.complex128}:
+            raise TypeError("x must have dtype torch.complex64 or torch.complex128.")
         if x.device != self.pixel_weights.device:
             raise ValueError(
                 f"x is on {x.device}, but the module is on "
                 f"{self.pixel_weights.device}."
             )
-        if x.dtype != self.pixel_weights.dtype:
+        expected_dtype = (
+            torch.complex64
+            if self.pixel_weights.dtype == torch.float32
+            else torch.complex128
+        )
+        if x.dtype != expected_dtype:
             raise TypeError(
                 f"x has dtype {x.dtype}, but the module weights have dtype "
                 f"{self.pixel_weights.dtype}. Construct with the desired dtype "
@@ -365,11 +372,12 @@ class CuHPXScalarRouteEB(nn.Module):
             index=self.nest_index_for_ring,
         )
 
-        # Shape: (B, 2, 3, P) -> (B, 6, P).
+        # Splitting into real scalar maps is necessary at the boundary to the
+        # real-valued scalar cuHPX transform. Shape: (B, 2, 3, P) -> (B, 6, P).
         # Flattening preserves the order
         # [w0*g1, w1*g1, w2*g1, w0*g2, w1*g2, w2*g2].
         maps6 = (
-            x_ring.unsqueeze(2)
+            torch.view_as_real(x_ring).movedim(-1, 1).unsqueeze(2)
             * self.pixel_weights.view(1, 1, 3, self.num_pixels)
         ).reshape(batch_size, 6, self.num_pixels).contiguous()
 
@@ -443,7 +451,7 @@ class CuHPXScalarRouteEB(nn.Module):
                 index=self.ring_index_for_nest,
             )
 
-            return eb_nest
+            return torch.complex(eb_nest[:, 0], eb_nest[:, 1])
 
         else:
             raise ValueError(f"Invalid output_type: {self.output_type}")

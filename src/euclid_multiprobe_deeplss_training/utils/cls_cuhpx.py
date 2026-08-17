@@ -150,12 +150,8 @@ class AutoClsCuHPX(nn.Module):
         if self.lmax < 3:
             raise ValueError("lmax must be at least 3 for spin-2 maps.")
 
-        # (B, P) complex -> (B, 2, P) real Q/U channels expected by the
-        # scalar-route E/B transform.
-        maps = torch.view_as_real(maps).movedim(-1, 1)
-
         if self.input_order == "ring":
-            # (B, 2, P) -> (B, 2, P).
+            # (B, P) complex -> (B, P) complex.
             maps = cuhpx.ring2nest(maps.contiguous(), self.nside)
 
         if self._spin_sht is None:
@@ -165,10 +161,10 @@ class AutoClsCuHPX(nn.Module):
                 output_type="alm",
                 quad_weights=self.quad_weights,
                 device=maps.device,
-                dtype=maps.dtype,
+                dtype=maps.real.dtype,
             )
 
-        # (B, 2, P) -> (B, 2, L, M).
+        # (B, P) complex -> (B, 2, L, M).
         eb_alms = self._spin_sht(maps.contiguous())
         self._validate_alm_shape(eb_alms)
         return eb_alms
