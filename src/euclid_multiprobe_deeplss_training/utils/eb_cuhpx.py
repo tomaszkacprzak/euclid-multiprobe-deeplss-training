@@ -376,9 +376,10 @@ class CuHPXScalarRouteEB(nn.Module):
         # real-valued scalar cuHPX transform. Shape: (B, 2, 3, P) -> (B, 6, P).
         # Flattening preserves the order
         # [w0*g1, w1*g1, w2*g1, w0*g2, w1*g2, w2*g2].
+        x_ring_float = torch.view_as_real(x_ring).movedim(-1, 1).unsqueeze(2)
+        print('x_ring_float.shape', x_ring_float.shape)
         maps6 = (
-            torch.view_as_real(x_ring).movedim(-1, 1).unsqueeze(2)
-            * self.pixel_weights.view(1, 1, 3, self.num_pixels)
+            x_ring_float * self.pixel_weights.view(1, 1, 3, self.num_pixels)
         ).reshape(batch_size, 6, self.num_pixels).contiguous()
 
         # The only forward scalar SHT call.

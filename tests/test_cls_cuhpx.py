@@ -75,11 +75,17 @@ def test_spin2_cls_returns_e_and_b_auto_spectra(cls_module, monkeypatch: pytest.
             assert maps.is_complex()
             assert maps.ndim == 2
             batch_size = maps.shape[0]
-            values = torch.arange(
+            values_real = torch.arange(
                 batch_size * 2 * 3 * 3,
                 device=maps.device,
-                dtype=maps.dtype,
+                dtype=torch.float32,
             )
+            values_imag = torch.arange(
+                batch_size * 2 * 3 * 3,
+                device=maps.device,
+                dtype=torch.float32,
+            )
+            values = torch.complex(values_real, values_imag)
             return values.reshape(batch_size, 2, 3, 3).to(torch.complex64)
 
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
