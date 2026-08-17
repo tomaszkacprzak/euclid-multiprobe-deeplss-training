@@ -98,19 +98,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     calccls_parser = subparsers.add_parser(
         "calccls",
-        help="Calculate auto power spectra for one epoch of training data.",
+        help="Calculate auto and cross power spectra for one epoch of training data.",
     )
     calccls_parser.add_argument(
         "--output-path",
         type=str,
         default="cls.h5",
-        help="HDF5 file to write spectra to (default: cls.h5).",
+        help="HDF5 file to write auto spectra to; cross spectra use an _cross suffix (default: cls.h5).",
     )
     calccls_parser.add_argument(
         "--num-examples",
         type=int,
         default=100,
-        help="Number of batches to calculate spectra for.",
+        help="Number of examples to calculate spectra for.",
     )
     calccls_parser.set_defaults(func=_run_calccls)
 
@@ -166,13 +166,16 @@ def _run_modelprofile(args: argparse.Namespace) -> int:
 
 
 def _run_calccls(args: argparse.Namespace) -> int:
-    """Calculate training-set angular auto power spectra."""
+    """Calculate training-set angular auto and cross power spectra."""
     if args.config is None:
         raise ValueError("The calccls command requires --config.")
 
     from euclid_multiprobe_deeplss_training.calccls import calccls_from_config
 
-    calccls_from_config(args.config, output_path=args.output_path, num_examples=args.num_examples)
+    kwargs = {"output_path": args.output_path}
+    if args.num_examples != 100:
+        kwargs["num_examples"] = args.num_examples
+    calccls_from_config(args.config, **kwargs)
     return 0
 
 
