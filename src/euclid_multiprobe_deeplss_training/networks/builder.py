@@ -139,12 +139,16 @@ def build_encoder(encoder_name: str,
 
     elif encoder_name == "cls_transformer":
 
+        assert indices is not None, "indices are required for cls_transformer"
+
         from .transformer_cls import ShiftedWindowTransformerClsNetwork
         constructor_args = {
-            "input_channels": num_channels,
-            "output_dim": embed_dim,
-            "max_length": num_pixels,
-            "embed_dim": 128,
+            "indices": indices,
+            "nside": nside,
+            "num_channels": num_channels,
+            "embed_dim": embed_dim,
+            "unstack_function": unstack_function,
+            "inner_embed_dim": 32,
             "depth": 6,
             "num_heads": 8,
             "window_size": 64,

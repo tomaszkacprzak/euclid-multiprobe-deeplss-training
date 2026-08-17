@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
+
+from ..utils.cls_cuhpx import PartSkyCls
 
 
 class FeedForward(nn.Module):
@@ -343,3 +347,79 @@ class ShiftedWindowTransformerRegressor(nn.Module):
 
         # No output activation: appropriate for unconstrained regression.
         return self.regression_head(pooled)
+
+
+class ShiftedWindowTransformerClsNetwork(nn.Module):
+    """Encode part-sky maps by applying a transformer to their spectra.
+
+    As in :class:`~.linear_cls.LinearClsNetwork`, inputs have shape
+    ``(batch, pixels, channels)`` and ``PartSkyCls`` computes every auto- and
+    cross-spectrum.  The resulting ell sequence is passed to a
+    :class:`ShiftedWindowTransformerRegressor`, with one input feature per
+    spectrum.
+    """
+
+    tag = "cls_transformer"
+
+    def __init__(
+        self,
+        *,
+        indices: list[int] | torch.Tensor,
+        nside: int,
+        num_channels: int,
+        embed_dim: int,
+        lmax: int | None = None,
+        sub_batch_size: int = 1,
+        unstack_function: callable | None = None,
+        inner_embed_dim: int = 32,
+        depth: int = 6,
+        num_heads: int = 8,
+        window_size: int = 64,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+        attention_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        self.unstack_function = unstack_function
+        self.embed_dim = int(embed_dim)
+        self.num_channels = int(num_channels)
+        if self.num_channels <= 0:
+            raise ValueError("num_channels must be positive.")
+
+        self.lmax = 3 * int(nside) if lmax is None else int(lmax)
+        self.cls = PartSkyCls(
+            torch.as_tensor(indices, dtype=torch.long),
+            nside=nside,
+            lmax=self.lmax,
+            sub_batch_size=sub_batch_size,
+        )
+        num_spectra = self.num_channels * (self.num_channels + 1) // 2
+        self.transformer = ShiftedWindowTransformerRegressor(
+            input_channels=num_spectra,
+            embed_dim=self.embed_dim,
+            max_length=self.lmax,
+            inner_embed_dim=inner_embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            window_size=window_size,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            attention_dropout=attention_dropout,
+        )
+
+    def forward(self, maps: torch.Tensor) -> torch.Tensor:
+        """Return one transformer embedding for every set of input maps."""
+        if maps.ndim != 3:
+            raise ValueError(
+                "maps must have shape (batch_size, num_pixels, num_channels)."
+            )
+        if maps.shape[-1] != self.num_channels:
+            raise ValueError(
+                f"Expected {self.num_channels} input channels, "
+                f"got {maps.shape[-1]}."
+            )
+
+        channel_maps = self.unstack_function(maps)
+        spectra = self.cls(*channel_maps)
+        return self.transformer(spectra)
