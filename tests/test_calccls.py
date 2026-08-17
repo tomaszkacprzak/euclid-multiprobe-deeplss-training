@@ -156,6 +156,31 @@ def test_cross_power_spectra_dashboard_has_probe_sliders_and_color_dropdown(tmp_
     assert '<script src="https://cdn.plot.ly' not in document
 
 
+def test_cross_power_spectra_dashboard_limits_y_axis_to_maximum_above_ell_100(tmp_path, monkeypatch) -> None:
+    spectra_path = tmp_path / "spectra_cross.h5"
+    dashboard_path = tmp_path / "spectra_cross.html"
+    spectra = np.zeros((1, 103, 1))
+    scale = np.arange(103) * (np.arange(103) + 1) / (2 * np.pi)
+    spectra[0, 50, 0] = 1_000 / scale[50]
+    spectra[0, 100, 0] = 900 / scale[100]
+    spectra[0, 101, 0] = 4 / scale[101]
+    spectra[0, 102, 0] = 5 / scale[102]
+    with h5py.File(spectra_path, "w") as output_file:
+        output_file["labels"] = [[0.2, 0.7]]
+        output_file["cls_0"] = spectra
+    monkeypatch.setattr(calccls_module, "_smooth_spectrum", lambda values: values)
+
+    create_cross_power_spectra_dashboard(
+        spectra_path,
+        dashboard_path,
+        parameter_names=["omega_m", "sigma8"],
+        model_information={},
+    )
+
+    document = dashboard_path.read_text(encoding="utf-8")
+    assert '"yaxis":{"range":[0.0,5.0]' in document
+
+
 def test_cross_power_spectra_dashboard_rejects_non_triangular_pair_count(tmp_path) -> None:
     spectra_path = tmp_path / "spectra_cross.h5"
     with h5py.File(spectra_path, "w") as output_file:
