@@ -139,7 +139,7 @@ def build_encoder(encoder_name: str,
 
     elif encoder_name == "cls_transformer":
 
-        from .transformer_cls import ShiftedWindowTransformerRegressor
+        from .transformer_cls import ShiftedWindowTransformerClsNetwork
         constructor_args = {
             "input_channels": num_channels,
             "output_dim": embed_dim,
@@ -150,9 +150,9 @@ def build_encoder(encoder_name: str,
             "window_size": 64,
         }
         constructor_args.update(encoder_args or {})
-        model = ShiftedWindowTransformerRegressor(**constructor_args)
+        model = ShiftedWindowTransformerClsNetwork(**constructor_args)
 
-        LOGGER.info(f"Built {ShiftedWindowTransformerRegressor.__name__} {encoder_name}")
+        LOGGER.info(f"Built {ShiftedWindowTransformerClsNetwork.__name__} {encoder_name}")
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
