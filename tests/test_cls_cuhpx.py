@@ -173,9 +173,10 @@ def test_part_sky_auto_cls_processes_sub_batches(cls_module, monkeypatch: pytest
     (result,) = transform(maps)
 
     assert transform.sub_batch_size == 2
+    assert transform.f_sky == pytest.approx(2 / 12)
     assert [call.shape for call in calls] == [(2, 12), (2, 12)]
     torch.testing.assert_close(torch.cat(calls)[..., [1, 4]], maps)
-    torch.testing.assert_close(result[:, 0], maps.sum(dim=-1))
+    torch.testing.assert_close(result[:, 0], maps.sum(dim=-1) / transform.f_sky)
 
 
 def test_part_sky_cls_processes_sub_batches(cls_module, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,7 +257,7 @@ def test_part_sky_all_cls_precomputes_alms_and_returns_cross_spectra(cls_module,
         [amplitudes[:, i] * amplitudes[:, j] for i in range(3) for j in range(i, 3)],
         dim=-1,
     )
-    expected = expected_pairs[:, None, :].expand(-1, 3, -1)
+    expected = expected_pairs[:, None, :].expand(-1, 3, -1) / transform.f_sky
     torch.testing.assert_close(result, expected)
     assert result.shape == (2, 3, 6)
     # The default sub-batch size is one, so each transform runs once per map
@@ -274,7 +275,7 @@ def test_part_sky_cross_spectrum_uses_real_conjugate_product(cls_module) -> None
     cross_power = (alm1 * alm2.conj()).real
     weights = transform.auto_cls._cl_weights.to(dtype=cross_power.dtype)
     denominator = transform.auto_cls._cl_denominator.to(dtype=cross_power.dtype)
-    expected = (cross_power * weights).sum(dim=-1) / denominator
+    expected = (cross_power * weights).sum(dim=-1) / denominator / transform.f_sky
     torch.testing.assert_close(result, expected)
     assert not result.is_complex()
 
