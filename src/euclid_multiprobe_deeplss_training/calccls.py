@@ -466,12 +466,13 @@ def create_cross_power_spectra_dashboard(
         for example_index in range(spectra.shape[0]):
             plotted_spectra[example_index, :, pair_index] = _smooth_spectrum(spectra[example_index, :, pair_index] * scale)
 
-    finite_values = plotted_spectra[np.isfinite(plotted_spectra)]
-    high_ell_values = plotted_spectra[:, ell > 100, :]
-    finite_high_ell_values = high_ell_values[np.isfinite(high_ell_values)]
-    y_axis_range = None
-    if finite_values.size and finite_high_ell_values.size:
-        y_axis_range = [float(np.min(finite_values)), float(np.max(finite_high_ell_values))]
+    pair_y_axis_ranges: list[list[float] | None] = []
+    for pair_index in range(pair_count):
+        high_ell_values = plotted_spectra[:, ell > 100, pair_index]
+        finite_high_ell_values = high_ell_values[np.isfinite(high_ell_values)]
+        pair_y_axis_ranges.append(
+            [float(np.min(finite_high_ell_values)), float(np.max(finite_high_ell_values))] if finite_high_ell_values.size else None
+        )
 
     for pair_index, (map1, map2) in enumerate(probe_pairs):
         for example_index in range(spectra.shape[0]):
@@ -490,6 +491,19 @@ def create_cross_power_spectra_dashboard(
             )
 
     line_trace_count = len(figure.data)
+    probe_pair_steps = []
+    for pair_index, (map1, map2) in enumerate(probe_pairs):
+        visibility = [index // spectra.shape[0] == pair_index for index in range(line_trace_count)]
+        probe_pair_steps.append(
+            {
+                "label": f"{map1},{map2}",
+                "method": "update",
+                "args": [
+                    {"visible": visibility},
+                    {"yaxis.range": pair_y_axis_ranges[pair_index], "yaxis.autorange": pair_y_axis_ranges[pair_index] is None},
+                ],
+            }
+        )
     initial_values = color_values[:, 0]
     figure.add_trace(
         go.Scatter(
@@ -537,7 +551,8 @@ def create_cross_power_spectra_dashboard(
         hovermode="closest",
         xaxis_title="ell",
         yaxis_title="Cℓ × ell(ell+1)/(2π)",
-        yaxis_range=y_axis_range,
+        yaxis_range=pair_y_axis_ranges[0],
+        yaxis_autorange=pair_y_axis_ranges[0] is None,
         updatemenus=[{"buttons": buttons, "direction": "down", "x": 0, "xanchor": "left", "y": 1.12}],
         annotations=[
             {"text": "Color parameter:", "showarrow": False, "x": 0, "xanchor": "left", "xref": "paper", "y": 1.17, "yref": "paper"},
@@ -555,6 +570,7 @@ def create_cross_power_spectra_dashboard(
 const dashboard = document.getElementById('{{plot_id}}');
 const map1Slider = document.getElementById('map1-probe');
 const map2Slider = document.getElementById('map2-probe');
+const probePairSteps = {json.dumps(probe_pair_steps)};
 function selectProbePair() {{
     const selected1 = Number(map1Slider.value);
     const selected2 = Number(map2Slider.value);
@@ -562,10 +578,13 @@ function selectProbePair() {{
     document.getElementById('map2-value').value = selected2;
     const low = Math.min(selected1, selected2);
     const high = Math.max(selected1, selected2);
-    const visibility = dashboard.data.slice(0, {line_trace_count}).map(
-        trace => trace.meta.map1 === low && trace.meta.map2 === high
+    const step = probePairSteps.find(step => step.label === `${{low}},${{high}}`);
+    Plotly.update(
+        dashboard,
+        step.args[0],
+        step.args[1],
+        [...Array({line_trace_count}).keys()]
     );
-    Plotly.restyle(dashboard, {{visible: visibility}}, [...Array({line_trace_count}).keys()]);
 }}
 map1Slider.addEventListener('input', selectProbePair);
 map2Slider.addEventListener('input', selectProbePair);

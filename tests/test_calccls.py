@@ -148,6 +148,8 @@ def test_cross_power_spectra_dashboard_has_probe_sliders_and_color_dropdown(tmp_
     assert 'id="map2-probe" type="range" min="0" max="1"' in document
     assert "map1Slider.addEventListener('input', selectProbePair)" in document
     assert "map2Slider.addEventListener('input', selectProbePair)" in document
+    assert '"method": "update"' in document
+    assert "Plotly.update(" in document
     assert '"map1":0,"map2":1' in document
     assert '"label":"omega_m"' in document
     assert '"label":"sigma8"' in document
@@ -156,15 +158,17 @@ def test_cross_power_spectra_dashboard_has_probe_sliders_and_color_dropdown(tmp_
     assert '<script src="https://cdn.plot.ly' not in document
 
 
-def test_cross_power_spectra_dashboard_limits_y_axis_to_maximum_above_ell_100(tmp_path, monkeypatch) -> None:
+def test_cross_power_spectra_dashboard_sets_each_pair_y_axis_range_above_ell_100(tmp_path, monkeypatch) -> None:
     spectra_path = tmp_path / "spectra_cross.h5"
     dashboard_path = tmp_path / "spectra_cross.html"
-    spectra = np.zeros((1, 103, 1))
+    spectra = np.zeros((1, 103, 3))
     scale = np.arange(103) * (np.arange(103) + 1) / (2 * np.pi)
     spectra[0, 50, 0] = 1_000 / scale[50]
     spectra[0, 100, 0] = 900 / scale[100]
     spectra[0, 101, 0] = 4 / scale[101]
     spectra[0, 102, 0] = 5 / scale[102]
+    spectra[0, 101, 1] = -3 / scale[101]
+    spectra[0, 102, 1] = 7 / scale[102]
     with h5py.File(spectra_path, "w") as output_file:
         output_file["labels"] = [[0.2, 0.7]]
         output_file["cls_0"] = spectra
@@ -178,7 +182,9 @@ def test_cross_power_spectra_dashboard_limits_y_axis_to_maximum_above_ell_100(tm
     )
 
     document = dashboard_path.read_text(encoding="utf-8")
-    assert '"yaxis":{"range":[0.0,5.0]' in document
+    assert '"yaxis":{"autorange":false,"range":[4.0,5.0]' in document
+    assert '"yaxis.range": [-3.0, 7.0]' in document
+    assert '"yaxis.range": [0.0, 0.0]' in document
 
 
 def test_cross_power_spectra_dashboard_rejects_non_triangular_pair_count(tmp_path) -> None:
