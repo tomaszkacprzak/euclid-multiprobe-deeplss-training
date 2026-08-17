@@ -211,7 +211,7 @@ class PartSkyAutoCls(nn.Module):
         lmax: int,
         mmax: int | None = None,
         *,
-        sub_batch_size: int = 4,
+        sub_batch_size: int = 1,
         quad_weights: str = "ring",
         norm: str = "ortho",
         csphase: bool = True,
