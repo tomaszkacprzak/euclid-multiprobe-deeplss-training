@@ -209,15 +209,15 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         x: [batch_size, num_dimensions, num_channels]
 
     Output:
-        y: [batch_size, output_dim]
+        y: [batch_size, embed_dim]
     """
 
     def __init__(
         self,
         input_channels: int,
-        output_dim: int,
+        embed_dim: int,
         max_length: int,
-        embed_dim: int = 128,
+        inner_embed_dim: int = 32,
         depth: int = 6,
         num_heads: int = 8,
         window_size: int = 64,
@@ -230,8 +230,8 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         if input_channels < 1:
             raise ValueError("input_channels must be positive")
 
-        if output_dim < 1:
-            raise ValueError("output_dim must be positive")
+        if embed_dim < 1:
+            raise ValueError("embed_dim must be positive")
 
         if max_length < 1:
             raise ValueError("max_length must be positive")
@@ -239,9 +239,9 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         if depth < 1:
             raise ValueError("depth must be positive")
 
-        if embed_dim % num_heads != 0:
+        if inner_embed_dim % num_heads != 0:
             raise ValueError(
-                "embed_dim must be divisible by num_heads"
+                "inner_embed_dim must be divisible by num_heads"
             )
 
         self.input_channels = input_channels
@@ -250,17 +250,17 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         # Project each position's input-channel vector into the model
         # embedding dimension:
         #
-        # [B, L, input_channels] -> [B, L, embed_dim]
+        # [B, L, input_channels] -> [B, L, inner_embed_dim]
         #
         self.input_projection = nn.Linear(
             input_channels,
-            embed_dim,
+            inner_embed_dim,
         )
 
         # Absolute position information. This is useful because window
         # attention alone does not identify the absolute sequence position.
         self.position_embedding = nn.Parameter(
-            torch.empty(1, max_length, embed_dim)
+            torch.empty(1, max_length, inner_embed_dim)
         )
         nn.init.trunc_normal_(
             self.position_embedding,
@@ -274,7 +274,7 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 ShiftedWindowBlock1D(
-                    dim=embed_dim,
+                    dim=inner_embed_dim,
                     num_heads=num_heads,
                     window_size=window_size,
                     shift_size=(
@@ -290,14 +290,14 @@ class ShiftedWindowTransformerRegressor(nn.Module):
             ]
         )
 
-        self.final_norm = nn.LayerNorm(embed_dim)
+        self.final_norm = nn.LayerNorm(inner_embed_dim)
 
         # Map the globally pooled representation to M regression values.
         self.regression_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(inner_embed_dim, inner_embed_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(embed_dim, output_dim),
+            nn.Linear(inner_embed_dim, embed_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
