@@ -84,6 +84,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.set_defaults(func=_run_train)
 
+    predict_parser = subparsers.add_parser(
+        "predict",
+        help="Run prediction on the full validation set.",
+    )
+    predict_parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Training checkpoint containing the model weights.",
+    )
+    predict_parser.add_argument(
+        "--output-file",
+        type=str,
+        required=True,
+        help="HDF5 file to write labels and predictions to.",
+    )
+    predict_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Validation batch size (defaults to batch_size in the config).",
+    )
+    predict_parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Torch device to evaluate on, such as 'cpu' or 'cuda'.",
+    )
+    predict_parser.set_defaults(func=_run_predict)
+
     datastats_parser = subparsers.add_parser(
         "datastats",
         help="Print per-channel statistics for input dataset batches.",
@@ -151,6 +181,23 @@ def _run_datastats(args: argparse.Namespace) -> int:
     from euclid_multiprobe_deeplss_training.datastats import datastats_from_config
 
     datastats_from_config(args.config)
+    return 0
+
+
+def _run_predict(args: argparse.Namespace) -> int:
+    """Generate predictions for the full validation set."""
+    if args.config is None:
+        raise ValueError("The predict command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.prediction import predict_from_config
+
+    predict_from_config(
+        args.config,
+        checkpoint=args.checkpoint,
+        output_file=args.output_file,
+        batch_size=args.batch_size,
+        device=args.device,
+    )
     return 0
 
 

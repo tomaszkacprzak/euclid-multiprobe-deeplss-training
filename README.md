@@ -24,6 +24,17 @@ Show the installed version with:
 uv run euclid-deeplss-training --version
 ```
 
+Generate label/prediction pairs for the complete validation set from a training
+checkpoint. The output is an HDF5 file containing `labels` and `predictions`
+datasets:
+
+```bash
+uv run euclid-deeplss-training --config configs/example.yaml predict \
+  --checkpoint checkpoints/checkpoint-latest.pt \
+  --output-file predictions.h5 \
+  --batch-size 32
+```
+
 ## Development
 
 Run the test suite with:
