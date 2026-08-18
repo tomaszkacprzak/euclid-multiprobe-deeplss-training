@@ -212,10 +212,9 @@ def evaluate(
         prediction_loss = float(F.mse_loss(predictions, targets).detach().cpu())
         prediction_losses.append(prediction_loss)
 
-        # Store targets and predictions
-        if predictions_path is not None:
-            target_batches.append(targets.detach().cpu())
-            prediction_batches.append(predictions.detach().cpu())
+        # Store targets and predictions for summary statistics and optional output.
+        target_batches.append(targets.detach().cpu())
+        prediction_batches.append(predictions.detach().cpu())
 
         # Housekeeping
         num_examples_seen += inputs.shape[0]
@@ -224,6 +223,8 @@ def evaluate(
 
     if not losses:
         return None
+
+    _print_evaluation_statistics(target_batches, prediction_batches)
 
     if predictions_path is not None:
         _save_evaluation_predictions(predictions_path, target_batches, prediction_batches)
@@ -234,7 +235,53 @@ def evaluate(
     }
 
     return metrics
-    
+
+
+def _print_evaluation_statistics(
+    target_batches: list[torch.Tensor],
+    prediction_batches: list[torch.Tensor],
+) -> None:
+    """Print finite-value statistics and exceptional-value counts per feature."""
+    targets = torch.cat(target_batches, dim=0)
+    predictions = torch.cat(prediction_batches, dim=0)
+    if targets.shape != predictions.shape:
+        raise ValueError(
+            f"Targets and predictions must have the same shape, got {targets.shape} and {predictions.shape}."
+        )
+
+    # A one-dimensional result represents one feature. For higher-dimensional
+    # results, the final dimension is the feature dimension and all preceding
+    # dimensions are observations.
+    if targets.ndim == 1:
+        targets = targets.unsqueeze(-1)
+        predictions = predictions.unsqueeze(-1)
+    else:
+        targets = targets.reshape(-1, targets.shape[-1])
+        predictions = predictions.reshape(-1, predictions.shape[-1])
+
+    LOGGER.info("Evaluation target and prediction statistics:")
+    for feature_index in range(predictions.shape[-1]):
+        for label, values in (
+            ("targets", targets[:, feature_index]),
+            ("predictions", predictions[:, feature_index]),
+        ):
+            finite_values = values[torch.isfinite(values)]
+            if finite_values.numel():
+                minimum = finite_values.min().item()
+                maximum = finite_values.max().item()
+                mean = finite_values.mean().item()
+                std = finite_values.std(unbiased=False).item()
+            else:
+                minimum = maximum = mean = std = float("nan")
+
+            exact_zeros = int((values == 0).sum().item())
+            non_finite = int((~torch.isfinite(values)).sum().item())
+            LOGGER.info(
+                f"Feature {feature_index} {label}: min={minimum:.6g}, max={maximum:.6g}, "
+                f"mean={mean:.6g}, std={std:.6g}, exact_zeros={exact_zeros}, "
+                f"non_finite={non_finite}"
+            )
+
 
 def _save_evaluation_predictions(
     path: str | Path,
@@ -1323,6 +1370,3 @@ def load_physics_model_class(model_name: str):
         raise ImportError(
             f"Could not find class {class_names[model_name]} in module {module_name}"
         ) from exc
-
-
-    
