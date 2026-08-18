@@ -28,6 +28,30 @@ class ResidualBlock1D(nn.Module):
         return self.activation(x + self.layers(x))
 
 
+class InputBatchNorm(nn.Module):
+    def __init__(self, num_dimensions, num_channels):
+        super().__init__()
+
+        self.num_dimensions = num_dimensions
+        self.num_channels = num_channels
+
+        self.bn = nn.BatchNorm1d(num_dimensions * num_channels)
+
+    def forward(self, x):
+        # x: (B, D, C)
+        original_shape = x.shape
+
+        # (B, D, C) -> (B, D*C)
+        x = x.reshape(x.shape[0], -1)
+
+        # Normalize each of the D*C features across the batch
+        x = self.bn(x)
+
+        # (B, D*C) -> (B, D, C)
+        x = x.reshape(original_shape)
+
+        return x
+
 class ConvolutionalResidualClsNetwork(nn.Module):
     """Encode part-sky maps with a small CNN over their power spectra.
 
@@ -81,10 +105,10 @@ class ConvolutionalResidualClsNetwork(nn.Module):
             device=device,
         )
 
-        num_spectra = self.num_channels * (self.num_channels + 1) // 2
+        self.num_spectra = self.num_channels * (self.num_channels + 1) // 2
         padding = kernel_size // 2
         downsampling: list[nn.Module] = []
-        in_channels = num_spectra
+        in_channels = self.num_spectra
         for _ in range(downsampling_layers):
             downsampling.extend(
                 [
@@ -115,6 +139,8 @@ class ConvolutionalResidualClsNetwork(nn.Module):
             nn.Linear(inner_channels, self.embed_dim),
         )
 
+        self.spectrum_batch_norm = InputBatchNorm(self.lmax, self.num_spectra)
+
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
         """Return one convolutional embedding for every set of input maps."""
         if maps.ndim != 3:
@@ -129,6 +155,7 @@ class ConvolutionalResidualClsNetwork(nn.Module):
 
         channel_maps = self.unstack_function(maps)
         spectra = self.cls(*channel_maps)
+        spectra = self.spectrum_batch_norm(spectra)
         features = self.downsampling(spectra.transpose(1, 2))
         features = self.residual_blocks(features)
         return self.regression_head(self.pool(features))
