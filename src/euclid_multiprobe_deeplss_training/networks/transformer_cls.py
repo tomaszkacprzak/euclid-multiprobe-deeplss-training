@@ -350,6 +350,31 @@ class ShiftedWindowTransformerRegressor(nn.Module):
         return self.regression_head(pooled)
 
 
+
+class InputBatchNorm(nn.Module):
+    def __init__(self, num_dimensions, num_channels):
+        super().__init__()
+
+        self.num_dimensions = num_dimensions
+        self.num_channels = num_channels
+
+        self.bn = nn.BatchNorm1d(num_dimensions * num_channels)
+
+    def forward(self, x):
+        # x: (B, D, C)
+        original_shape = x.shape
+
+        # (B, D, C) -> (B, D*C)
+        x = x.reshape(x.shape[0], -1)
+
+        # Normalize each of the D*C features across the batch
+        x = self.bn(x)
+
+        # (B, D*C) -> (B, D, C)
+        x = x.reshape(original_shape)
+
+        return x
+
 class ShiftedWindowTransformerClsNetwork(nn.Module):
     """Encode part-sky maps by applying a transformer to their spectra.
 
@@ -397,9 +422,9 @@ class ShiftedWindowTransformerClsNetwork(nn.Module):
             sub_batch_size=sub_batch_size,
             device=device,
         )
-        num_spectra = self.num_channels * (self.num_channels + 1) // 2
+        self.num_spectra = self.num_channels * (self.num_channels + 1) // 2
         self.transformer = ShiftedWindowTransformerRegressor(
-            input_channels=num_spectra,
+            input_channels=self.num_spectra,
             embed_dim=self.embed_dim,
             max_length=self.lmax,
             inner_embed_dim=inner_embed_dim,
@@ -410,6 +435,9 @@ class ShiftedWindowTransformerClsNetwork(nn.Module):
             dropout=dropout,
             attention_dropout=attention_dropout,
         )
+
+        self.spectrum_batch_norm = InputBatchNorm(self.lmax, self.num_spectra)
+
 
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
         """Return one transformer embedding for every set of input maps."""
@@ -425,4 +453,5 @@ class ShiftedWindowTransformerClsNetwork(nn.Module):
 
         channel_maps = self.unstack_function(maps)
         spectra = self.cls(*channel_maps)
+        spectra = self.spectrum_batch_norm(spectra)
         return self.transformer(spectra)

@@ -259,7 +259,7 @@ def _print_evaluation_statistics(
         targets = targets.reshape(-1, targets.shape[-1])
         predictions = predictions.reshape(-1, predictions.shape[-1])
 
-    LOGGER.info("Evaluation target and prediction statistics:")
+    LOGGER.debug("Evaluation target and prediction statistics:")
     for feature_index in range(predictions.shape[-1]):
         for label, values in (
             ("targets", targets[:, feature_index]),
@@ -276,10 +276,10 @@ def _print_evaluation_statistics(
 
             exact_zeros = int((values == 0).sum().item())
             non_finite = int((~torch.isfinite(values)).sum().item())
-            LOGGER.info(
-                f"Feature {feature_index} {label}: min={minimum:.6g}, max={maximum:.6g}, "
-                f"mean={mean:.6g}, std={std:.6g}, exact_zeros={exact_zeros}, "
-                f"non_finite={non_finite}"
+            LOGGER.debug(
+                f"Prediction {feature_index:>2d} {label:<20s}: min={minimum:.6e}, max={maximum:.6e}, "
+                f"mean={mean:.6e}, std={std:.6e}, exact_zeros={exact_zeros:>4d}, "
+                f"non_finite={non_finite:>4d}"
             )
 
 
@@ -711,7 +711,11 @@ def train(
     # encoder = torch.compile(encoder, dynamic=True)
 
     # print some info
-    torchinfo.summary(encoder, input_size=(loader_training.batch_size, loader_training.num_pixels, loader_training.num_channels))
+    torchinfo.summary(encoder, 
+                      input_size=(loader_training.batch_size, loader_training.num_pixels, loader_training.num_channels),
+                      col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds", "trainable"],
+                      col_width=40)
+
     LOGGER.info(f'Encoder: {config.encoder_name}')    
 
     #
@@ -788,7 +792,7 @@ def train(
     train_timer = Timer()
 
     # Training loop.
-    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs}')
+    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs} batch_size={config.batch_size}')
     for _epoch in range(config.num_epochs or 10**12):
 
         # epoch_batches = training_batches if _epoch == 0 else loader_training
