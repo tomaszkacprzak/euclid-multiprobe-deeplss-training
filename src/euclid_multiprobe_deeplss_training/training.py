@@ -45,6 +45,7 @@ class TrainingConfig:
     config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
     physics_model: str = "onthefly_linear"
+    physics_model_args: dict[str, Any] = field(default_factory=dict)
     loss_function: str = "mse"
     batch_size: int = 32
     num_epochs: int | None = 1
@@ -78,6 +79,7 @@ class TrainingConfig:
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> TrainingConfig:
         """Create a config object from loaded YAML data."""
         model_config = raw_config.get("model", {}) or {}
+        physics_config = raw_config.get("physics_model_args", {}) or {}
         if not isinstance(model_config, Mapping):
             raise TypeError("The optional 'model' configuration section must be a mapping.")
 
@@ -88,6 +90,8 @@ class TrainingConfig:
                 values[name] = raw_config[name]
             elif name in model_config:
                 values[name] = model_config[name]
+            elif name in physics_config:
+                values[name] = physics_config[name]
 
         if "records_pattern" not in values:
             raise KeyError("Training config requires 'records_pattern'.")
@@ -95,6 +99,7 @@ class TrainingConfig:
         config = cls(**values)
         config._validate()
         config.extra = {key: value for key, value in raw_config.items() if key not in names}
+
         return config
 
     def _validate(self) -> None:

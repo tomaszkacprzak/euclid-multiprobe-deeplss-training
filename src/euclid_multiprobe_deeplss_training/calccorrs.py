@@ -28,7 +28,7 @@ def calccorrs(
     output_dir: Path,
     num_batches_per_file: int = 10,
     file_index: int = 0,
-    device: torch.device | str | None = None,
+    dataset_split: str = 'training',
 ) -> list[Path]:
     """Calculate all auto/cross map correlations and write batched WebDataset shards.
 
@@ -77,7 +77,8 @@ def calccorrs(
         smoother=None,
         num_workers=config.num_workers,
         device=run_device,
-        seed=file_index * 1000
+        seed=file_index * 1000,
+        validation=dataset_split == 'validation',
     )
 
     written_paths: list[Path] = []
@@ -88,7 +89,7 @@ def calccorrs(
 
     with torch.no_grad():
         
-        shard_path = os.path.join(output_dir, f"corrs-{file_index:06d}.tar")
+        shard_path = os.path.join(output_dir, f"corrs_{dataset_split}_{file_index:06d}.tar")
         LOGGER.info(f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.batch_size} examples per batch")
         with wds.TarWriter(str(shard_path)) as writer:
 
@@ -96,6 +97,8 @@ def calccorrs(
 
                 maps = maps.to(device=run_device, dtype=torch.float32)
                 map_list = physics_model.unstack_batch_channels(maps)
+                weight_list = physics_model.prepare_weights(map_list)
+                map_list = physics_model.preprocess_for_correlations(map_list)
 
                 if batch_index == 0:
                     for map_index, m in enumerate(map_list):
@@ -104,7 +107,7 @@ def calccorrs(
                 LOGGER.info(f"batch {batch_index:>6d} / {num_batches_per_file:>6d}")
 
                 # Main magic - calculate the correlations
-                correlations, separations = calculate_batch_correlations(map_list, coordinates=coordinates, treecorr_config=corr_config, ncpus=ncpus)
+                correlations, separations = calculate_batch_correlations(map_list, weight_list, ncpus=ncpus, coordinates=coordinates, treecorr_config=corr_config)
 
                 for example in range(config.batch_size):
                     sample = {
@@ -137,8 +140,9 @@ def calccorrs(
 
 def calculate_batch_correlations(
     maps: Sequence[torch.Tensor],
-    ncpus: int,
+    weight_maps: Sequence[torch.Tensor|None],
     *,
+    ncpus: int = 1,
     coordinates: tuple[np.ndarray, np.ndarray],
     treecorr_config: Mapping[str, Any],
 ) -> dict[str, torch.Tensor]:
@@ -155,7 +159,8 @@ def calculate_batch_correlations(
         raise ValueError("Coordinate arrays must contain one position per map pixel.")
 
     cpu_maps = [value.detach().cpu().numpy() for value in maps]
-
+    cpu_weight_maps = [value.detach().cpu().numpy() if value is not None else None for value in weight_maps]
+    
     examples_corr = []
     for example in LOGGER.progressbar(range(batch_size), desc="Computing correlations"):
 
@@ -167,12 +172,14 @@ def calculate_batch_correlations(
 
                 map1 =  cpu_maps[i1][example]
                 map2 =  cpu_maps[i2][example]
+                weight1 = weight_maps[i1][example] if weight_maps[i1] is not None else None
+                weight2 = weight_maps[i2][example] if weight_maps[i2] is not None else None
 
-                catalog1 = _catalog(treecorr, ra, dec, map1)
-                catalog2 = _catalog(treecorr, ra, dec, map2)
+                catalog1 = _catalog(treecorr, ra, dec, map1, weight1)
+                catalog2 = _catalog(treecorr, ra, dec, map2, weight2)
                 corr, bins = _correlation(catalog1, catalog2, treecorr_config, ncpus=ncpus)
 
-                LOGGER.debug(f"example {example:>6d} correlation {i1:>4d} {i2:>4d} shape={corr.shape} bins={bins.shape}")
+                LOGGER.debug(f"example {example:>6d} correlation {i1:>4d} {i2:>4d} shape={corr.shape} bins={bins.shape} weight1={True if weight1 is not None else False} weight2={True if weight2 is not None else False}")
 
                 example_corr.append(corr)
                 example_bins.append(bins)
@@ -207,15 +214,15 @@ def _correlation(catalog1, catalog2, treecorr_config, ncpus: int):
     return corr, sep
 
 
-def _catalog(treecorr: Any, ra: np.ndarray, dec: np.ndarray, values: np.ndarray) -> Any:
+def _catalog(treecorr: Any, ra: np.ndarray, dec: np.ndarray, values: np.ndarray, weight: np.ndarray|None = None) -> Any:
     
     common = {"ra": ra, "dec": dec, "ra_units": "rad", "dec_units": "rad"}
 
     if np.iscomplexobj(values):
-        catalog = treecorr.Catalog(**common, g1=np.real(values), g2=np.imag(values))
+        catalog = treecorr.Catalog(**common, g1=np.real(values), g2=np.imag(values), w=weight)
         catalog.type = "shear"
     else:
-        catalog = treecorr.Catalog(**common, k=np.asarray(values))
+        catalog = treecorr.Catalog(**common, k=np.asarray(values), w=weight)
         catalog.type = "scalar"
     
     return catalog
@@ -238,11 +245,11 @@ def _correlation_config(raw_config: Mapping[str, Any], nside: int) -> dict[str, 
         raise TypeError("The optional 'calccorrs' configuration section must be a mapping.")
     pixel_scale = float(hp.nside2resol(nside))
     return {
-        "nbins": int(settings.get("nbins", 20)),
+        "nbins": int(settings.get("nbins", 50)),
         "min_sep": float(settings.get("min_sep", pixel_scale)),
         "max_sep": float(settings.get("max_sep", np.pi)),
         "sep_units": str(settings.get("sep_units", "rad")),
-        "bin_slop": float(settings.get("bin_slop", 0.1)),
+        # "bin_slop": float(settings.get("bin_slop", 0.1)),
     }
 
 
@@ -265,11 +272,12 @@ def calccorrs_from_config(
     output_dir: str | Path = "corrs",
     file_index: int = 0,
     num_batches_per_file: int = 10,
+    dataset_split: str = 'training',
 ) -> list[Path]:
     """Load a YAML configuration and calculate its training correlations."""
     path = Path(config_path)
     raw_config = with_forward_model_config(load_config(path), path.parent)
-    return calccorrs(raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file)
+    return calccorrs(raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file, dataset_split=dataset_split)
 
 
 def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> tuple[TrainingConfig, dict[str, Any]]:

@@ -202,6 +202,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Number of input batches stored in each WebDataset tar shard.",
     )
+    calccorrs_parser.add_argument(
+        "--dataset-split",
+        type=str,
+        default='training',
+        choices=['training', 'validation'],
+        help="Type of dataset to calculate correlations for.",
+    )
     calccorrs_parser.set_defaults(func=_run_calccorrs)
 
     parser.set_defaults(func=_run_info)
@@ -298,6 +305,7 @@ def _run_calccorrs(args: argparse.Namespace) -> int:
         "output_dir": args.output_dir,
         "num_batches_per_file": args.num_batches_per_file,
         "file_index": args.file_index,
+        "dataset_split": args.dataset_split,
     }
     calccorrs_from_config(args.config, **kwargs)
     return 0
