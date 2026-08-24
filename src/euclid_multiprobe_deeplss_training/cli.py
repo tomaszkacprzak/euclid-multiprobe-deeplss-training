@@ -174,6 +174,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calccls_parser.set_defaults(func=_run_calccls)
 
+    #####################################################################################
+    #
+    # calccorrs
+    #
+    #####################################################################################
+
+    calccorrs_parser = subparsers.add_parser(
+        "calccorrs",
+        help="Calculate scalar and shear two-point correlations for training data.",
+    )
+    calccorrs_parser.add_argument(
+        "--output-path",
+        type=str,
+        default="corrs-%06d.tar",
+        help="WebDataset shard path or printf-style pattern (default: corrs-%%06d.tar).",
+    )
+    calccorrs_parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=100,
+        help="Number of examples to calculate correlations for.",
+    )
+    calccorrs_parser.add_argument(
+        "--num-batches-per-file",
+        type=int,
+        default=10,
+        help="Number of input batches stored in each WebDataset tar shard.",
+    )
+    calccorrs_parser.set_defaults(func=_run_calccorrs)
+
     parser.set_defaults(func=_run_info)
     return parser
 
@@ -254,6 +284,23 @@ def _run_calccls(args: argparse.Namespace) -> int:
     if args.num_examples != 100:
         kwargs["num_examples"] = args.num_examples
     calccls_from_config(args.config, **kwargs)
+    return 0
+
+
+def _run_calccorrs(args: argparse.Namespace) -> int:
+    """Calculate training-set angular two-point correlations."""
+    if args.config is None:
+        raise ValueError("The calccorrs command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.calccorrs import calccorrs_from_config
+
+    kwargs = {
+        "output_path": args.output_path,
+        "num_batches_per_file": args.num_batches_per_file,
+    }
+    if args.num_examples != 100:
+        kwargs["num_examples"] = args.num_examples
+    calccorrs_from_config(args.config, **kwargs)
     return 0
 
 

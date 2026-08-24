@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
   "torch",
   "webdataset",
+  "treecorr",
   "numpy",
   "scipy",
   "healpy",

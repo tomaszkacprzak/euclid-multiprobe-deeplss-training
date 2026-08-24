@@ -260,3 +260,41 @@ def test_calccls_command_passes_config(monkeypatch) -> None:
 
     assert exit_code == 0
     assert calls == [("configs/example.yaml", {"output_path": "spectra/results.h5"})]
+
+
+def test_calccorrs_command_requires_config() -> None:
+    with pytest.raises(ValueError, match="calccorrs command requires --config"):
+        main(["calccorrs"])
+
+
+def test_calccorrs_command_passes_sharding_options(monkeypatch) -> None:
+    calls = []
+    fake_calccorrs = types.ModuleType("euclid_multiprobe_deeplss_training.calccorrs")
+
+    def fake_calccorrs_from_config(config_path, **kwargs):
+        calls.append((config_path, kwargs))
+
+    fake_calccorrs.calccorrs_from_config = fake_calccorrs_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.calccorrs", fake_calccorrs)
+
+    exit_code = main(
+        [
+            "--config",
+            "configs/example.yaml",
+            "calccorrs",
+            "--output-path",
+            "corrs-%03d.tar",
+            "--num-batches-per-file",
+            "4",
+            "--num-examples",
+            "25",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        (
+            "configs/example.yaml",
+            {"output_path": "corrs-%03d.tar", "num_batches_per_file": 4, "num_examples": 25},
+        )
+    ]
