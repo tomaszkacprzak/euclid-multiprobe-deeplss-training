@@ -5,12 +5,15 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+import os
 from typing import Any
 
 import healpy as hp
 import numpy as np
 import torch
 import webdataset as wds
+import h5py
+import treecorr
 
 from .training import TrainingConfig, load_physics_model_class
 from .utils.config import load_config, load_pixel_indices, with_forward_model_config
@@ -22,9 +25,9 @@ LOGGER = get_logger(__file__)
 def calccorrs(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
     *,
-    output_path: str | Path = "corrs-%06d.tar",
-    num_examples: int = 100,
+    output_dir: Path,
     num_batches_per_file: int = 10,
+    file_index: int = 0,
     device: torch.device | str | None = None,
 ) -> list[Path]:
     """Calculate all auto/cross map correlations and write batched WebDataset shards.
@@ -35,16 +38,23 @@ def calccorrs(
     input probes for every correlation.  Labels and source indices retain the
     same batch dimension as the correlation tensors.
     """
-    if num_examples <= 0:
-        raise ValueError("num_examples must be positive.")
+
+    LOGGER.info(f"Calculating correlations {file_index}")
     if num_batches_per_file <= 0:
         raise ValueError("num_batches_per_file must be positive.")
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        LOGGER.info(f"Created output directory {output_dir}")
+    else:
+        LOGGER.info(f"Using existing output directory {output_dir}")
 
     from msfm.onthefly_pipeline import OntheflyPipeline
 
     config, raw_config = _coerce_config(config_or_path)
-    requested_device = device or raw_config.get("device")
+    requested_device = 'cpu'
     run_device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    LOGGER.info(f"Running on {run_device}")
     indices = np.asarray(load_pixel_indices(config.forward_model), dtype=np.int64)
     analysis = config.forward_model["analysis"]
     nside = int(analysis["n_side"])
@@ -56,7 +66,7 @@ def calccorrs(
         config.forward_model,
         scalers=True,
         device=run_device,
-        seed=int(time.time()),
+        seed=file_index * 1001,
         nside=nside,
     ).to(run_device)
     loader = OntheflyPipeline(
@@ -66,63 +76,74 @@ def calccorrs(
         downsampler=None,
         smoother=None,
         num_workers=config.num_workers,
+        device=run_device,
+        seed=file_index * 1000
     )
 
     written_paths: list[Path] = []
     writer: wds.TarWriter | None = None
     examples_written = 0
-    try:
-        with torch.no_grad():
+    ncpus = len(os.sched_getaffinity(0))
+    LOGGER.info(f"Using {ncpus} CPUs")
+
+    with torch.no_grad():
+        
+        shard_path = os.path.join(output_dir, f"corrs-{file_index:06d}.tar")
+        LOGGER.info(f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.batch_size} examples per batch")
+        with wds.TarWriter(str(shard_path)) as writer:
+
             for batch_index, (maps, labels, inds) in enumerate(loader):
-                if batch_index % num_batches_per_file == 0:
-                    if writer is not None:
-                        writer.close()
-                    shard_path = _shard_path(output_path, len(written_paths))
-                    shard_path.parent.mkdir(parents=True, exist_ok=True)
-                    writer = wds.TarWriter(str(shard_path))
-                    written_paths.append(shard_path)
 
                 maps = maps.to(device=run_device, dtype=torch.float32)
                 map_list = physics_model.unstack_batch_channels(maps)
-                correlations = calculate_batch_correlations(map_list, coordinates=coordinates, treecorr_config=corr_config)
-                sample = {
-                    "__key__": f"batch-{batch_index:06d}",
-                    "xi_p.pth": correlations["xi_p"],
-                    "xi_m.pth": correlations["xi_m"],
-                    "xi.pth": correlations["xi"],
-                    "shear_pair_indices.pth": correlations["shear_pair_indices"],
-                    "correlation_pair_indices.pth": correlations["correlation_pair_indices"],
-                    "labels.pth": labels.detach().cpu(),
-                    "inds.pth": inds.detach().cpu(),
-                }
-                assert writer is not None
-                writer.write(sample)
-                examples_written += len(maps)
-                LOGGER.debug(
-                    "Batch %5d: input maps %s, xi %s, xi+ %s",
-                    batch_index + 1,
-                    maps.shape,
-                    correlations["xi"].shape,
-                    correlations["xi_p"].shape,
-                )
-                if examples_written >= num_examples:
-                    break
-    finally:
-        if writer is not None:
-            writer.close()
 
-    LOGGER.info("Wrote correlations for %d examples to %d WebDataset shard(s)", examples_written, len(written_paths))
+                if batch_index == 0:
+                    for map_index, m in enumerate(map_list):
+                        LOGGER.info(f"map {map_index:>4d} shape={m.shape} dtype={m.dtype}")
+
+                LOGGER.info(f"batch {batch_index:>6d} / {num_batches_per_file:>6d}")
+
+                # Main magic - calculate the correlations
+                correlations, separations = calculate_batch_correlations(map_list, coordinates=coordinates, treecorr_config=corr_config, ncpus=ncpus)
+
+                for example in range(config.batch_size):
+                    sample = {
+                        "__key__": f"example-{example:0d}",
+                        "corr.pth": correlations[example],
+                        "labels.pth": labels[example],
+                        "inds.pth": inds[example]
+                    }
+
+                    writer.write(sample)
+    
+                LOGGER.debug(
+                    f'Batch {batch_index + 1}: maps.shape={maps.shape} correlations.shape={correlations.shape}, separations={separations.shape}',
+                )
+                
+                # write the separations and example correlations to a separate file
+                if batch_index == 0:
+                    example_batches_path = os.path.join(output_dir, f"example-batches-{file_index:06d}.h5")
+                    with h5py.File(example_batches_path, "w") as f:
+                        f.create_dataset("separations", data=separations, compression="lzf", shuffle=True)
+                        f.create_dataset("correlations", data=correlations, compression="lzf", shuffle=True)
+                        f.create_dataset("labels", data=labels, compression="lzf", shuffle=True)
+                        f.create_dataset("inds", data=inds, compression="lzf", shuffle=True)
+
+                examples_written += config.batch_size
+
+    LOGGER.info(f"Wrote correlations for {examples_written} examples")
     return written_paths
 
 
 def calculate_batch_correlations(
     maps: Sequence[torch.Tensor],
+    ncpus: int,
     *,
     coordinates: tuple[np.ndarray, np.ndarray],
     treecorr_config: Mapping[str, Any],
 ) -> dict[str, torch.Tensor]:
     """Return TreeCorr correlations for a batch of scalar/complex shear maps."""
-    import treecorr
+    
 
     if not maps:
         raise ValueError("At least one map probe is required.")
@@ -133,52 +154,71 @@ def calculate_batch_correlations(
     if ra.shape != (pixel_count,) or dec.shape != (pixel_count,):
         raise ValueError("Coordinate arrays must contain one position per map pixel.")
 
-    shear_pairs: list[tuple[int, int]] = []
-    other_pairs: list[tuple[int, int]] = []
-    xip_batches: list[list[np.ndarray]] = [[] for _ in range(batch_size)]
-    xim_batches: list[list[np.ndarray]] = [[] for _ in range(batch_size)]
-    xi_batches: list[list[np.ndarray]] = [[] for _ in range(batch_size)]
     cpu_maps = [value.detach().cpu().numpy() for value in maps]
 
-    for first in range(len(maps)):
-        for second in range(first, len(maps)):
-            first_shear, second_shear = maps[first].is_complex(), maps[second].is_complex()
-            target_pairs = shear_pairs if first_shear and second_shear else other_pairs
-            target_pairs.append((first, second))
-            for example in range(batch_size):
-                catalog1 = _catalog(treecorr, ra, dec, cpu_maps[first][example], first_shear)
-                catalog2 = catalog1 if first == second else _catalog(treecorr, ra, dec, cpu_maps[second][example], second_shear)
-                if first_shear and second_shear:
-                    correlation = treecorr.GGCorrelation(dict(treecorr_config))
-                    correlation.process(catalog1, catalog2)
-                    xip_batches[example].append(np.asarray(correlation.xip, dtype=np.float32))
-                    xim_batches[example].append(np.asarray(correlation.xim, dtype=np.float32))
-                elif not first_shear and not second_shear:
-                    correlation = treecorr.KKCorrelation(dict(treecorr_config))
-                    correlation.process(catalog1, catalog2)
-                    xi_batches[example].append(np.asarray(correlation.xi, dtype=np.float32))
-                else:
-                    # KGCorrelation requires the scalar catalog first.
-                    scalar_catalog, shear_catalog = (catalog2, catalog1) if first_shear else (catalog1, catalog2)
-                    correlation = treecorr.KGCorrelation(dict(treecorr_config))
-                    correlation.process(scalar_catalog, shear_catalog)
-                    xi_batches[example].append(np.asarray(correlation.xi, dtype=np.float32))
+    examples_corr = []
+    for example in LOGGER.progressbar(range(batch_size), desc="Computing correlations"):
 
-    nbins = int(treecorr_config["nbins"])
-    return {
-        "xi_p": _stack_correlations(xip_batches, batch_size, len(shear_pairs), nbins),
-        "xi_m": _stack_correlations(xim_batches, batch_size, len(shear_pairs), nbins),
-        "xi": _stack_correlations(xi_batches, batch_size, len(other_pairs), nbins),
-        "shear_pair_indices": torch.tensor(shear_pairs, dtype=torch.long).reshape(-1, 2),
-        "correlation_pair_indices": torch.tensor(other_pairs, dtype=torch.long).reshape(-1, 2),
-    }
+        example_corr = []
+        example_bins = []
+
+        for i1 in range(len(maps)):
+            for i2 in range(i1, len(maps)):
+
+                map1 =  cpu_maps[i1][example]
+                map2 =  cpu_maps[i2][example]
+
+                catalog1 = _catalog(treecorr, ra, dec, map1)
+                catalog2 = _catalog(treecorr, ra, dec, map2)
+                corr, bins = _correlation(catalog1, catalog2, treecorr_config, ncpus=ncpus)
+
+                LOGGER.debug(f"example {example:>6d} correlation {i1:>4d} {i2:>4d} shape={corr.shape} bins={bins.shape}")
+
+                example_corr.append(corr)
+                example_bins.append(bins)
+
+        examples_corr.append(np.concatenate(example_corr))
+        example_bins = np.concatenate(example_bins)
+
+    examples_corr = np.array(examples_corr)
+   
+    return examples_corr, example_bins
 
 
-def _catalog(treecorr: Any, ra: np.ndarray, dec: np.ndarray, values: np.ndarray, shear: bool) -> Any:
+
+def _correlation(catalog1, catalog2, treecorr_config, ncpus: int):
+
+    if catalog1.type == "shear" and catalog2.type == "shear":
+        correlation = treecorr.GGCorrelation(dict(treecorr_config))
+        correlation.process(catalog1, catalog2, num_threads=ncpus)
+        corr =  np.concatenate([correlation.xip, correlation.xim])
+    elif catalog1.type == "scalar" and catalog2.type == "scalar":
+        correlation = treecorr.KKCorrelation(dict(treecorr_config))
+        correlation.process(catalog1, catalog2, num_threads=ncpus)
+        corr = np.array(correlation.xi)
+    elif catalog1.type == "scalar" and catalog2.type == "shear":
+        correlation = treecorr.KGCorrelation(dict(treecorr_config))
+        correlation.process(catalog1, catalog2, num_threads=ncpus)
+        corr = np.array(correlation.xi)
+    else:
+        raise ValueError("Invalid catalog types.")
+
+    sep = np.array(correlation.rnom)
+    return corr, sep
+
+
+def _catalog(treecorr: Any, ra: np.ndarray, dec: np.ndarray, values: np.ndarray) -> Any:
+    
     common = {"ra": ra, "dec": dec, "ra_units": "rad", "dec_units": "rad"}
-    if shear:
-        return treecorr.Catalog(**common, g1=np.real(values), g2=np.imag(values))
-    return treecorr.Catalog(**common, k=np.asarray(values))
+
+    if np.iscomplexobj(values):
+        catalog = treecorr.Catalog(**common, g1=np.real(values), g2=np.imag(values))
+        catalog.type = "shear"
+    else:
+        catalog = treecorr.Catalog(**common, k=np.asarray(values))
+        catalog.type = "scalar"
+    
+    return catalog
 
 
 def _stack_correlations(values: list[list[np.ndarray]], batch_size: int, pair_count: int, nbins: int) -> torch.Tensor:
@@ -222,14 +262,14 @@ def _shard_path(output_path: str | Path, shard_index: int) -> Path:
 def calccorrs_from_config(
     config_path: str | Path,
     *,
-    output_path: str | Path = "corrs-%06d.tar",
-    num_examples: int = 100,
+    output_dir: str | Path = "corrs",
+    file_index: int = 0,
     num_batches_per_file: int = 10,
 ) -> list[Path]:
     """Load a YAML configuration and calculate its training correlations."""
     path = Path(config_path)
     raw_config = with_forward_model_config(load_config(path), path.parent)
-    return calccorrs(raw_config, output_path=output_path, num_examples=num_examples, num_batches_per_file=num_batches_per_file)
+    return calccorrs(raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file)
 
 
 def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> tuple[TrainingConfig, dict[str, Any]]:

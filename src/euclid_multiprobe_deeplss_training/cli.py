@@ -185,16 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Calculate scalar and shear two-point correlations for training data.",
     )
     calccorrs_parser.add_argument(
-        "--output-path",
+        "--output-dir",
         type=str,
-        default="corrs-%06d.tar",
-        help="WebDataset shard path or printf-style pattern (default: corrs-%%06d.tar).",
+        default='corrs',
+        help="Directory to write correlations to (default: corrs).",
     )
     calccorrs_parser.add_argument(
-        "--num-examples",
+        "--file-index",
         type=int,
-        default=100,
-        help="Number of examples to calculate correlations for.",
+        default=0,
+        help="Index of the WebDataset shard to calculate correlations for.",
     )
     calccorrs_parser.add_argument(
         "--num-batches-per-file",
@@ -295,11 +295,10 @@ def _run_calccorrs(args: argparse.Namespace) -> int:
     from euclid_multiprobe_deeplss_training.calccorrs import calccorrs_from_config
 
     kwargs = {
-        "output_path": args.output_path,
+        "output_dir": args.output_dir,
         "num_batches_per_file": args.num_batches_per_file,
+        "file_index": args.file_index,
     }
-    if args.num_examples != 100:
-        kwargs["num_examples"] = args.num_examples
     calccorrs_from_config(args.config, **kwargs)
     return 0
 
