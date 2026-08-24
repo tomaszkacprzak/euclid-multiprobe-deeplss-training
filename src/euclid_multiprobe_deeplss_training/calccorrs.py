@@ -61,13 +61,14 @@ def calccorrs(
     corr_config = _correlation_config(raw_config, nside)
     coordinates = _pixel_coordinates(indices, nside)
 
-    physics_model_class = load_physics_model_class(config.physics_model)
-    physics_model = physics_model_class(
+    OntheflyPhysicsModel = load_physics_model_class(config.physics_model)
+    physics_model = OntheflyPhysicsModel(
         config.forward_model,
-        scalers=True,
+        scalers=False,
         device=run_device,
         seed=file_index * 1001,
         nside=nside,
+        **config.physics_model_args if hasattr(config, "physics_model_args") else {},
     ).to(run_device)
     loader = OntheflyPipeline(
         webds_pattern=config.records_pattern,
