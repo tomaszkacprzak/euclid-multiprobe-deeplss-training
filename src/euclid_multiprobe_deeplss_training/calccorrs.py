@@ -1,4 +1,4 @@
-"""Calculate TreeCorr two-point correlations for generated training maps."""
+"""Calculate correlations for generated training maps."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import webdataset as wds
 import h5py
-import treecorr
+
 
 from .training import TrainingConfig, load_physics_model_class
 from .utils.config import load_config, load_pixel_indices, with_forward_model_config
@@ -108,7 +108,7 @@ def calccorrs(
                 LOGGER.info(f"batch {batch_index:>6d} / {num_batches_per_file:>6d}")
 
                 # Main magic - calculate the correlations
-                correlations, separations = calculate_batch_correlations(map_list, weight_list, ncpus=ncpus, coordinates=coordinates, treecorr_config=corr_config)
+                correlations, separations = calculate_batch_correlations(map_list, weight_list, ncpus=ncpus, coordinates=coordinates, corr_config=corr_config)
 
                 for example in range(config.batch_size):
                     sample = {
@@ -145,9 +145,9 @@ def calculate_batch_correlations(
     *,
     ncpus: int = 1,
     coordinates: tuple[np.ndarray, np.ndarray],
-    treecorr_config: Mapping[str, Any],
+    corr_config: Mapping[str, Any],
 ) -> dict[str, torch.Tensor]:
-    """Return TreeCorr correlations for a batch of scalar/complex shear maps."""
+    """Return correlations for a batch of scalar/complex shear maps."""
     
 
     if not maps:
@@ -168,22 +168,9 @@ def calculate_batch_correlations(
         example_corr = []
         example_bins = []
 
-        for i1 in range(len(maps)):
-            for i2 in range(i1, len(maps)):
+        # TODO: Implement this
+        raise NotImplementedError("Not implemented yet")
 
-                map1 =  cpu_maps[i1][example]
-                map2 =  cpu_maps[i2][example]
-                weight1 = weight_maps[i1][example] if weight_maps[i1] is not None else None
-                weight2 = weight_maps[i2][example] if weight_maps[i2] is not None else None
-
-                catalog1 = _catalog(treecorr, ra, dec, map1, weight1)
-                catalog2 = _catalog(treecorr, ra, dec, map2, weight2)
-                corr, bins = _correlation(catalog1, catalog2, treecorr_config, ncpus=ncpus)
-
-                LOGGER.debug(f"example {example:>6d} correlation {i1:>4d} {i2:>4d} shape={corr.shape} bins={bins.shape} weight1={True if weight1 is not None else False} weight2={True if weight2 is not None else False}")
-
-                example_corr.append(corr)
-                example_bins.append(bins)
 
         examples_corr.append(np.concatenate(example_corr))
         example_bins = np.concatenate(example_bins)
@@ -193,40 +180,6 @@ def calculate_batch_correlations(
     return examples_corr, example_bins
 
 
-
-def _correlation(catalog1, catalog2, treecorr_config, ncpus: int):
-
-    if catalog1.type == "shear" and catalog2.type == "shear":
-        correlation = treecorr.GGCorrelation(dict(treecorr_config))
-        correlation.process(catalog1, catalog2, num_threads=ncpus)
-        corr =  np.concatenate([correlation.xip, correlation.xim])
-    elif catalog1.type == "scalar" and catalog2.type == "scalar":
-        correlation = treecorr.KKCorrelation(dict(treecorr_config))
-        correlation.process(catalog1, catalog2, num_threads=ncpus)
-        corr = np.array(correlation.xi)
-    elif catalog1.type == "scalar" and catalog2.type == "shear":
-        correlation = treecorr.KGCorrelation(dict(treecorr_config))
-        correlation.process(catalog1, catalog2, num_threads=ncpus)
-        corr = np.array(correlation.xi)
-    else:
-        raise ValueError("Invalid catalog types.")
-
-    sep = np.array(correlation.rnom)
-    return corr, sep
-
-
-def _catalog(treecorr: Any, ra: np.ndarray, dec: np.ndarray, values: np.ndarray, weight: np.ndarray|None = None) -> Any:
-    
-    common = {"ra": ra, "dec": dec, "ra_units": "rad", "dec_units": "rad"}
-
-    if np.iscomplexobj(values):
-        catalog = treecorr.Catalog(**common, g1=np.real(values), g2=np.imag(values), w=weight)
-        catalog.type = "shear"
-    else:
-        catalog = treecorr.Catalog(**common, k=np.asarray(values), w=weight)
-        catalog.type = "scalar"
-    
-    return catalog
 
 
 def _stack_correlations(values: list[list[np.ndarray]], batch_size: int, pair_count: int, nbins: int) -> torch.Tensor:

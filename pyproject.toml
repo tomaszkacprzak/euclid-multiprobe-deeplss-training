@@ -28,7 +28,6 @@ classifiers = [
 dependencies = [
   "torch",
   "webdataset",
-  "treecorr",
   "numpy",
   "scipy",
   "healpy",
@@ -44,6 +43,7 @@ dependencies = [
   "torchinfo",
   "torchdiffeq",
   "cuHPX @ https://github.com/tomaszkacprzak/cuHPX.git",
+  "pyracorr"
 ]
 
 [project.optional-dependencies]
@@ -80,3 +80,5 @@ build-constraint-dependencies = ["scikit-build-core==0.12.2"]
 
 [tool.uv.extra-build-dependencies]
 cuhpx = [{ requirement = "torch", match-runtime = true }]
+
+
