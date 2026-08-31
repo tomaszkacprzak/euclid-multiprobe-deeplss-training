@@ -11,7 +11,6 @@ from typing import Any
 import healpy as hp
 import numpy as np
 import torch
-import webdataset as wds
 import h5py
 
 
@@ -26,7 +25,7 @@ def calccorrs(
     config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
     *,
     output_dir: Path,
-    num_batches_per_file: int = 10,
+    num_batches_per_file: int = 100,
     file_index: int = 0,
     dataset_split: str = 'training',
 ) -> list[Path]:
@@ -52,14 +51,19 @@ def calccorrs(
     from msfm.onthefly_pipeline import OntheflyPipeline
 
     config, raw_config = _coerce_config(config_or_path)
-    requested_device = 'cpu'
+    requested_device = 'cuda'
     run_device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
     LOGGER.info(f"Running on {run_device}")
     indices = np.asarray(load_pixel_indices(config.forward_model), dtype=np.int64)
     analysis = config.forward_model["analysis"]
     nside = int(analysis["n_side"])
-    corr_config = _correlation_config(raw_config, nside)
-    coordinates = _pixel_coordinates(indices, nside)
+    nside_down = int(analysis["n_side_down"])
+    L = hp.nside2order(nside)
+    R = hp.nside2order(nside_down)
+    footprint_indices = get_footprint_indices(indices, L, R)
+    LOGGER.info(f"indices min={indices.min()}, max={indices.max()}")
+    LOGGER.info(f"footprint_indices min={footprint_indices.min()}, max={footprint_indices.max()}")
+    LOGGER.info(f"L={L}, R={R}, footprint_indices {len(footprint_indices)}/{hp.nside2npix(nside_down)}")
 
     OntheflyPhysicsModel = load_physics_model_class(config.physics_model)
     physics_model = OntheflyPhysicsModel(
@@ -82,143 +86,81 @@ def calccorrs(
         validation=dataset_split == 'validation',
     )
 
-    written_paths: list[Path] = []
-    writer: wds.TarWriter | None = None
     examples_written = 0
-    ncpus = len(os.sched_getaffinity(0))
-    LOGGER.info(f"Using {ncpus} CPUs")
+    compression_args = {"compression": "lzf", "shuffle": True}
 
+    from pyracorr import PyracorrFastFootprint
+    device = torch.device("cuda")
+    LOGGER.info(f"Using PyracorrFast with L={L}")
+    spins = [0]*physics_model.num_channels
+    correlator = PyracorrFastFootprint(L, 
+                    spins, 
+                    R_footprint=R,
+                    matmul_precision="high",
+                    footprint_indices=footprint_indices,
+                    recompute_pairs=False, 
+                    doublesets=True,
+                    pairs_filename=f'pairs_L{L:02d}.h5').to(device)
+
+    time_start = time.time()
+    time_corr = 0
     with torch.no_grad():
-        
-        shard_path = os.path.join(output_dir, f"corrs_{dataset_split}_{file_index:06d}.tar")
-        LOGGER.info(f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.batch_size} examples per batch")
-        with wds.TarWriter(str(shard_path)) as writer:
+
+        shard_path = os.path.join(output_dir, f"corrs_{dataset_split}_{file_index:06d}.h5")
+        with h5py.File(shard_path, "w") as f:
+            
+            LOGGER.info(f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.batch_size} examples per batch")
 
             for batch_index, (maps, labels, inds) in enumerate(loader):
 
+                # raw batch of shape (batch_size, num_pixels, num_channels)
                 maps = maps.to(device=run_device, dtype=torch.float32)
-                map_list = physics_model.unstack_batch_channels(maps)
-                weight_list = physics_model.prepare_weights(map_list)
-                map_list = physics_model.preprocess_for_correlations(map_list)
+
+                # calculate wegiths used for correlations
+                # weights of shape (batch_size, num_pixels, num_channels)
+                weights = physics_model.get_weight_maps(maps)
+
+                # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
+                # (batch_size, num_pixels, num_channels)
+                maps = physics_model.preprocess_for_correlations(maps)
 
                 if batch_index == 0:
-                    for map_index, m in enumerate(map_list):
-                        LOGGER.info(f"map {map_index:>4d} shape={m.shape} dtype={m.dtype}")
-
-                LOGGER.info(f"batch {batch_index:>6d} / {num_batches_per_file:>6d}")
+                    LOGGER.info(f"maps    shape={maps.shape}    dtype={maps.dtype}")
+                    LOGGER.info(f"weights shape={weights.shape} dtype={weights.dtype}")
 
                 # Main magic - calculate the correlations
-                correlations, separations = calculate_batch_correlations(map_list, weight_list, ncpus=ncpus, coordinates=coordinates, corr_config=corr_config)
+                maps = torch.movedim(maps, -1, 1) # -> (batch_size, num_channels, num_pixels)
+                weights = torch.movedim(weights, -1, 1) # -> (batch_size, num_channels, num_pixels)
+                time_start_corr = time.time()
 
-                for example in range(config.batch_size):
-                    sample = {
-                        "__key__": f"example-{example:0d}",
-                        "corr.pth": correlations[example],
-                        "labels.pth": labels[example],
-                        "inds.pth": inds[example]
-                    }
+                # main magic - calculate the correlations
+                # num_correlationis 2*(L+1) for pyracorr with doublesets
+                # correlations of shape (batch_size, num_channels, num_channels, num_correlations)
+                correlations = correlator(maps, weights)
 
-                    writer.write(sample)
-    
-                LOGGER.debug(
-                    f'Batch {batch_index + 1}: maps.shape={maps.shape} correlations.shape={correlations.shape}, separations={separations.shape}',
-                )
-                
+                time_corr += time.time() - time_start_corr
+                separations = correlator.theta
+                LOGGER.info(f'Batch {batch_index + 1}: maps.shape={maps.shape} correlations.shape={correlations.shape}, separations={separations.shape}')
+
+                                
                 # write the separations and example correlations to a separate file
-                if batch_index == 0:
-                    example_batches_path = os.path.join(output_dir, f"example-batches-{file_index:06d}.h5")
-                    with h5py.File(example_batches_path, "w") as f:
-                        f.create_dataset("separations", data=separations, compression="lzf", shuffle=True)
-                        f.create_dataset("correlations", data=correlations, compression="lzf", shuffle=True)
-                        f.create_dataset("labels", data=labels, compression="lzf", shuffle=True)
-                        f.create_dataset("inds", data=inds, compression="lzf", shuffle=True)
+
+                f.create_dataset(f"batch{batch_index:04d}/separations",  data=separations.cpu().numpy(),  **compression_args)
+                f.create_dataset(f"batch{batch_index:04d}/correlations", data=correlations.cpu().numpy(), **compression_args)
+                f.create_dataset(f"batch{batch_index:04d}/labels",       data=labels.cpu().numpy(),       **compression_args)
+                f.create_dataset(f"batch{batch_index:04d}/inds",         data=inds.cpu().numpy(),         **compression_args)
 
                 examples_written += config.batch_size
 
-    LOGGER.info(f"Wrote correlations for {examples_written} examples")
-    return written_paths
+                if batch_index == num_batches_per_file - 1:
+                    break
 
+    LOGGER.info(f"Wrote correlations in {shard_path} for {examples_written} examples")
+    LOGGER.info(f"Time total: {time.time() - time_start:.2f}s, time corr: {time_corr:.2f}s")
 
-def calculate_batch_correlations(
-    maps: Sequence[torch.Tensor],
-    weight_maps: Sequence[torch.Tensor|None],
-    *,
-    ncpus: int = 1,
-    coordinates: tuple[np.ndarray, np.ndarray],
-    corr_config: Mapping[str, Any],
-) -> dict[str, torch.Tensor]:
-    """Return correlations for a batch of scalar/complex shear maps."""
-    
-
-    if not maps:
-        raise ValueError("At least one map probe is required.")
-    batch_size, pixel_count = maps[0].shape
-    if any(value.ndim != 2 or value.shape != (batch_size, pixel_count) for value in maps):
-        raise ValueError("Every map must have the same (batch, pixel) shape.")
-    ra, dec = coordinates
-    if ra.shape != (pixel_count,) or dec.shape != (pixel_count,):
-        raise ValueError("Coordinate arrays must contain one position per map pixel.")
-
-    cpu_maps = [value.detach().cpu().numpy() for value in maps]
-    cpu_weight_maps = [value.detach().cpu().numpy() if value is not None else None for value in weight_maps]
-    
-    examples_corr = []
-    for example in LOGGER.progressbar(range(batch_size), desc="Computing correlations"):
-
-        example_corr = []
-        example_bins = []
-
-        # TODO: Implement this
-        raise NotImplementedError("Not implemented yet")
-
-
-        examples_corr.append(np.concatenate(example_corr))
-        example_bins = np.concatenate(example_bins)
-
-    examples_corr = np.array(examples_corr)
-   
-    return examples_corr, example_bins
-
-
-
-
-def _stack_correlations(values: list[list[np.ndarray]], batch_size: int, pair_count: int, nbins: int) -> torch.Tensor:
-    if pair_count == 0:
-        return torch.empty((batch_size, 0, nbins), dtype=torch.float32)
-    return torch.from_numpy(np.asarray(values, dtype=np.float32))
-
-
-def _pixel_coordinates(indices: np.ndarray, nside: int) -> tuple[np.ndarray, np.ndarray]:
-    theta, phi = hp.pix2ang(nside, indices, nest=True)
-    return np.asarray(phi), np.asarray(np.pi / 2 - theta)
-
-
-def _correlation_config(raw_config: Mapping[str, Any], nside: int) -> dict[str, Any]:
-    settings = raw_config.get("calccorrs", {}) or {}
-    if not isinstance(settings, Mapping):
-        raise TypeError("The optional 'calccorrs' configuration section must be a mapping.")
-    pixel_scale = float(hp.nside2resol(nside))
-    return {
-        "nbins": int(settings.get("nbins", 50)),
-        "min_sep": float(settings.get("min_sep", pixel_scale)),
-        "max_sep": float(settings.get("max_sep", np.pi)),
-        "sep_units": str(settings.get("sep_units", "rad")),
-        # "bin_slop": float(settings.get("bin_slop", 0.1)),
-    }
-
-
-def _shard_path(output_path: str | Path, shard_index: int) -> Path:
-    pattern = str(output_path)
-    if "%" in pattern:
-        try:
-            return Path(pattern % shard_index)
-        except (TypeError, ValueError) as error:
-            raise ValueError("output_path must contain a valid integer printf placeholder") from error
-    path = Path(pattern)
-    if shard_index == 0:
-        return path
-    return path.with_name(f"{path.stem}-{shard_index:06d}{path.suffix}")
-
+def get_footprint_indices(indices, L, R):
+    assert np.all(np.diff(indices) >= 0), "indices must be sorted"
+    return np.unique(np.asarray(indices) //  ((hp.order2nside(L) // hp.order2nside(R)) ** 2))
 
 def calccorrs_from_config(
     config_path: str | Path,

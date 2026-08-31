@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     calccorrs_parser.add_argument(
         "--num-batches-per-file",
         type=int,
-        default=10,
+        default=100,
         help="Number of input batches stored in each WebDataset tar shard.",
     )
     calccorrs_parser.add_argument(
