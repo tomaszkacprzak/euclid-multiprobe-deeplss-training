@@ -710,7 +710,7 @@ def train(
                             encoder_args=config.encoder_args if hasattr(config, "encoder_args") else {},
                             batch_size=config.batch_size,
                             indices=indices_pixels_healpix,
-                            unstack_function=physics_model.unstack_batch_channels,
+                            physics_model=physics_model,
                             device=device)
     encoder = encoder.to(device)
     # encoder = torch.compile(encoder, dynamic=True)

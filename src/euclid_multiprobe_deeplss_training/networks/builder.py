@@ -15,8 +15,7 @@ def build_encoder(encoder_name: str,
                   batch_size: int = None,
                   indices: list[int] = None,
                   encoder_args: dict | None = None,
-                  unstack_function
-                   = None,
+                  physics_model = None,
                   device: torch.device | str | None = None):
 
     if encoder_name == "nested_transformer":
@@ -172,7 +171,7 @@ def build_encoder(encoder_name: str,
             "nside": nside,
             "num_channels": num_channels,
             "embed_dim": embed_dim,
-            "unstack_function": unstack_function,
+            "unstack_function": physics_model.unstack_batch_channels,
             "device": device,
             "inner_channels": 32,
             "downsampling_layers": 3,
@@ -186,6 +185,21 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
+    elif encoder_name == "corrs_transformer":
+
+        from .transformer_corrs import ShiftedWindowTransformerCorrNetwork
+        constructor_args = {
+            "indices": indices,
+            "nside": nside,
+            "nside_down": nside_down,
+            "num_channels": num_channels,
+            "spins": physics_model.channel_spins,
+            "embed_dim": embed_dim,
+            "weight_function": physics_model.get_weight_maps,
+            "preprocess_function": physics_model.preprocess_for_correlations,
+        }
+        constructor_args.update(encoder_args or {})
+        model = ShiftedWindowTransformerCorrNetwork(**constructor_args)
 
     else:
 

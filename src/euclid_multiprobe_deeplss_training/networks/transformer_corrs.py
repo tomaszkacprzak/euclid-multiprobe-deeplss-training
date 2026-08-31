@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import nn
+import numpy as np
+import healpy as hp
 
 from pyracorr import PyracorrFastFootprint
 
@@ -375,6 +377,11 @@ class InputBatchNorm(nn.Module):
 
         return x
 
+def get_footprint_indices(indices, L, R):
+    assert np.all(np.diff(indices) >= 0), "indices must be sorted"
+    return np.unique(np.asarray(indices) // ((hp.order2nside(L) // hp.order2nside(R)) ** 2))
+
+
 class ShiftedWindowTransformerCorrNetwork(nn.Module):
     """Encode part-sky maps by applying a transformer to their correlations.
 
@@ -392,12 +399,14 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         *,
         indices: list[int] | torch.Tensor,
         nside: int,
+        nside_down: int,
         num_channels: int,
+        spins: list[int],
         embed_dim: int,
-        lmax: int | None = None,
         sub_batch_size: int = 16,
         device: torch.device | str | None = None,
-        unstack_function: callable | None = None,
+        weight_function: callable | None = None,
+        preprocess_function: callable | None = None,
         inner_embed_dim: int = 128,
         depth: int = 6,
         num_heads: int = 8,
@@ -408,21 +417,39 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.unstack_function = unstack_function
+        self.weight_function = weight_function
+        self.preprocess_function = preprocess_function
         self.embed_dim = int(embed_dim)
         self.num_channels = int(num_channels)
         if self.num_channels <= 0:
             raise ValueError("num_channels must be positive.")
 
-        # TODO: Implement this
-        
-        raise NotImplementedError("PyracorrFastFootprint is not implemented yet")
+        self.nside = nside
+        self.nside_down = nside_down
+        L = hp.nside2order(self.nside)
+        R = hp.nside2order(self.nside_down)
 
-        self.num_correlations = self.num_channels * (self.num_channels + 1) // 2
+        self.indices = indices
+        assert len(spins) == self.num_channels, "spins must have the same length as num_channels"
+        self.spins = spins
+        self.num_corrs = 2*(L+1)
+        self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
+
+        self.correlator = PyracorrFastFootprint(
+            L=L,
+            spins=self.spins,
+            R_footprint=R,
+            matmul_precision="high",
+            footprint_indices=get_footprint_indices(self.indices, L, R),
+            recompute_pairs=False,
+            doublesets=True,
+            pairs_filename=f"pairs_L{L:02d}.h5",
+        ).to(device)
+        
         self.transformer = ShiftedWindowTransformerRegressor(
-            input_channels=self.num_correlations,
+            input_channels=1,
             embed_dim=self.embed_dim,
-            max_length=self.lmax,
+            max_length=self.num_channel_pairs * self.num_corrs,
             inner_embed_dim=inner_embed_dim,
             depth=depth,
             num_heads=num_heads,
@@ -432,7 +459,8 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             attention_dropout=attention_dropout,
         )
 
-        self.correlation_batch_norm = InputBatchNorm(self.lmax, self.num_correlations)
+        self.correlation_batch_norm = InputBatchNorm(self.num_corrs, 1)
+        self.upper_triangular_idx = torch.triu_indices(self.num_channels, self.num_channels, device=device)
 
 
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
@@ -447,12 +475,20 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
                 f"got {maps.shape[-1]}."
             )
 
-        # Pyracorr accepts shape (batch, channels, pixels)
-        maps  = x.movedim(-1, 1)
-        maps.contiguous()
-        correlations = self.corr(maps)
+        # calculate wegiths used for correlations
+        # weights of shape (batch_size, num_pixels, num_channels)
+        weights = self.weight_function(maps)
 
-        # TODO: Selected upper triangular part of the correlation matrix, and flatten it
+        # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
+        # (batch_size, num_pixels, num_channels)
+        maps = self.preprocess_function(maps)
         
+        # Main magic - calculate the correlations
+        maps = torch.movedim(maps, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
+        weights = torch.movedim(weights, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
 
-        return self.transformer(correlations)
+        correlations = self.correlator(maps, weights)
+        correlations_unique = correlations[:, self.upper_triangular_idx[0], self.upper_triangular_idx[1], :]
+        correlations_flat = correlations_unique.reshape(correlations_unique.shape[0], -1, 1)
+    
+        return self.transformer(correlations_flat)

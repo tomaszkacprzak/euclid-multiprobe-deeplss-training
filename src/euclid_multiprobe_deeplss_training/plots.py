@@ -55,7 +55,7 @@ def plot_targets_vs_predictions(
         LOGGER.debug(f"Target     {i:>2d}: min={x.min():.6e}, max={x.max():.6e}, mean={x.mean():.6e}, std={x.std():.6e}")
         LOGGER.debug(f"Prediction {i:>2d}: min={y.min():.6e}, max={y.max():.6e}, mean={y.mean():.6e}, std={y.std():.6e}")
 
-        ax.pcolormesh(bins_x_centers, bins_y_centers, h.T, cmap="turbo", vmin=1)
+        # ax.pcolormesh(bins_x_centers, bins_y_centers, h.T, cmap="turbo", vmin=1)
         name = names[i] if i < len(names) else f"Target {i}"
         ax.set_xlabel(f"Target: {name}")
         ax.set_ylabel(f"Prediction: {name}")
