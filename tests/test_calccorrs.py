@@ -1,76 +1,63 @@
 from __future__ import annotations
 
-import sys
-import types
-
 import pytest
 
 np = pytest.importorskip("numpy")
-torch = pytest.importorskip("torch")
+h5py = pytest.importorskip("h5py")
+pytest.importorskip("torch")
 pytest.importorskip("healpy")
 pytest.importorskip("webdataset")
 calccorrs_module = pytest.importorskip("euclid_multiprobe_deeplss_training.calccorrs")
-_shard_path = calccorrs_module._shard_path
-calculate_batch_correlations = calccorrs_module.calculate_batch_correlations
+create_correlations_dashboard = calccorrs_module.create_correlations_dashboard
+get_footprint_indices = calccorrs_module.get_footprint_indices
 
 
-class _Catalog:
-    def __init__(self, **kwargs):
-        self.values = kwargs.get("k", kwargs.get("g1"))
+def test_get_footprint_indices_deduplicates_downsampled_pixels() -> None:
+    assert get_footprint_indices(np.array([0, 1, 3, 4, 7]), 2, 1).tolist() == [0, 1]
 
 
-class _Correlation:
-    offset = 0
+def test_correlations_dashboard_loads_all_batches_and_unique_channel_pairs(tmp_path) -> None:
+    correlations_path = tmp_path / "corrs.h5"
+    dashboard_path = tmp_path / "corrs.html"
+    with h5py.File(correlations_path, "w") as output_file:
+        for batch_index in range(2):
+            group = output_file.create_group(f"batch{batch_index:04d}")
+            group["separations"] = [0.1, 0.2, 0.3]
+            group["correlations"] = np.arange(2 * 3 * 3 * 3, dtype=float).reshape(2, 3, 3, 3) + batch_index * 100
+            group["labels"] = [[0.2 + batch_index, 0.7], [0.4 + batch_index, 0.9]]
 
-    def __init__(self, config):
-        self.nbins = config["nbins"]
+    result = create_correlations_dashboard(
+        correlations_path,
+        dashboard_path,
+        parameter_names=["omega_m", "sigma8"],
+        model_information={"physics_model": "example"},
+    )
 
-    def process(self, first, second):
-        value = float(np.mean(first.values) + np.mean(second.values) + self.offset)
-        self.xi = np.full(self.nbins, value)
-        self.xip = np.full(self.nbins, value + 1)
-        self.xim = np.full(self.nbins, value - 1)
-
-
-class _GG(_Correlation):
-    offset = 10
-
-
-class _KK(_Correlation):
-    offset = 20
-
-
-class _KG(_Correlation):
-    offset = 30
-
-
-def test_calculate_batch_correlations_separates_shear_and_other_pairs(monkeypatch) -> None:
-
-    # TODO: Implement this
-    raise NotImplementedError("Not implemented yet")
-    
-    
-    assert result["xi_p"].shape == (2, 1, 3)
-    assert result["xi_m"].shape == (2, 1, 3)
-    assert result["xi"].shape == (2, 2, 3)
-    assert result["shear_pair_indices"].tolist() == [[1, 1]]
-    assert result["correlation_pair_indices"].tolist() == [[0, 0], [0, 1]]
-    torch.testing.assert_close(result["xi_p"][0, 0], torch.full((3,), 23.0))
-    torch.testing.assert_close(result["xi_m"][0, 0], torch.full((3,), 21.0))
-    torch.testing.assert_close(result["xi"][0, 0], torch.full((3,), 24.0))
-    torch.testing.assert_close(result["xi"][0, 1], torch.full((3,), 38.0))
+    document = dashboard_path.read_text(encoding="utf-8")
+    assert result == dashboard_path
+    assert "Correlations Dashboard" in document
+    assert "Channels 0 × 0" in document
+    assert "Channels 0 × 2" in document
+    assert "Channels 2 × 2" in document
+    assert "Channels 1 × 0" not in document
+    assert "Example 3" in document
+    assert '"label":"omega_m"' in document
+    assert '"label":"sigma8"' in document
+    assert "plotly.js" in document
+    assert '<script src="https://cdn.plot.ly' not in document
 
 
-def test_calculate_batch_correlations_returns_empty_shear_tensors(monkeypatch) -> None:
+def test_correlations_dashboard_requires_parameter_name_for_each_label(tmp_path) -> None:
+    correlations_path = tmp_path / "corrs.h5"
+    with h5py.File(correlations_path, "w") as output_file:
+        group = output_file.create_group("batch0000")
+        group["separations"] = [0.1, 0.2]
+        group["correlations"] = np.ones((1, 2, 2, 2))
+        group["labels"] = [[0.2, 0.7]]
 
-    # TODO: Implement this
-    
-    assert result["xi_p"].shape == (2, 0, 5)
-    assert result["xi_m"].shape == (2, 0, 5)
-    assert result["shear_pair_indices"].shape == (0, 2)
-
-
-def test_shard_path_supports_patterns_and_plain_tar_paths(tmp_path) -> None:
-    assert _shard_path(tmp_path / "corrs-%03d.tar", 2) == tmp_path / "corrs-002.tar"
-    assert _shard_path(tmp_path / "corrs.tar", 0) == tmp_path / "corrs.tar"
-    assert _shard_path(tmp_path / "corrs.tar", 2) == tmp_path / "corrs-000002.tar"
+    with pytest.raises(ValueError, match="1 parameter names for 2 label columns"):
+        create_correlations_dashboard(
+            correlations_path,
+            tmp_path / "corrs.html",
+            parameter_names=["omega_m"],
+        )
