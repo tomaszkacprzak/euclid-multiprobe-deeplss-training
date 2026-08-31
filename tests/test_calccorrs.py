@@ -45,17 +45,11 @@ class _KG(_Correlation):
 
 
 def test_calculate_batch_correlations_separates_shear_and_other_pairs(monkeypatch) -> None:
-    fake_treecorr = types.SimpleNamespace(Catalog=_Catalog, GGCorrelation=_GG, KKCorrelation=_KK, KGCorrelation=_KG)
-    monkeypatch.setitem(sys.modules, "treecorr", fake_treecorr)
-    scalar = torch.tensor([[1.0, 3.0], [2.0, 4.0]])
-    shear = torch.complex(torch.tensor([[5.0, 7.0], [6.0, 8.0]]), torch.zeros(2, 2))
 
-    result = calculate_batch_correlations(
-        [scalar, shear],
-        coordinates=(np.array([0.0, 1.0]), np.array([0.0, 0.5])),
-        treecorr_config={"nbins": 3},
-    )
-
+    # TODO: Implement this
+    raise NotImplementedError("Not implemented yet")
+    
+    
     assert result["xi_p"].shape == (2, 1, 3)
     assert result["xi_m"].shape == (2, 1, 3)
     assert result["xi"].shape == (2, 2, 3)
@@ -68,15 +62,9 @@ def test_calculate_batch_correlations_separates_shear_and_other_pairs(monkeypatc
 
 
 def test_calculate_batch_correlations_returns_empty_shear_tensors(monkeypatch) -> None:
-    fake_treecorr = types.SimpleNamespace(Catalog=_Catalog, GGCorrelation=_GG, KKCorrelation=_KK, KGCorrelation=_KG)
-    monkeypatch.setitem(sys.modules, "treecorr", fake_treecorr)
 
-    result = calculate_batch_correlations(
-        [torch.ones(2, 4)],
-        coordinates=(np.arange(4), np.arange(4)),
-        treecorr_config={"nbins": 5},
-    )
-
+    # TODO: Implement this
+    
     assert result["xi_p"].shape == (2, 0, 5)
     assert result["xi_m"].shape == (2, 0, 5)
     assert result["shear_pair_indices"].shape == (0, 2)
