@@ -643,7 +643,7 @@ def train(
         LOGGER.info(f"Device {i}: {torch.cuda.get_device_name(i)}")
 
     # numerical precision
-    torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("high")
     LOGGER.info(f'Matmul precision: {torch.get_float32_matmul_precision()}')
 
     # recompile models
