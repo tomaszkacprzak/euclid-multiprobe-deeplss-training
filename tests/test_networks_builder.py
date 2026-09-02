@@ -7,6 +7,59 @@ import types
 import pytest
 
 
+def test_build_encoder_supports_correlations_cnn(monkeypatch) -> None:
+    pytest.importorskip("torch")
+
+    from euclid_multiprobe_deeplss_training.networks.builder import build_encoder
+
+    captured = {}
+    fake_module = types.ModuleType(
+        "euclid_multiprobe_deeplss_training.networks.cnn_corrs"
+    )
+
+    class FakeCorrCnn:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_module.ConvolutionalResidualCorrNetwork = FakeCorrCnn
+    monkeypatch.setitem(sys.modules, fake_module.__name__, fake_module)
+    physics_model = types.SimpleNamespace(
+        channel_spins=[0, 2],
+        get_weight_maps=lambda maps: maps,
+        preprocess_for_correlations=lambda maps: maps,
+    )
+
+    model = build_encoder(
+        "corrs_cnn",
+        num_channels=2,
+        embed_dim=7,
+        nside=8,
+        nside_down=2,
+        num_pixels=12,
+        indices=[1, 2],
+        encoder_args={"inner_channels": 16, "residual_layers": 4},
+        physics_model=physics_model,
+        device="cpu",
+    )
+
+    assert isinstance(model, FakeCorrCnn)
+    assert captured == {
+        "indices": [1, 2],
+        "nside": 8,
+        "nside_down": 2,
+        "num_channels": 2,
+        "spins": [0, 2],
+        "embed_dim": 7,
+        "weight_function": physics_model.get_weight_maps,
+        "preprocess_function": physics_model.preprocess_for_correlations,
+        "device": "cpu",
+        "inner_channels": 16,
+        "downsampling_layers": 3,
+        "residual_layers": 4,
+        "kernel_size": 3,
+    }
+
+
 def test_build_model_passes_model_args_as_constructor_kwargs(monkeypatch) -> None:
     pytest.importorskip("torch")
 

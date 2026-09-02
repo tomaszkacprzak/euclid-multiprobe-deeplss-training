@@ -1,11 +1,13 @@
-"""Convolutional encoder for auto- and cross-power spectra."""
+"""Convolutional encoder for pyracorr auto- and cross-correlations."""
 
 from __future__ import annotations
 
+import healpy as hp
 import torch
+from pyracorr import PyracorrFastFootprint
 from torch import nn
 
-from ..utils.cls_cuhpx import PartSkyCls
+from .transformer_corrs import get_footprint_indices
 
 
 class ResidualBlock1D(nn.Module):
@@ -53,12 +55,15 @@ class InputBatchNorm(nn.Module):
         return x
 
 class ConvolutionalResidualCorrNetwork(nn.Module):
-    """Encode part-sky maps with a small CNN over their power spectra.
+    """Encode part-sky maps with a small CNN over their correlations.
 
-    Inputs have shape ``(batch, pixels, channels)``. ``PartSkyCls`` first
-    computes every auto- and cross-spectrum. Strided convolutions then reduce
-    the ell axis, residual blocks refine the representation, and global average
-    pooling produces a fixed-size input for the embedding head.
+    Inputs have shape ``(batch, pixels, channels)``. The input maps and their
+    weights are prepared in the same way as for
+    :class:`~.transformer_corrs.ShiftedWindowTransformerCorrNetwork`, then
+    pyracorr computes every auto- and cross-correlation. Strided convolutions
+    reduce the correlation-bin axis, residual blocks refine the
+    representation, and global average pooling produces a fixed-size input for
+    the embedding head.
     """
 
     tag = "corr_cnn"
@@ -68,12 +73,13 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
         *,
         indices: list[int] | torch.Tensor,
         nside: int,
+        nside_down: int,
         num_channels: int,
+        spins: list[int],
         embed_dim: int,
-        lmax: int | None = None,
-        sub_batch_size: int = 16,
         device: torch.device | str | None = None,
-        unstack_function: callable | None = None,
+        weight_function: callable | None = None,
+        preprocess_function: callable | None = None,
         inner_channels: int = 32,
         downsampling_layers: int = 3,
         residual_layers: int = 3,
@@ -82,7 +88,8 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.unstack_function = unstack_function
+        self.weight_function = weight_function
+        self.preprocess_function = preprocess_function
         self.embed_dim = int(embed_dim)
         self.num_channels = int(num_channels)
         if self.num_channels <= 0:
@@ -96,19 +103,32 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
         if kernel_size < 1 or kernel_size % 2 == 0:
             raise ValueError("kernel_size must be a positive odd integer.")
 
-        self.lmax = 3 * int(nside) if lmax is None else int(lmax)
-        self.cls = PartSkyCls(
-            torch.as_tensor(indices, dtype=torch.long),
-            nside=nside,
-            lmax=self.lmax,
-            sub_batch_size=sub_batch_size,
-            device=device,
-        )
+        if len(spins) != self.num_channels:
+            raise ValueError("spins must have the same length as num_channels.")
 
-        self.num_spectra = self.num_channels * (self.num_channels + 1) // 2
+        self.nside = int(nside)
+        self.nside_down = int(nside_down)
+        level = hp.nside2order(self.nside)
+        footprint_level = hp.nside2order(self.nside_down)
+
+        self.num_corrs = 2 * (level + 1)
+        self.correlator = PyracorrFastFootprint(
+            L=level,
+            spins=spins,
+            R_footprint=footprint_level,
+            matmul_precision="high",
+            footprint_indices=get_footprint_indices(
+                indices, level, footprint_level
+            ),
+            recompute_pairs=False,
+            doublesets=True,
+            pairs_filename=f"pairs_L{level:02d}.h5",
+        ).to(device)
+
+        self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
         padding = kernel_size // 2
         downsampling: list[nn.Module] = []
-        in_channels = self.num_spectra
+        in_channels = self.num_channel_pairs
         for _ in range(downsampling_layers):
             downsampling.extend(
                 [
@@ -139,7 +159,14 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
             nn.Linear(inner_channels, self.embed_dim),
         )
 
-        self.spectrum_batch_norm = InputBatchNorm(self.lmax, self.num_spectra)
+        self.correlation_batch_norm = InputBatchNorm(
+            self.num_corrs, self.num_channel_pairs
+        )
+        self.register_buffer(
+            "upper_triangular_idx",
+            torch.triu_indices(self.num_channels, self.num_channels),
+            persistent=False,
+        )
 
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
         """Return one convolutional embedding for every set of input maps."""
@@ -153,9 +180,20 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
                 f"got {maps.shape[-1]}."
             )
 
-        channel_maps = self.unstack_function(maps)
-        spectra = self.cls(*channel_maps)
-        spectra = self.spectrum_batch_norm(spectra)
-        features = self.downsampling(spectra.transpose(1, 2))
+        weights = self.weight_function(maps)
+        maps = self.preprocess_function(maps)
+
+        maps = torch.movedim(maps, -1, 1).contiguous()
+        weights = torch.movedim(weights, -1, 1).contiguous()
+        correlations = self.correlator(maps, weights)
+        correlations = correlations[
+            :,
+            self.upper_triangular_idx[0],
+            self.upper_triangular_idx[1],
+            :,
+        ].transpose(1, 2)
+        correlations = self.correlation_batch_norm(correlations)
+
+        features = self.downsampling(correlations.transpose(1, 2))
         features = self.residual_blocks(features)
         return self.regression_head(self.pool(features))

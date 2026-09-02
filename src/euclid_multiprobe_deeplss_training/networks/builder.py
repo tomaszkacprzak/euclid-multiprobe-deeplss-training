@@ -127,7 +127,7 @@ def build_encoder(encoder_name: str,
             "nside": nside,
             "num_channels": num_channels,
             "embed_dim": embed_dim,
-            "unstack_function": unstack_function,
+            "unstack_function": physics_model.unstack_batch_channels,
             "device": device,
         }
         constructor_args.update(encoder_args or {})
@@ -147,7 +147,7 @@ def build_encoder(encoder_name: str,
             "nside": nside,
             "num_channels": num_channels,
             "embed_dim": embed_dim,
-            "unstack_function": unstack_function,
+            "unstack_function": physics_model.unstack_batch_channels,
             "device": device,
             "inner_embed_dim": 32,
             "depth": 6,
@@ -200,6 +200,33 @@ def build_encoder(encoder_name: str,
         }
         constructor_args.update(encoder_args or {})
         model = ShiftedWindowTransformerCorrNetwork(**constructor_args)
+
+    elif encoder_name == "corrs_cnn":
+
+        assert indices is not None, "indices are required for corrs_cnn"
+
+        from .cnn_corrs import ConvolutionalResidualCorrNetwork
+        constructor_args = {
+            "indices": indices,
+            "nside": nside,
+            "nside_down": nside_down,
+            "num_channels": num_channels,
+            "spins": physics_model.channel_spins,
+            "embed_dim": embed_dim,
+            "weight_function": physics_model.get_weight_maps,
+            "preprocess_function": physics_model.preprocess_for_correlations,
+            "device": device,
+            "inner_channels": 32,
+            "downsampling_layers": 3,
+            "residual_layers": 3,
+            "kernel_size": 3,
+        }
+        constructor_args.update(encoder_args or {})
+        model = ConvolutionalResidualCorrNetwork(**constructor_args)
+
+        LOGGER.info(f"Built {ConvolutionalResidualCorrNetwork.__name__} {encoder_name}")
+        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+        LOGGER.info(f"  encoder_args: {constructor_args}")
 
     else:
 
