@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 import shutil
 import time
 from collections.abc import Mapping
@@ -749,8 +748,14 @@ def train(
     # Optimizer
     #
 
-    trainable_parameters = itertools.chain(encoder.parameters(), model_loss.parameters())
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=config.learning_rate, weight_decay=1e-4)
+    # Every supported loss model owns ``encoder`` as a child module, so its
+    # parameters are already returned by model_loss.parameters().  Adding the
+    # encoder separately duplicates every encoder parameter in the optimizer.
+    optimizer = torch.optim.AdamW(
+        model_loss.parameters(),
+        lr=config.learning_rate,
+        weight_decay=1e-4,
+    )
     LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
 
 
