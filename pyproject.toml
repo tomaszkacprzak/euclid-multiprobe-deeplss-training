@@ -42,7 +42,6 @@ dependencies = [
   "graphviz",
   "torchinfo",
   "torchdiffeq",
-  "cuHPX @ https://github.com/tomaszkacprzak/cuHPX.git",
   "pyracorr"
 ]
 
