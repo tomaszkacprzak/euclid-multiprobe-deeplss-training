@@ -587,8 +587,14 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             attention_dropout=attention_dropout,
         )
 
-        self.correlation_batch_norm = InputBatchNorm(self.num_corrs, 1)
-        self.upper_triangular_idx = torch.triu_indices(self.num_channels, self.num_channels, device=device)
+        self.correlation_batch_norm = InputBatchNorm(
+            self.num_corrs, self.num_channel_pairs
+        )
+        self.register_buffer(
+            "upper_triangular_idx",
+            torch.triu_indices(self.num_channels, self.num_channels),
+            persistent=False,
+        )
 
 
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
@@ -616,7 +622,17 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         weights = torch.movedim(weights, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
 
         correlations = self.correlator(maps, weights)
-        correlations_unique = correlations[:, self.upper_triangular_idx[0], self.upper_triangular_idx[1], :]
-        correlations_flat = correlations_unique.reshape(correlations_unique.shape[0], -1, 1)
+        correlations_unique = correlations[
+            :,
+            self.upper_triangular_idx[0],
+            self.upper_triangular_idx[1],
+            :,
+        ].transpose(1, 2)
+        correlations_normalized = self.correlation_batch_norm(
+            correlations_unique
+        )
+        correlations_flat = correlations_normalized.reshape(
+            correlations_normalized.shape[0], -1, 1
+        )
     
         return self.transformer(correlations_flat)
