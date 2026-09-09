@@ -207,6 +207,131 @@ class ShiftedWindowBlock1D(nn.Module):
         return x
 
 
+class TargetQueryCrossAttentionHead(nn.Module):
+    """
+    Aggregate an encoded sequence with one learned query per regression target.
+
+    Input:
+        memory: [batch_size, sequence_length, dim]
+
+    Output:
+        predictions: [batch_size, num_targets]
+
+    Each target query attends globally to every encoded sequence position. This
+    preserves target-specific information that would otherwise be discarded by
+    reducing the sequence to one mean-pooled vector.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_targets: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.0,
+        attention_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        if dim < 1:
+            raise ValueError("dim must be positive")
+
+        if num_targets < 1:
+            raise ValueError("num_targets must be positive")
+
+        if num_heads < 1:
+            raise ValueError("num_heads must be positive")
+
+        if dim % num_heads != 0:
+            raise ValueError(
+                f"dim={dim} must be divisible by num_heads={num_heads}"
+            )
+
+        if mlp_ratio <= 0:
+            raise ValueError("mlp_ratio must be positive")
+
+        self.dim = dim
+        self.num_targets = num_targets
+
+        # Query t is learned specifically for regression target t.
+        # It is shared across examples and expanded over the batch at runtime.
+        self.target_queries = nn.Parameter(
+            torch.empty(1, num_targets, dim)
+        )
+        nn.init.trunc_normal_(self.target_queries, std=0.02)
+
+        # Pre-norm cross-attention. The queries provide Q, while the encoded
+        # correlation sequence provides both K and V.
+        self.query_norm = nn.LayerNorm(dim)
+        self.memory_norm = nn.LayerNorm(dim)
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=attention_dropout,
+            batch_first=True,
+        )
+        self.attention_output_dropout = nn.Dropout(dropout)
+
+        # A decoder-style FFN refines each target representation independently.
+        self.feed_forward_norm = nn.LayerNorm(dim)
+        self.feed_forward = FeedForward(
+            dim=dim,
+            hidden_dim=int(dim * mlp_ratio),
+            dropout=dropout,
+        )
+        self.output_norm = nn.LayerNorm(dim)
+
+        # Target-specific scalar readout. This is equivalent to giving every
+        # target its own Linear(dim, 1), but is evaluated in one einsum.
+        self.output_weight = nn.Parameter(
+            torch.empty(num_targets, dim)
+        )
+        self.output_bias = nn.Parameter(torch.zeros(num_targets))
+        nn.init.trunc_normal_(self.output_weight, std=0.02)
+
+    def forward(self, memory: torch.Tensor) -> torch.Tensor:
+        if memory.ndim != 3:
+            raise ValueError(
+                "Expected memory with shape "
+                "[batch_size, sequence_length, embedding_dim]"
+            )
+
+        batch_size, sequence_length, dim = memory.shape
+
+        if sequence_length < 1:
+            raise ValueError("sequence_length must be positive")
+
+        if dim != self.dim:
+            raise ValueError(
+                f"Expected memory embedding dimension {self.dim}, got {dim}"
+            )
+
+        # expand creates a view; it does not duplicate the learned parameters.
+        queries = self.target_queries.expand(batch_size, -1, -1)
+        normalized_memory = self.memory_norm(memory)
+
+        attended, _ = self.cross_attention(
+            query=self.query_norm(queries),
+            key=normalized_memory,
+            value=normalized_memory,
+            need_weights=False,
+        )
+
+        queries = queries + self.attention_output_dropout(attended)
+        queries = queries + self.feed_forward(
+            self.feed_forward_norm(queries)
+        )
+        queries = self.output_norm(queries)
+
+        # [B, T, D] x [T, D] -> [B, T]
+        predictions = torch.einsum(
+            "btd,td->bt",
+            queries,
+            self.output_weight,
+        )
+        return predictions + self.output_bias
+
+
 class ShiftedWindowTransformerRegressor(nn.Module):
     """
     1D shifted-window transformer for multi-output regression.
@@ -299,12 +424,16 @@ class ShiftedWindowTransformerRegressor(nn.Module):
 
         self.final_norm = nn.LayerNorm(inner_embed_dim)
 
-        # Map the globally pooled representation to M regression values.
-        self.regression_head = nn.Sequential(
-            nn.Linear(inner_embed_dim, inner_embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(inner_embed_dim, embed_dim),
+        # Replace global mean pooling with one learned query per regression
+        # target. Every target can attend to a different subset of the full
+        # encoded correlation sequence.
+        self.target_query_head = TargetQueryCrossAttentionHead(
+            dim=inner_embed_dim,
+            num_targets=embed_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            attention_dropout=attention_dropout,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -345,11 +474,10 @@ class ShiftedWindowTransformerRegressor(nn.Module):
 
         x = self.final_norm(x)
 
-        # Global aggregation across num_dimensions.
-        pooled = x.mean(dim=1)
-
+        # One learned query per target performs global cross-attention over
+        # all sequence positions. No mean/single-vector pooling is used.
         # No output activation: appropriate for unconstrained regression.
-        return self.regression_head(pooled)
+        return self.target_query_head(x)
 
 
 
