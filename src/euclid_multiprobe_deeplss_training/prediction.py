@@ -51,7 +51,7 @@ def predict(
         device=device,
         seed=int(time.time()),
         nside=nside,
-        **_extra_mapping(config, "physics_model_args"),
+        **config.physics_model_args,
     ).to(device)
     validation_loader = OntheflyPipeline(
         webds_pattern=config.records_pattern,
@@ -73,6 +73,7 @@ def predict(
         encoder_args=config.encoder_args,
         batch_size=evaluation_batch_size,
         indices=indices,
+        physics_model=physics_model,
         device=device,
     ).to(device)
     model = build_loss(
@@ -101,7 +102,14 @@ def predict(
             label_batches.append(labels.detach().cpu())
             inds_batches.append(inds.detach().cpu())
             prediction_batches.append(predictions.detach().cpu())
-            LOGGER.debug(f"Batch {j: 5d}: input maps shape: {inputs.shape}, labels shape: {labels.shape}, predictions shape: {predictions.shape}, indices shape: {inds.shape}")
+            LOGGER.debug(
+                "Batch %5d: input maps shape: %s, labels shape: %s, predictions shape: %s, indices shape: %s",
+                j,
+                inputs.shape,
+                labels.shape,
+                predictions.shape,
+                inds.shape,
+            )
             j += 1
             i += evaluation_batch_size
             if i >= num_examples:
