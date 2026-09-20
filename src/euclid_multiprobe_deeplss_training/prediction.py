@@ -115,7 +115,7 @@ def predict(
             if i >= num_examples:
                 break
             if j % 10 == 0:
-                LOGGER.info(f"Predicted {i: 5d} examples out of {num_examples} [{i / num_examples * 100:.2f}%]")
+                LOGGER.info(f"Predicted {i:>10d} examples out of {num_examples:>10d} [{i / num_examples * 100:.2f}%]")
 
     if not label_batches:
         raise ValueError("The validation set did not produce any examples.")
@@ -131,9 +131,9 @@ def predict(
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(output_path, "w") as handle:
-        handle.create_dataset("labels", data=labels)
-        handle.create_dataset("predictions", data=predictions)
-        handle.create_dataset("indices", data=inds)
+        handle.create_dataset("grid/cosmos/test", data=labels)
+        handle.create_dataset("grid/preds/test", data=predictions)
+        handle.create_dataset("grid/indices/test", data=inds)
     LOGGER.info("Wrote %d validation predictions to %s", len(labels), output_path)
     return output_path
 

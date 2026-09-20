@@ -127,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument(
         "--device",
         type=str,
-        default=None,
+        default='cuda',
         help="Torch device to evaluate on, such as 'cpu' or 'cuda'.",
     )
     predict_parser.set_defaults(func=_run_predict)
