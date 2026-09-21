@@ -197,6 +197,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     predict_parser.set_defaults(func=_run_predict)
 
+    likelihood_parser = subparsers.add_parser(
+        "likelihood",
+        help="Train a conditional likelihood from a prediction HDF5 file.",
+    )
+    likelihood_parser.add_argument("--input-file", required=True, help="HDF5 output produced by the predict command.")
+    likelihood_parser.add_argument("--output-file", required=True, help="File in which to store the trained likelihood model.")
+    likelihood_parser.add_argument("--device", default=None, help="Torch device to train on, such as 'cpu' or 'cuda'.")
+    likelihood_parser.set_defaults(func=_run_likelihood)
+
     #####################################################################################
     #
     # datastats
@@ -359,6 +368,18 @@ def _run_predict(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_likelihood(args: argparse.Namespace) -> int:
+    """Train a conditional likelihood model from saved predictions."""
+    if args.config is None:
+        raise ValueError("The likelihood command requires --config.")
+    from euclid_multiprobe_deeplss_training.likelihood.training import train_likelihood_from_config
+
+    train_likelihood_from_config(
+        _config_argument(args), input_file=args.input_file, output_file=args.output_file, device=args.device
+    )
+    return 0
+
+
 def _run_modelprofile(args: argparse.Namespace) -> int:
     """Profile transformer forward passes from the parsed command line arguments."""
     if args.config is None:
@@ -423,7 +444,7 @@ def _expand_config_arguments(argv: list[str]) -> list[str]:
     subcommand, so contiguous config values are normalized to repeated options
     before parsing. Repeated ``--config`` options continue to work directly.
     """
-    commands = {"info", "webdataset", "train", "predict", "datastats", "modelprofile", "calccls", "calccorrs"}
+    commands = {"info", "webdataset", "train", "predict", "likelihood", "datastats", "modelprofile", "calccls", "calccorrs"}
     expanded: list[str] = []
     index = 0
     while index < len(argv):

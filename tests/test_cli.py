@@ -145,6 +145,21 @@ def test_predict_command_requires_config() -> None:
         main(["predict", "--checkpoint", "model.pt", "--output-file", "predictions.h5"])
 
 
+def test_likelihood_command_passes_files_and_device(monkeypatch) -> None:
+    calls = []
+    fake_module = types.ModuleType("euclid_multiprobe_deeplss_training.likelihood.training")
+    fake_module.train_likelihood_from_config = lambda config, **kwargs: calls.append((config, kwargs))
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.likelihood.training", fake_module)
+
+    assert main([
+        "--config", "config.yaml", "likelihood", "--input-file", "predictions.h5",
+        "--output-file", "likelihood.pt", "--device", "cpu",
+    ]) == 0
+    assert calls == [("config.yaml", {
+        "input_file": "predictions.h5", "output_file": "likelihood.pt", "device": "cpu",
+    })]
+
+
 def test_train_from_config_reads_master_config_sections(tmp_path, monkeypatch) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("wandb")
