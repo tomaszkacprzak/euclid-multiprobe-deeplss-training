@@ -22,7 +22,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from .plots import parameter_names_from_physics_model, plot_evaluation_file
-from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -565,7 +565,7 @@ def train(
     # Data loaders
     #
 
-    indices_pixels_healpix = load_pixel_indices(config.forward_model)
+    indices_pixels_healpix, _, _, _ = load_pixel_file(config.forward_model)
     nside_training = config.forward_model["analysis"]["n_side"]
     # nside_training = 512
     # import numpy as np
