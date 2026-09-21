@@ -118,7 +118,6 @@ def load_config(paths: ConfigPaths) -> dict[str, Any]:
         if not isinstance(loaded, dict):
             raise TypeError(f"The YAML config {path} must load to a mapping.")
         merged = _merge_mappings(merged, loaded)
-    print('merged', merged)
     return merged
 
 def load_pixel_file(conf):

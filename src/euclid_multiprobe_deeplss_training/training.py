@@ -981,7 +981,14 @@ def train_from_config(
     wandb_mode: str | None = None,
     tag: str | None = None,
 ) -> dict[str, Any]:
-    """Train from a YAML config file with optional CLI-style overrides."""
+    """Train from one or more YAML config files with optional CLI overrides.
+
+    In addition to a sequence of paths, accept the comma-separated value used
+    by pipeline command files (``--config=base.yaml,override.yaml``).  Configs
+    are merged from left to right, so the last file has precedence.
+    """
+    if isinstance(config_path, str):
+        config_path = [path.strip() for path in config_path.split(",") if path.strip()]
     paths = config_paths(config_path)
     raw_config = load_config(paths)
     overrides = {
