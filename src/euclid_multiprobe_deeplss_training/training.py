@@ -529,7 +529,7 @@ def train(
     supports deterministic seeking; for now, restarts resume model/loss/
     optimizer/global-step state rather than seeking to the prior stream item.
     """
-    from msfm.onthefly_pipeline import OntheflyPipeline
+    from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 
     from .networks.builder import build_encoder, build_loss
 
@@ -1299,7 +1299,7 @@ def load_physics_model_class(model_name: str):
     if model_name not in class_names:
         raise ValueError(f"Invalid model name: {model_name}")
 
-    module_name = f"msfm.onthefly_physics.{model_name}"
+    module_name = f"euclid_multiprobe_deeplss_training.physics.{model_name}"
     import importlib
     module = importlib.import_module(module_name)
     try:

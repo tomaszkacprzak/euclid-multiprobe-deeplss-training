@@ -9,8 +9,8 @@ from typing import Any
 
 import numpy as np
 import torch
-from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-from msfm.onthefly_pipeline import OntheflyPipeline
+from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
+from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 

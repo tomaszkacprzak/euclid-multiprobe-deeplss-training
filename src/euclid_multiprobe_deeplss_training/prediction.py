@@ -35,7 +35,7 @@ def predict(
     device: torch.device | str | None = None,
 ) -> Path:
     """Predict every example from the validation split and write an HDF5 file."""
-    from msfm.onthefly_pipeline import OntheflyPipeline
+    from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 
     evaluation_batch_size = config.training['batch_size'] if batch_size is None else batch_size
     if evaluation_batch_size <= 0:
