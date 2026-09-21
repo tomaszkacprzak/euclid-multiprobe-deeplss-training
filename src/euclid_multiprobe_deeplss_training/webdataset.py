@@ -1,8 +1,4 @@
 """Build WebDataset shards from post-processed CosmoGrid full-sky maps.
-
-The expensive forward-model dependencies are imported only when this workflow
-is run.  This keeps the rest of the training package importable on machines
-which do not have the private ``msfm`` forward-model package installed.
 """
 
 from __future__ import annotations
@@ -174,7 +170,7 @@ def get_hard_parameters(conf, cosmo_params_info, i_cosmo):
 
 
 def get_filename_webdataset(out_dir: str | Path, index: int, tag: str, simset: str, with_bary: bool = False) -> str:
-    """Build a stable WebDataset shard path without the private ``msfm`` helper."""
+    """Build a stable WebDataset shard path."""
     # Encode all dataset-disambiguating fields in the basename.
     matter_label = "dmb" if with_bary else "dmo"
     filename = f"{tag}_{simset}_{matter_label}_{index:04d}.tar"
