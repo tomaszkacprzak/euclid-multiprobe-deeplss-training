@@ -16,7 +16,8 @@ import healpy as hp
 import numpy as np
 import torch
 
-from .training import TrainingConfig, load_physics_model_class
+from .training import load_physics_model_class
+from .utils.config import Config, ConfigPaths, config_paths
 from .utils.config import load_config, load_pixel_indices, with_forward_model_config
 from .utils.logger import get_logger
 
@@ -38,7 +39,7 @@ COOLWARM_COLORSCALE = [
 
 
 def calccorrs(
-    config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
+    config_or_path: ConfigPaths | Mapping[str, Any] | Config,
     *,
     output_dir: Path,
     num_batches_per_file: int = 100,
@@ -339,7 +340,7 @@ def get_footprint_indices(indices, L, R):
 
 
 def calccorrs_from_config(
-    config_path: str | Path,
+    config_path: ConfigPaths,
     *,
     output_dir: str | Path = "corrs",
     file_index: int = 0,
@@ -347,24 +348,24 @@ def calccorrs_from_config(
     dataset_split: str = "training",
 ) -> list[Path]:
     """Load a YAML configuration and calculate its training correlations."""
-    path = Path(config_path)
-    raw_config = with_forward_model_config(load_config(path), path.parent)
+    paths = config_paths(config_path)
+    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
     return calccorrs(
         raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file, dataset_split=dataset_split
     )
 
 
-def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> tuple[TrainingConfig, dict[str, Any]]:
+def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> tuple[Config, dict[str, Any]]:
     """Normalize config input while retaining calccorrs-specific settings."""
-    if isinstance(config_or_path, TrainingConfig):
+    if isinstance(config_or_path, Config):
         raw_config = {**config_or_path.extra}
         for field_name in config_or_path.__dataclass_fields__:
             if field_name != "extra":
                 raw_config[field_name] = getattr(config_or_path, field_name)
         return config_or_path, raw_config
-    if isinstance(config_or_path, str | Path):
-        path = Path(config_or_path)
-        raw_config = with_forward_model_config(load_config(path), path.parent)
+    if not isinstance(config_or_path, Mapping):
+        paths = config_paths(config_or_path)
+        raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
     else:
         raw_config = dict(config_or_path)
-    return TrainingConfig.from_mapping(raw_config), raw_config
+    return Config.from_mapping(raw_config), raw_config

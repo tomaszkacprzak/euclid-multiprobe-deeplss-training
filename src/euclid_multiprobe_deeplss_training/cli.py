@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from euclid_multiprobe_deeplss_training import __version__
 from euclid_multiprobe_deeplss_training.utils import logger
@@ -24,7 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to the configuration file.",
+        action="append",
+        help="Path to one or more YAML configuration files (later files override earlier files).",
     )
     parser.add_argument(
         "--verbosity",
@@ -215,6 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _config_argument(args: argparse.Namespace) -> str | list[str]:
+    """Preserve the scalar form for one path and return all paths otherwise."""
+    return args.config[0] if len(args.config) == 1 else args.config
+
+
 def _run_info(_args: argparse.Namespace) -> int:
     """Print basic package information."""
     print(f"euclid-multiprobe-deeplss-training {__version__}")
@@ -229,7 +236,7 @@ def _run_train(args: argparse.Namespace) -> int:
     from euclid_multiprobe_deeplss_training.training import train_from_config
 
     train_from_config(
-        args.config,
+        _config_argument(args),
         resume_from_checkpoint=args.resume_from_checkpoint,
         checkpoint_dir=args.checkpoint_dir,
         max_steps=args.max_steps,
@@ -247,7 +254,7 @@ def _run_datastats(args: argparse.Namespace) -> int:
 
     from euclid_multiprobe_deeplss_training.datastats import datastats_from_config
 
-    datastats_from_config(args.config)
+    datastats_from_config(_config_argument(args))
     return 0
 
 
@@ -259,7 +266,7 @@ def _run_predict(args: argparse.Namespace) -> int:
     from euclid_multiprobe_deeplss_training.prediction import predict_from_config
 
     predict_from_config(
-        args.config,
+        _config_argument(args),
         checkpoint=args.checkpoint,
         output_file=args.output_file,
         batch_size=args.batch_size,
@@ -276,7 +283,7 @@ def _run_modelprofile(args: argparse.Namespace) -> int:
 
     from euclid_multiprobe_deeplss_training.modelprofile import modelprofile_from_config
 
-    modelprofile_from_config(args.config)
+    modelprofile_from_config(_config_argument(args))
     return 0
 
 
@@ -290,7 +297,7 @@ def _run_calccls(args: argparse.Namespace) -> int:
     kwargs = {"output_path": args.output_path}
     if args.num_examples != 100:
         kwargs["num_examples"] = args.num_examples
-    calccls_from_config(args.config, **kwargs)
+    calccls_from_config(_config_argument(args), **kwargs)
     return 0
 
 
@@ -307,7 +314,7 @@ def _run_calccorrs(args: argparse.Namespace) -> int:
         "file_index": args.file_index,
         "dataset_split": args.dataset_split,
     }
-    calccorrs_from_config(args.config, **kwargs)
+    calccorrs_from_config(_config_argument(args), **kwargs)
     return 0
 
 
@@ -316,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Command line arguments
     parser = build_parser()
+    argv = _expand_config_arguments(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
     
     # Set logger
@@ -323,6 +331,32 @@ def main(argv: list[str] | None = None) -> int:
 
     # Run the command
     return args.func(args)
+
+
+def _expand_config_arguments(argv: list[str]) -> list[str]:
+    """Allow ``--config base.yaml override.yaml command`` with subparsers.
+
+    ``argparse`` cannot combine a variable-length option with a following
+    subcommand, so contiguous config values are normalized to repeated options
+    before parsing. Repeated ``--config`` options continue to work directly.
+    """
+    commands = {"info", "train", "predict", "datastats", "modelprofile", "calccls", "calccorrs"}
+    expanded: list[str] = []
+    index = 0
+    while index < len(argv):
+        value = argv[index]
+        if value != "--config":
+            expanded.append(value)
+            index += 1
+            continue
+        index += 1
+        if index >= len(argv) or argv[index].startswith("-") or argv[index] in commands:
+            expanded.append("--config")
+            continue
+        while index < len(argv) and not argv[index].startswith("-") and argv[index] not in commands:
+            expanded.extend(("--config", argv[index]))
+            index += 1
+    return expanded
 
 
 if __name__ == "__main__":

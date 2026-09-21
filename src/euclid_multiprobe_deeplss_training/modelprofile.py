@@ -14,14 +14,14 @@ from euclid_multiprobe_deeplss_training.networks.builder import build_model
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 
 from .datastats import print_profiler_stats
-from .training import TrainingConfig
+from .utils.config import Config, ConfigPaths, config_paths
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
 
-def modelprofile(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> list[torch.Tensor]:
+def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[torch.Tensor]:
     """Profile untrained nested-transformer forward passes over pipeline batches."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     LOGGER.info(f"Using device: {device}")
@@ -184,10 +184,10 @@ def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
     print()
 
 
-def modelprofile_from_config(config_path: str | Path) -> list[torch.Tensor]:
+def modelprofile_from_config(config_path: ConfigPaths) -> list[torch.Tensor]:
     """Run modelprofile from a YAML config file."""
-    config_path = Path(config_path)
-    raw_config = with_forward_model_config(load_config(config_path), config_path.parent)
+    paths = config_paths(config_path)
+    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
     return modelprofile(raw_config)
 
 
@@ -195,7 +195,7 @@ def _profile_loader_forward_passes(
     dataloader: Iterable,
     model: torch.nn.Module,
     *,
-    config: TrainingConfig,
+    config: Config,
 ) -> list[torch.Tensor]:
     from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 
@@ -245,7 +245,7 @@ def _profile_loader_forward_passes(
     return outputs
 
 
-def _prepare_transformer_batch(maps: torch.Tensor, *, config: TrainingConfig) -> torch.Tensor:
+def _prepare_transformer_batch(maps: torch.Tensor, *, config: Config) -> torch.Tensor:
     """Convert pipeline maps shaped ``(B, P, C)`` to nested transformer input."""
     if maps.ndim != 3:
         raise ValueError(f"Expected maps with shape (batch, pixels, channels), got {tuple(maps.shape)}")
@@ -270,7 +270,7 @@ def _prepare_transformer_batch(maps: torch.Tensor, *, config: TrainingConfig) ->
     return maps.movedim(2, 1).contiguous().reshape(batch_size, num_channels, num_top_level_tokens, *nested_shape)
 
 
-def _calculate_num_top_level_tokens(config: TrainingConfig, num_pixels: int) -> int:
+def _calculate_num_top_level_tokens(config: Config, num_pixels: int) -> int:
     """Calculate the number of top-level tokens for the nested transformer."""
     """
     Calculate the number of top-level tokens for the nested transformer.
@@ -307,10 +307,10 @@ def _calculate_num_top_level_tokens(config: TrainingConfig, num_pixels: int) -> 
     return num_top_level_tokens
 
 
-def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> TrainingConfig:
-    if isinstance(config_or_path, TrainingConfig):
+def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> Config:
+    if isinstance(config_or_path, Config):
         return config_or_path
-    if isinstance(config_or_path, str | Path):
-        config_path = Path(config_or_path)
-        return TrainingConfig.from_mapping(with_forward_model_config(load_config(config_path), config_path.parent))
-    return TrainingConfig.from_mapping(with_forward_model_config(config_or_path))
+    if not isinstance(config_or_path, Mapping):
+        paths = config_paths(config_or_path)
+        return Config.from_mapping(with_forward_model_config(load_config(paths), paths[-1].parent))
+    return Config.from_mapping(with_forward_model_config(config_or_path))
