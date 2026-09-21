@@ -1002,6 +1002,7 @@ def train_from_config(
     training_config = raw_config.setdefault("training", {})
     training_config.setdefault('grad_clip_max_norm', 1.0)
     training_config.setdefault('use_ddp', True)
+    num_validation_examples = training_config.setdefault('num_validation_examples', 1000)
 
     if not isinstance(training_config, dict):
         raise TypeError("The 'training' configuration section must be a mapping.")

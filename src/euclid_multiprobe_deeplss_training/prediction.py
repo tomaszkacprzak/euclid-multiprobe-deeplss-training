@@ -11,7 +11,7 @@ import torch
 
 from .networks.builder import build_encoder, build_loss
 from .training import load_physics_model_class
-from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -42,7 +42,7 @@ def predict(
         raise ValueError("batch_size must be positive.")
 
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    indices = load_pixel_indices(config.forward_model)
+    indices = load_pixel_file(config.forward_model)[0]
     nside = config.forward_model["analysis"]["n_side"]
     PhysicsModelClass = load_physics_model_class(config.training['physics_model'])
     physics_model = PhysicsModelClass(
@@ -151,6 +151,9 @@ def predict_from_config(
     device: torch.device | str | None = None,
 ) -> Path:
     """Load a training config and predict its complete validation set."""
+
+    if isinstance(config_path, str):
+        config_path = [path.strip() for path in config_path.split(",") if path.strip()]
     paths = config_paths(config_path)
     raw_config = load_config(paths)
     return predict(
