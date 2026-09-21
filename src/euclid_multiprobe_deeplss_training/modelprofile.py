@@ -47,13 +47,13 @@ def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> li
     )
 
     model = build_model(
-        config.model_name,
+        config.encoder_name,
         num_channels=physics_model.num_channels,
         num_targets=physics_model.num_targets,
         num_pixels=loader.num_pixels,
         nside=int(config.forward_model["analysis"]["n_side"]),
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-        model_args=config.model_args,
+        encoder_args=config.encoder_args,
     ).to(device)
     model.eval()
     LOGGER.info(f"Profiling model: {model.__class__.__name__}")
