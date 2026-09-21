@@ -271,21 +271,72 @@ def get_postprocessed_maps(
     maps: dict[str, list[np.ndarray]] = {name: [] for name in ("kg", "ia", "gg", "ga", "gd", "ds", "dg", "qg")}
 
     for redshift_bin in survey["WL"]["z_bins"]:
+        
+        ##
+        ## Lensing convergence
+        ##
+
         kg = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "kg", redshift_bin)
-        ia = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "ia", redshift_bin)
-        ds = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
         maps["kg"].append(kg.astype(np.float32))
+
+        ##
+        ## Linear intrinsic alignment convergence
+        ##
+
+        # kappa to shear conversion for intrinsic alignment
+        ia = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "ia", redshift_bin)
         maps["ia"].append(ia.astype(np.float32))
+
+        ##
+        ## Source sample galaxy counts
+        ##
+
+        # source sample galaxy counts for shape noise
+        ds = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
         maps["ds"].append(ds.astype(np.float32))
+
+        ##
+        ## Lensing shear
+        ##
+
+        # kappa to shear conversion for lensing signal
         g1, g2 = modules.lensing.kappa_to_gamma(kg, hp_data, kappa_to_gamma, n_side)
         maps["gg"].append((g1 + 1j * g2).astype(np.complex64))
+        
+        ##
+        ## Linear intrinsic alignment shape
+        ##
+
+        # kappa to shear conversion for intrinsic alignment
         g1, g2 = modules.lensing.kappa_to_gamma(ia, hp_data, kappa_to_gamma, n_side)
         ga = g1 + 1j * g2
         maps["ga"].append(ga.astype(np.complex64))
-        maps["gd"].append((ga * ds).astype(np.complex64))
+        
+
+        ##
+        ## Delta-NLA intrinsic alignment
+        ##
+
+        # delta-NLA component approximation
+        dg = ga * ds
+        maps["gd"].append(dg.astype(np.complex64))
 
     for redshift_bin in survey["GC"]["z_bins"]:
+
+
+        ##
+        ## Galaxy counts
+        ##
+
         dg = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
         maps["dg"].append(dg.astype(np.float32))
-        maps["qg"].append((dg**2).astype(np.float32))
+
+        ##
+        ## Quadratic galaxy counts
+        ##
+
+        # quadratic galaxy counts for shape noise
+        qg = dg**2
+        maps["qg"].append(qg.astype(np.float32))
+
     return maps
