@@ -14,7 +14,7 @@ from msfm.onthefly_pipeline import OntheflyPipeline
 
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 
-from .training import TrainingConfig
+from .utils.config import Config, ConfigPaths, config_paths
 from .utils.config import load_config, with_forward_model_config
 from .utils.logger import get_logger
 
@@ -32,7 +32,7 @@ class BatchChannelStats:
     sum_squares: torch.Tensor
 
 
-def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> list[BatchChannelStats]:
+def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[BatchChannelStats]:
     """Print per-channel input-map and per-label statistics for one full training epoch."""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOGGER.info(f'Using device: {device}')
@@ -68,10 +68,10 @@ def datastats(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -
     return batch_stats
 
 
-def datastats_from_config(config_path: str | Path) -> list[BatchChannelStats]:
+def datastats_from_config(config_path: ConfigPaths) -> list[BatchChannelStats]:
     """Run datastats from a YAML config file."""
-    config_path = Path(config_path)
-    raw_config = with_forward_model_config(load_config(config_path), config_path.parent)
+    paths = config_paths(config_path)
+    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
     return datastats(raw_config)
 
 
@@ -282,10 +282,10 @@ def _print_channel_stats(stats: BatchChannelStats | None) -> None:
     _print_feature_stats(stats, feature_name="channel")
 
 
-def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> TrainingConfig:
-    if isinstance(config_or_path, TrainingConfig):
+def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> Config:
+    if isinstance(config_or_path, Config):
         return config_or_path
-    if isinstance(config_or_path, str | Path):
-        config_path = Path(config_or_path)
-        return TrainingConfig.from_mapping(with_forward_model_config(load_config(config_path), config_path.parent))
-    return TrainingConfig.from_mapping(with_forward_model_config(config_or_path))
+    if not isinstance(config_or_path, Mapping):
+        paths = config_paths(config_or_path)
+        return Config.from_mapping(with_forward_model_config(load_config(paths), paths[-1].parent))
+    return Config.from_mapping(with_forward_model_config(config_or_path))

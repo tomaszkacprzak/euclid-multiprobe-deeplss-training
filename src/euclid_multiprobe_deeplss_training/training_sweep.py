@@ -6,7 +6,7 @@ import itertools
 import shutil
 import time
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from .plots import parameter_names_from_physics_model, plot_evaluation_file
-from .utils.config import load_config, with_forward_model_config, load_pixel_indices
+from .utils.config import Config, ConfigPaths, config_paths, load_config, with_forward_model_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -67,113 +67,8 @@ class SweepConfig:
             raise TypeError("loss_args must be a mapping.")
 
 
-@dataclass(slots=True)
-class TrainingConfig:
-    """Normalized training configuration loaded from a YAML file.
-
-    The parser accepts flat YAML keys and also checks a nested ``model`` section
-    for the model fields.  This keeps small paper-code experiments convenient
-    while still allowing the configuration file to grow later.
-    """
-    
-    records_pattern: str
-    model_name: str = "nested_transformer"
-    model_args: dict[str, Any] = field(default_factory=dict)
-    sweep: list[SweepConfig] = field(default_factory=list)
-    config_forward_model: str | None = None
-    forward_model: dict[str, Any] = field(default_factory=dict)
-    loss_function: str = "mse"
-    loss_args: dict[str, Any] = field(default_factory=dict)
-    batch_size: int = 32
-    num_epochs: int | None = 1
-    max_steps: int | None = None
-    learning_rate: float = 1.0e-3
-    grad_clip_max_norm: float = 1.0
-    num_workers: int = 1
-    checkpoint_dir: str | None = None
-    checkpoint_every_steps: int = 0
-    evaluation_predictions_dir: str | None = None
-    resume_from_checkpoint: str | None = None
-    tag: str = "test-run"
-    wandb_project: str | None = None
-    wandb_run_name: str | None = None
-    wandb_mode: str | None = None
-    use_wandb: bool = True
-    seed: int = 0
-    drop_last: bool = False
-    in_channels: int = 1
-    hidden_channels: int = 64
-    num_targets: int = 1
-    num_blocks: int = 2
-    dropout: float = 0.0
-    use_ddp: bool = True
-    ddp_backend: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_mapping(cls, raw_config: Mapping[str, Any]) -> TrainingConfig:
-        """Create a config object from loaded YAML data."""
-        model_config = raw_config.get("model", {}) or {}
-        if not isinstance(model_config, Mapping):
-            raise TypeError("The optional 'model' configuration section must be a mapping.")
-
-        names = {item.name for item in fields(cls) if item.name != "extra"}
-        values: dict[str, Any] = {}
-        for name in names:
-            if name in raw_config:
-                values[name] = raw_config[name]
-            elif name in model_config:
-                values[name] = model_config[name]
-
-        if "records_pattern" not in values:
-            raise KeyError("Training config requires 'records_pattern'.")
-
-        if "sweep" in values:
-            values["sweep"] = [SweepConfig.from_mapping(item) for item in values["sweep"]]
-
-        config = cls(**values)
-        if not config.sweep:
-            config.sweep = [
-                SweepConfig(
-                    sweep_tag="default",
-                    model_name=config.model_name,
-                    model_args=dict(config.model_args),
-                    loss_function=config.loss_function,
-                    loss_args=dict(config.loss_args),
-                    learning_rate=config.learning_rate,
-                )
-            ]
-        config._validate()
-        config.extra = {key: value for key, value in raw_config.items() if key not in names}
-        return config
-
-    def _validate(self) -> None:
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive.")
-        if self.num_epochs is None and self.max_steps is None:
-            raise ValueError("Set at least one of num_epochs or max_steps.")
-        if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be positive.")
-        if self.num_workers < 0:
-            raise ValueError("num_workers must be non-negative.")
-        if self.checkpoint_every_steps < 0:
-            raise ValueError("checkpoint_every_steps must be non-negative.")
-        if not isinstance(self.model_args, Mapping):
-            raise TypeError("model_args must be a mapping.")
-        if not isinstance(self.loss_args, Mapping):
-            raise TypeError("loss_args must be a mapping.")
-        if not self.sweep:
-            raise ValueError("sweep must contain at least one entry.")
-        seen_tags: set[str] = set()
-        for item in self.sweep:
-            if not isinstance(item, SweepConfig):
-                raise TypeError("sweep entries must be SweepConfig instances.")
-            item._validate()
-            if item.sweep_tag in seen_tags:
-                raise ValueError(f"Duplicate sweep_tag: {item.sweep_tag}")
-            seen_tags.add(item.sweep_tag)
-
-
+# Backwards-compatible import for users of the former public name.
+TrainingConfig = Config
 
 def _ddp_env_world_size() -> int:
     """Return torchrun world size from the environment, defaulting to one process."""
@@ -192,7 +87,7 @@ def _unwrap_parallel_module(module: nn.Module) -> nn.Module:
     return module.module if isinstance(module, DDP) else module
 
 
-def _setup_ddp(config: TrainingConfig, requested_device: torch.device | str | None) -> tuple[bool, int, int, int, torch.device]:
+def _setup_ddp(config: Config, requested_device: torch.device | str | None) -> tuple[bool, int, int, int, torch.device]:
     """Initialize DDP from torchrun environment variables and choose this rank's device."""
     import os
 
@@ -313,7 +208,7 @@ def _save_evaluation_predictions(
         handle.create_dataset("predictions", data=predictions)
 
 
-def _evaluation_predictions_path(config: TrainingConfig, epoch: int) -> Path | None:
+def _evaluation_predictions_path(config: Config, epoch: int) -> Path | None:
     """Return the run-specific HDF5 path for per-epoch evaluation arrays, if enabled."""
     if config.checkpoint_dir is None:
         return None
@@ -378,7 +273,7 @@ def _wandb_info_from_checkpoint(path: str | Path | None) -> dict[str, Any] | Non
     return None
 
 
-def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[str, Any] | None = None):
+def init_wandb(config: Config | Mapping[str, Any], wandb_info: Mapping[str, Any] | None = None):
     """Initialize a Weights & Biases run when enabled by configuration.
 
     Local training should not require network access, so runs default to
@@ -387,7 +282,7 @@ def init_wandb(config: TrainingConfig | Mapping[str, Any], wandb_info: Mapping[s
     When checkpoint metadata contains a W&B run id, reuse it so resumed
     training continues the same run.
     """
-    config_dict = asdict(config) if isinstance(config, TrainingConfig) else dict(config)
+    config_dict = asdict(config) if isinstance(config, Config) else dict(config)
     use_wandb = bool(config_dict.get("use_wandb", True))
     wandb_mode = config_dict.get("wandb_mode")
     if not use_wandb or wandb_mode == "disabled":
@@ -421,7 +316,7 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     step: int,
-    config: TrainingConfig | Mapping[str, Any],
+    config: Config | Mapping[str, Any],
     train_losses: list[float],
     val_losses: list[float],
     loss_fn: nn.Module | None = None,
@@ -434,7 +329,7 @@ def save_checkpoint(
         "model_state_dict": _unwrap_parallel_module(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
-        "config": asdict(config) if isinstance(config, TrainingConfig) else dict(config),
+        "config": asdict(config) if isinstance(config, Config) else dict(config),
         "train_losses": train_losses,
         "val_losses": val_losses,
     }
@@ -445,7 +340,7 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
-def _prepare_checkpoint_dir(config: TrainingConfig, *, clear_existing: bool | None = None) -> Path | None:
+def _prepare_checkpoint_dir(config: Config, *, clear_existing: bool | None = None) -> Path | None:
     """Return the run-specific checkpoint directory, preserving contents when resuming."""
     if not config.checkpoint_dir:
         return None
@@ -467,7 +362,7 @@ def _prepare_checkpoint_dir(config: TrainingConfig, *, clear_existing: bool | No
     return checkpoint_dir
 
 
-def _write_reproducibility_config(checkpoint_dir: Path | None, config: TrainingConfig) -> Path | None:
+def _write_reproducibility_config(checkpoint_dir: Path | None, config: Config) -> Path | None:
     """Write the resolved training configuration into the run checkpoint directory."""
     if checkpoint_dir is None:
         return None
@@ -687,7 +582,7 @@ def get_gradient_stats(model, log_per_parameter=False):
 
 
 def train(
-    config_or_path: str | Path | Mapping[str, Any] | TrainingConfig,
+    config_or_path: ConfigPaths | Mapping[str, Any] | Config,
     model: nn.Module | None = None,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
@@ -1121,7 +1016,7 @@ def train(
 
 
 def train_from_config(
-    config_path: str | Path,
+    config_path: ConfigPaths,
     *,
     resume_from_checkpoint: str | None = None,
     checkpoint_dir: str | None = None,
@@ -1131,8 +1026,8 @@ def train_from_config(
     tag: str | None = None,
 ) -> dict[str, Any]:
     """Train from a YAML config file with optional CLI-style overrides."""
-    config_path = Path(config_path)
-    raw_config = with_forward_model_config(load_config(config_path), config_path.parent)
+    paths = config_paths(config_path)
+    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
     overrides = {
         "resume_from_checkpoint": resume_from_checkpoint,
         "checkpoint_dir": checkpoint_dir,
@@ -1144,13 +1039,13 @@ def train_from_config(
     return train(raw_config, device=device)
 
 
-def _coerce_config(config_or_path: str | Path | Mapping[str, Any] | TrainingConfig) -> TrainingConfig:
-    if isinstance(config_or_path, TrainingConfig):
+def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> Config:
+    if isinstance(config_or_path, Config):
         return config_or_path
-    if isinstance(config_or_path, str | Path):
-        config_path = Path(config_or_path)
-        return TrainingConfig.from_mapping(with_forward_model_config(load_config(config_path), config_path.parent))
-    return TrainingConfig.from_mapping(with_forward_model_config(config_or_path))
+    if not isinstance(config_or_path, Mapping):
+        paths = config_paths(config_or_path)
+        return Config.from_mapping(with_forward_model_config(load_config(paths), paths[-1].parent))
+    return Config.from_mapping(with_forward_model_config(config_or_path))
 
 
 #
@@ -1427,4 +1322,3 @@ def reduce_mean(x: torch.Tensor) -> torch.Tensor:
     x /= dist.get_world_size()
 
     return x
-
