@@ -378,7 +378,7 @@ def _run_likelihood(args: argparse.Namespace) -> int:
     """Train a conditional likelihood model from saved predictions."""
     if args.config is None:
         raise ValueError("The likelihood command requires --config.")
-    from euclid_multiprobe_deeplss_training.likelihood.training import train_likelihood_from_config
+    from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import train_likelihood_from_config
 
     train_likelihood_from_config(
         _config_argument(args), input_file=args.input_file, output_file=args.output_file, device=args.device

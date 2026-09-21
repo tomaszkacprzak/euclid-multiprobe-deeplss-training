@@ -82,7 +82,11 @@ def train_likelihood_from_config(
         config_path = [path.strip() for path in config_path.split(",") if path.strip()]
     paths = config_paths(config_path)
     raw_config = load_config(paths)
+
+
     settings = raw_config.get("likelihood")
+    if settings is None:
+        raise ValueError("The 'likelihood' configuration section is missing.")
     if not isinstance(settings, Mapping):
         raise TypeError("The 'likelihood' configuration section must be a mapping.")
     return train_likelihood(settings, input_file=input_file, output_file=output_file, device=device)
