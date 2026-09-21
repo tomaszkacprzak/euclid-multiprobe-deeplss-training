@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-import time
+
 import numpy as np
 import torch
 from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
@@ -14,8 +14,7 @@ from msfm.onthefly_pipeline import OntheflyPipeline
 
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 
-from .utils.config import Config, ConfigPaths, config_paths
-from .utils.config import load_config, with_forward_model_config
+from .utils.config import Config, ConfigPaths, config_paths, load_config
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -71,7 +70,7 @@ def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[
 def datastats_from_config(config_path: ConfigPaths) -> list[BatchChannelStats]:
     """Run datastats from a YAML config file."""
     paths = config_paths(config_path)
-    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+    raw_config = load_config(paths)
     return datastats(raw_config)
 
 
@@ -287,5 +286,5 @@ def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> 
         return config_or_path
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)
-        return Config.from_mapping(with_forward_model_config(load_config(paths), paths[-1].parent))
-    return Config.from_mapping(with_forward_model_config(config_or_path))
+        return Config.from_mapping(load_config(paths))
+    return Config.from_mapping(config_or_path)

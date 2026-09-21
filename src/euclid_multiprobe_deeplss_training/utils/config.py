@@ -9,7 +9,6 @@ from typing import Any
 
 import yaml
 
-
 ConfigPath = str | Path
 ConfigPaths = ConfigPath | Sequence[ConfigPath]
 
@@ -18,9 +17,12 @@ ConfigPaths = ConfigPath | Sequence[ConfigPath]
 class Config:
     """Normalized application configuration.
 
-    Flat keys take precedence over values in the optional ``model`` and
-    ``physics_model_args`` sections. Unknown top-level keys are retained in
-    :attr:`extra` so configuration consumers can evolve independently.
+    Training options are read from the master configuration's ``training``
+    section. Flat keys remain supported for programmatic callers, while keys
+    in ``training`` take precedence when both forms are present. The optional
+    ``model`` and ``physics_model_args`` subsections are also supported. The
+    top-level ``forward_model`` section is retained as part of the normalized
+    configuration.
     """
 
     records_pattern: str = ""
@@ -30,7 +32,6 @@ class Config:
     encoder_name: str = "nested_transformer"
     encoder_args: dict[str, Any] = field(default_factory=dict)
     embed_dim: int = 64
-    config_forward_model: str | None = None
     forward_model: dict[str, Any] = field(default_factory=dict)
     physics_model: str = "onthefly_linear"
     physics_model_args: dict[str, Any] = field(default_factory=dict)
@@ -67,16 +68,26 @@ class Config:
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> Config:
         """Create a validated config object from merged YAML data."""
-        model_config = raw_config.get("model", {}) or {}
-        physics_config = raw_config.get("physics_model_args", {}) or {}
+        training_config = raw_config.get("training", {})
+        if training_config is None:
+            training_config = {}
+        if not isinstance(training_config, Mapping):
+            raise TypeError("The 'training' configuration section must be a mapping.")
+
+        # Keep accepting flat mappings for direct Python callers while making
+        # the master configuration's training section authoritative for YAML.
+        normalized = dict(raw_config)
+        normalized.update(training_config)
+        model_config = normalized.get("model", {}) or {}
+        physics_config = normalized.get("physics_model_args", {}) or {}
         if not isinstance(model_config, Mapping):
             raise TypeError("The optional 'model' configuration section must be a mapping.")
 
         names = {item.name for item in fields(cls) if item.name != "extra"}
         values = {
-            name: raw_config[name] if name in raw_config else model_config[name]
+            name: normalized[name] if name in normalized else model_config[name]
             for name in names
-            if name in raw_config or name in model_config
+            if name in normalized or name in model_config
         }
         for name in names - values.keys():
             if name in physics_config:
@@ -84,7 +95,9 @@ class Config:
 
         config = cls(**values)
         config._validate()
-        config.extra = {key: value for key, value in raw_config.items() if key not in names}
+        config.extra = {
+            key: value for key, value in normalized.items() if key not in names and key != "training"
+        }
         return config
 
     def _validate(self) -> None:
@@ -138,25 +151,6 @@ def load_config(paths: ConfigPaths) -> dict[str, Any]:
             raise TypeError(f"The YAML config {path} must load to a mapping.")
         merged = _merge_mappings(merged, loaded)
     return merged
-
-
-def load_forward_model_config(path: str | Path) -> dict[str, Any]:
-    """Load the forward-model YAML configuration file."""
-    return load_config(path)
-
-
-def with_forward_model_config(raw_config: Mapping[str, Any], base_dir: Path | None = None) -> dict[str, Any]:
-    """Return a copy of ``raw_config`` with ``forward_model`` loaded when configured."""
-    config = dict(raw_config)
-    forward_model_path = config.get("config_forward_model")
-    if forward_model_path is None:
-        return config
-
-    path = Path(forward_model_path)
-    if not path.is_absolute() and base_dir is not None:
-        path = base_dir / path
-    config["forward_model"] = load_forward_model_config(path)
-    return config
 
 
 def load_pixel_indices(conf: dict):

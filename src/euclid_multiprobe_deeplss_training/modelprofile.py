@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -14,8 +13,7 @@ from euclid_multiprobe_deeplss_training.networks.builder import build_model
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
 
 from .datastats import print_profiler_stats
-from .utils.config import Config, ConfigPaths, config_paths
-from .utils.config import load_config, with_forward_model_config
+from .utils.config import Config, ConfigPaths, config_paths, load_config
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -187,7 +185,7 @@ def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
 def modelprofile_from_config(config_path: ConfigPaths) -> list[torch.Tensor]:
     """Run modelprofile from a YAML config file."""
     paths = config_paths(config_path)
-    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+    raw_config = load_config(paths)
     return modelprofile(raw_config)
 
 
@@ -312,5 +310,5 @@ def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> 
         return config_or_path
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)
-        return Config.from_mapping(with_forward_model_config(load_config(paths), paths[-1].parent))
-    return Config.from_mapping(with_forward_model_config(config_or_path))
+        return Config.from_mapping(load_config(paths))
+    return Config.from_mapping(config_or_path)
