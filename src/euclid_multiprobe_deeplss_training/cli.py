@@ -41,6 +41,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     info_parser.set_defaults(func=_run_info)
 
+
+
+    #####################################################################################
+    #
+    # webdataset
+    #
+    #####################################################################################
+
+    webdataset_parser = subparsers.add_parser(
+        "webdataset",
+        help="Run webdataset workflow.",
+    )
+
+    webdataset_parser.add_argument(
+        "--dir_in",
+        type=str,
+        required=True,
+        help="input root dir of the full sky CosmoGrid projections",
+    )
+    webdataset_parser.add_argument(
+        "--dir_out",
+        type=str,
+        required=True,
+        help="output root dir of the forward-modeled survey footprints",
+    )
+    webdataset_parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/config.yaml",
+        help="configuration .yaml file",
+    )
+    webdataset_parser.add_argument(
+        "--cosmogrid_version",
+        type=str,
+        default="1.1",
+        choices=["1.1", "1"],
+        help="version of the input CosmoGrid",
+    )
+    webdataset_parser.add_argument(
+        "--file_suffix",
+        type=str,
+        default="",
+        help="Optional suffix to be appended to the end of the filename, for example to distinguish different runs",
+    )
+    webdataset_parser.add_argument(
+        "--max_sleep",
+        type=int,
+        default=120,
+        help="set the maximal amount of time to sleep before copying to avoid clashes",
+    )
+    webdataset_parser.add_argument(
+        "--indices", 
+        type=str, 
+        default="0", 
+        help="Indices to process, format: 0,1,2,4 or start>stop. Default is 0.")
+
+    webdataset_parser.add_argument(
+        "--n_cosmos_per_file", 
+        type=int, 
+        default=25, 
+        help="Number of cosmologies per file. Select depending on the number of fields and nside.")
+    webdataset_parser.set_defaults(func=_run_webdataset)
+
     #####################################################################################
     #
     # train
@@ -218,6 +281,16 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_info(_args: argparse.Namespace) -> int:
     """Print basic package information."""
     print(f"euclid-multiprobe-deeplss-training {__version__}")
+    return 0
+
+def _run_webdataset(args: argparse.Namespace) -> int:
+    """Run webdataset workflow."""
+    if args.config is None:
+        raise ValueError("The webdataset command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.webdataset import webdataset_from_config
+
+    webdataset_from_config(args.config)
     return 0
 
 
