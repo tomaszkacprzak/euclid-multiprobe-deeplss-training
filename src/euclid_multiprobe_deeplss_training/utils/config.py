@@ -6,11 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
+
 from euclid_multiprobe_deeplss_training.utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
-
-import yaml
 
 ConfigPath = str | Path
 ConfigPaths = ConfigPath | Sequence[ConfigPath]
@@ -27,6 +28,7 @@ class Config:
 
     forward_model: dict[str, Any] = field(default_factory=dict)
     training: dict[str, Any] = field(default_factory=dict)
+    likelihood: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> Config:
@@ -41,17 +43,21 @@ class Config:
         forward_model = raw_config.get("forward_model", {})
         if not isinstance(forward_model, Mapping):
             raise TypeError("The 'forward_model' configuration section must be a mapping.")
+        likelihood = raw_config.get("likelihood", {})
+        if not isinstance(likelihood, Mapping):
+            raise TypeError("The 'likelihood' configuration section must be a mapping.")
 
         # Keep accepting the original flat training mapping for programmatic
         # callers. Values in the merged ``training`` section are authoritative.
         legacy = {
             key: value
             for key, value in raw_config.items()
-            if key not in {"forward_model", "training"}
+            if key not in {"forward_model", "training", "likelihood"}
         }
         sections = {
             "forward_model": dict(forward_model),
             "training": _merge_mappings(legacy, training),
+            "likelihood": dict(likelihood),
         }
 
         config = cls(**sections)
@@ -139,8 +145,9 @@ def load_pixel_file(conf):
         gamma2_signs: Signs for gamma2 that come from mirroring the survey patch, needed for WL only.
     """
 
-    import h5py
     import os
+
+    import h5py
 
     if os.path.isabs(conf["files"]["pixels"]):
         pixel_file = conf["files"]["pixels"]
