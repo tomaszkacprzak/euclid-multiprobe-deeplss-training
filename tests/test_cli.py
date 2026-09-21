@@ -185,6 +185,39 @@ def test_train_from_config_reads_master_config_sections(tmp_path, monkeypatch) -
     assert captured["config"]["training"]["records_pattern"] == "records/*.tar"
 
 
+def test_train_from_config_merges_comma_separated_config_paths(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("wandb")
+
+    from euclid_multiprobe_deeplss_training import training
+
+    base = tmp_path / "base.yaml"
+    override = tmp_path / "override.yaml"
+    base.write_text(
+        "training:\n  batch_size: 32\n  model:\n    width: 64\n    depth: 2\n",
+        encoding="utf-8",
+    )
+    override.write_text(
+        "training:\n  batch_size: 8\n  model:\n    depth: 4\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_train(config_or_path, *, device=None):
+        captured["config"] = config_or_path
+        return {"step": 0}
+
+    monkeypatch.setattr(training, "train", fake_train)
+
+    result = training.train_from_config(f"{base},{override}")
+
+    assert result == {"step": 0}
+    assert captured["config"]["training"] == {
+        "batch_size": 8,
+        "model": {"width": 64, "depth": 4},
+    }
+
+
 def test_reduce_mean_without_initialized_process_group_returns_local_copy() -> None:
     torch = pytest.importorskip("torch")
 
