@@ -43,6 +43,7 @@ dependencies = [
   "torchdiffeq",
   "pyracorr",
   "tqdm",
+  "matplotlib",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +52,6 @@ dev = [
   "ruff>=0.5",
   "ipython",
   "jupyter",
-  "matplotlib",
 ]
 
 [project.scripts]
