@@ -81,22 +81,22 @@ def calccorrs(
     LOGGER.info(f"footprint_indices min={footprint_indices.min()}, max={footprint_indices.max()}")
     LOGGER.info(f"L={L}, R={R}, footprint_indices {len(footprint_indices)}/{hp.nside2npix(nside_down)}")
 
-    OntheflyPhysicsModel = load_physics_model_class(config.physics_model)
+    OntheflyPhysicsModel = load_physics_model_class(config.training['physics_model'])
     physics_model = OntheflyPhysicsModel(
         config.forward_model,
         scalers=False,
         device=run_device,
         seed=file_index * 1001,
         nside=nside,
-        **config.physics_model_args if hasattr(config, "physics_model_args") else {},
+        **config.training.get('physics_model_args', {}),
     ).to(run_device)
     loader = OntheflyPipeline(
-        webds_pattern=config.records_pattern,
-        batch_size=config.batch_size,
+        webds_pattern=config.training['records_pattern'],
+        batch_size=config.training['batch_size'],
         physics_model=physics_model,
         downsampler=None,
         smoother=None,
-        num_workers=config.num_workers,
+        num_workers=config.training['num_workers'],
         device=run_device,
         seed=file_index * 1000,
         validation=dataset_split == "validation",
@@ -127,7 +127,7 @@ def calccorrs(
         shard_path = os.path.join(output_dir, f"corrs_{dataset_split}_{file_index:06d}.h5")
         with h5py.File(shard_path, "w") as f:
             LOGGER.info(
-                f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.batch_size} examples per batch"
+                f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.training['batch_size']} examples per batch"
             )
 
             for batch_index, (maps, labels, inds) in enumerate(loader):
@@ -169,7 +169,7 @@ def calccorrs(
                 f.create_dataset(f"batch{batch_index:04d}/labels", data=labels.cpu().numpy(), **compression_args)
                 f.create_dataset(f"batch{batch_index:04d}/inds", data=inds.cpu().numpy(), **compression_args)
 
-                examples_written += config.batch_size
+                examples_written += config.training['batch_size']
 
                 if batch_index == num_batches_per_file - 1:
                     break
@@ -182,7 +182,7 @@ def calccorrs(
         shard_path,
         dashboard_path,
         parameter_names=[str(name) for name in physics_model.params],
-        model_information={"physics_model": config.physics_model, "forward_model": config.forward_model},
+        model_information={"physics_model": config.training['physics_model'], "forward_model": config.forward_model},
     )
     LOGGER.info("Wrote interactive correlations dashboard to %s", dashboard_path)
     return [Path(shard_path)]
@@ -357,10 +357,10 @@ def calccorrs_from_config(
 def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> tuple[Config, dict[str, Any]]:
     """Normalize config input while retaining calccorrs-specific settings."""
     if isinstance(config_or_path, Config):
-        raw_config = {**config_or_path.extra}
-        for field_name in config_or_path.__dataclass_fields__:
-            if field_name != "extra":
-                raw_config[field_name] = getattr(config_or_path, field_name)
+        raw_config = {
+            "forward_model": config_or_path.forward_model,
+            "training": config_or_path.training,
+        }
         return config_or_path, raw_config
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)

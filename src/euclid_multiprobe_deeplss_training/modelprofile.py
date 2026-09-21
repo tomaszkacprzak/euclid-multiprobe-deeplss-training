@@ -37,23 +37,23 @@ def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> li
     ).to(device)
 
     loader = OntheflyPipeline(
-        config.records_pattern,
+        config.training['records_pattern'],
         physics_model,
         smoothing_model,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
+        batch_size=config.training['batch_size'],
+        num_workers=config.training['num_workers'],
         pin_memory=True,
         device=device,
     )
 
     model = build_model(
-        config.encoder_name,
+        config.training['encoder_name'],
         num_channels=physics_model.num_channels,
         num_targets=physics_model.num_targets,
         num_pixels=loader.num_pixels,
         nside=int(config.forward_model["analysis"]["n_side"]),
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-        encoder_args=config.encoder_args,
+        encoder_args=config.training['encoder_args'],
     ).to(device)
     model.eval()
     LOGGER.info(f"Profiling model: {model.__class__.__name__}")

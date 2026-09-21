@@ -190,20 +190,31 @@ training:
     growth: "128"
 
   loss_function: "mse"
+  loss_args: {}
   num_epochs: 1000
   batch_size: 8
   num_workers: 2
   max_steps: 10000
   learning_rate: 0.00001
-  seed: 42  
+  grad_clip_max_norm: 1.0
+  seed: 42
+  drop_last: false
+  use_ddp: true
+  ddp_backend: null
   device: "cuda"
 
   # Checkpointing settings.
   validation_every_steps: 1000
   checkpoint_dir: "results"
   checkpoint_every_steps: 10000
+  num_validation_examples: 1000
+  evaluation_predictions_dir: null
   resume_from_checkpoint: null
+  tag: "test-run"
 
   # Weights & Biases logging settings.
   wandb_project: "euclid-multiprobe-deeplss-training"
   wandb_entity: "euclid-multiprobe-sbi"
+  wandb_run_name: null
+  wandb_mode: null
+  use_wandb: true

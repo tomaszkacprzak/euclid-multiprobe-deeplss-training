@@ -53,12 +53,12 @@ def _setup_ddp(config: Config, requested_device: torch.device | str | None) -> t
     import os
 
     world_size = _ddp_env_world_size()
-    ddp_enabled = bool(config.use_ddp and world_size > 1)
+    ddp_enabled = bool(config.training['use_ddp'] and world_size > 1)
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     rank = int(os.environ.get("RANK", "0"))
 
     if ddp_enabled:
-        backend = config.ddp_backend or ("nccl" if torch.cuda.is_available() else "gloo")
+        backend = config.training['ddp_backend'] or ("nccl" if torch.cuda.is_available() else "gloo")
         if not dist.is_initialized():
             dist.init_process_group(backend=backend)
         rank = dist.get_rank()
@@ -112,10 +112,10 @@ def evaluate(
     target_batches: list[torch.Tensor] = []
     prediction_batches: list[torch.Tensor] = []
     num_examples_seen = 0
-    
+
     for inputs, targets, inds in dataloader:
 
-        # Evaluatate model 
+        # Evaluatate model
         inputs = inputs.to(device=device, dtype=torch.float32)
         targets = targets.to(device=device, dtype=torch.float32)
 
@@ -228,16 +228,16 @@ def _save_evaluation_predictions(
 
 def _evaluation_predictions_path(config: Config, step: int) -> Path | None:
     """Return the run-specific HDF5 path for per-step evaluation arrays, if enabled."""
-    if config.checkpoint_dir is None:
+    if config.training['checkpoint_dir'] is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-step-{step + 1:04d}.h5"
+    return Path(config.training['checkpoint_dir']) / config.training['tag'] / f"evaluation-step-{step + 1:04d}.h5"
 
 
 def _training_evaluation_predictions_path(config: Config, step: int) -> Path | None:
     """Return the run-specific HDF5 path for per-step training evaluation arrays, if enabled."""
-    if config.checkpoint_dir is None:
+    if config.training['checkpoint_dir'] is None:
         return None
-    return Path(config.checkpoint_dir) / config.tag / f"evaluation-training-step-{step + 1:04d}.h5"
+    return Path(config.training['checkpoint_dir']) / config.training['tag'] / f"evaluation-training-step-{step + 1:04d}.h5"
 
 
 def _latest_checkpoint_path(checkpoint_dir: Path) -> Path:
@@ -309,7 +309,8 @@ def init_wandb(config: Config | Mapping[str, Any], wandb_info: Mapping[str, Any]
     When checkpoint metadata contains a W&B run id, reuse it so resumed
     training continues the same run.
     """
-    config_dict = asdict(config) if isinstance(config, Config) else dict(config)
+    full_config = asdict(config) if isinstance(config, Config) else dict(config)
+    config_dict = config.training if isinstance(config, Config) else full_config
     use_wandb = bool(config_dict.get("use_wandb", True))
     wandb_mode = config_dict.get("wandb_mode")
     if not use_wandb or wandb_mode == "disabled":
@@ -326,7 +327,7 @@ def init_wandb(config: Config | Mapping[str, Any], wandb_info: Mapping[str, Any]
         "entity": wandb_entity,
         "name": config_dict.get("wandb_run_name") or config_dict.get("tag"),
         "mode": wandb_mode or "offline",
-        "config": config_dict,
+        "config": full_config,
     }
     if wandb_info_dict.get("id") is not None:
         init_kwargs["id"] = wandb_info_dict["id"]
@@ -367,13 +368,13 @@ def save_checkpoint(
 
 def _prepare_checkpoint_dir(config: Config, *, clear_existing: bool | None = None) -> Path | None:
     """Return the run-specific checkpoint directory, preserving contents when resuming."""
-    if not config.checkpoint_dir:
+    if not config.training['checkpoint_dir']:
         return None
 
     if clear_existing is None:
-        clear_existing = not bool(config.resume_from_checkpoint)
+        clear_existing = not bool(config.training['resume_from_checkpoint'])
 
-    checkpoint_dir = Path(config.checkpoint_dir) / config.tag
+    checkpoint_dir = Path(config.training['checkpoint_dir']) / config.training['tag']
     if checkpoint_dir.exists():
         if not checkpoint_dir.is_dir():
             raise NotADirectoryError(f"Checkpoint path exists and is not a directory: {checkpoint_dir}")
@@ -531,15 +532,15 @@ def train(
     from msfm.onthefly_pipeline import OntheflyPipeline
 
     from .networks.builder import build_encoder, build_loss
-    
 
-    # 
+
+    #
     # Configuration
     #
 
     # read config
     config = _coerce_config(config_or_path)
-    LOGGER.info(f"\n\nTag: {config.tag}\n")
+    LOGGER.info(f"\n\nTag: {config.training['tag']}\n")
 
     # setup ddp
     ddp_enabled, rank, world_size, local_rank, device = _setup_ddp(config, device)
@@ -560,7 +561,7 @@ def train(
     # recompile models
     # torch._dynamo.reset()
 
-    # 
+    #
     # Data loaders
     #
 
@@ -569,30 +570,30 @@ def train(
     # nside_training = 512
     # import numpy as np
     # indices_pixels_healpix = np.unique(indices_pixels_healpix // (1024//nside_training)**2) # assume nested
-   
+
     # use non-reproducible seed, TODO: fix to reproducible
     seed = int(time.time())
-    OntheflyPhysicsModel = load_physics_model_class(config.physics_model)
-    physics_model = OntheflyPhysicsModel(config.forward_model, 
+    OntheflyPhysicsModel = load_physics_model_class(config.training['physics_model'])
+    physics_model = OntheflyPhysicsModel(config.forward_model,
                         scalers=True,
                         device=device,
                         seed=seed,
                         nside=nside_training,
-                        **config.physics_model_args if hasattr(config, "physics_model_args") else {})
+                        **config.training.get('physics_model_args', {}))
     physics_model = physics_model.to(device)
     # physics_model = torch.compile(physics_model, dynamic=True)
 
     # Downsample all maps to the same nside
-    # downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-    #                               nside_base=config.forward_model["analysis"]["n_side_down"], 
+    # downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"],
+    #                               nside_base=config.forward_model["analysis"]["n_side_down"],
     #                               nside_lower=nside_training)
     # downsampler = downsampler.to(device)
     # downsampler = torch.compile(downsampler, dynamic=True)
-    
+
     # Downsample each channel to a different nside
-    # smoother = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-    #                     nside_base=config.forward_model["analysis"]["n_side_down"], 
-    #                     nside_lower=[nside_training]*24, 
+    # smoother = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"],
+    #                     nside_base=config.forward_model["analysis"]["n_side_down"],
+    #                     nside_lower=[nside_training]*24,
     #                     operator="mean").to(device)
 
     def get_loaders(**kwargs):
@@ -600,26 +601,26 @@ def train(
         loader_validation = OntheflyPipeline(**kwargs, validation=True)
         return loader_training, loader_validation
 
-                            
-    loader_training, loader_validation = get_loaders(webds_pattern=config.records_pattern, 
-                                                     batch_size=config.batch_size, 
-                                                     physics_model=physics_model, 
+
+    loader_training, loader_validation = get_loaders(webds_pattern=config.training['records_pattern'],
+                                                     batch_size=config.training['batch_size'],
+                                                     physics_model=physics_model,
                                                      downsampler=None,
                                                      smoother=None,
-                                                     num_workers=config.num_workers)
+                                                     num_workers=config.training['num_workers'])
 
-    # 
+    #
     # Build encoder neural network
     #
- 
-    encoder = build_encoder(config.encoder_name, 
+
+    encoder = build_encoder(config.training['encoder_name'],
                             num_channels=physics_model.num_channels,
-                            embed_dim=config.embed_dim,
+                            embed_dim=config.training['embed_dim'],
                             num_pixels=loader_training.num_pixels,
                             nside=nside_training,
                             nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-                            encoder_args=config.encoder_args if hasattr(config, "encoder_args") else {},
-                            batch_size=config.batch_size,
+                            encoder_args=config.training.get('encoder_args', {}),
+                            batch_size=config.training['batch_size'],
                             indices=indices_pixels_healpix,
                             physics_model=physics_model,
                             device=device)
@@ -627,26 +628,26 @@ def train(
     # encoder = torch.compile(encoder, dynamic=True)
 
     # print some info
-    torchinfo.summary(encoder, 
+    torchinfo.summary(encoder,
                       input_size=(loader_training.batch_size, loader_training.num_pixels, loader_training.num_channels),
                       col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds", "trainable"],
                       col_width=40)
 
-    LOGGER.info(f'Encoder: {config.encoder_name}')    
+    LOGGER.info(f"Encoder: {config.training['encoder_name']}")
 
     #
-    # Loss function 
+    # Loss function
     #
 
-    model_loss = build_loss(config.loss_function,     
+    model_loss = build_loss(config.training['loss_function'],
                       encoder=encoder,
-                      num_targets=physics_model.num_targets, 
-                      embed_dim=config.embed_dim,
-                      batch_size=config.batch_size,
-                      loss_args=config.loss_args if hasattr(config, "loss_args") else {})
+                      num_targets=physics_model.num_targets,
+                      embed_dim=config.training['embed_dim'],
+                      batch_size=config.training['batch_size'],
+                      loss_args=config.training.get('loss_args', {}))
     model_loss = model_loss.to(device)
     # loss = torch.compile(loss)
-    LOGGER.info(f'Loss function: {config.loss_function}')
+    LOGGER.info(f"Loss function: {config.training['loss_function']}")
 
 
     #
@@ -655,8 +656,8 @@ def train(
     if ddp_enabled and any(parameter.requires_grad for parameter in model_loss.parameters()):
         ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank} if device.type == "cuda" else {}
         model_loss = DDP(model_loss, **ddp_kwargs)
-    
-    # 
+
+    #
     # Optimizer
     #
 
@@ -665,7 +666,7 @@ def train(
     # encoder separately duplicates every encoder parameter in the optimizer.
     optimizer = torch.optim.AdamW(
         model_loss.parameters(),
-        lr=config.learning_rate,
+        lr=config.training['learning_rate'],
         weight_decay=1e-4,
     )
     LOGGER.info('Optimizer:\n' + str(optimizer) + '\n')
@@ -679,23 +680,23 @@ def train(
     session_step = 0
     train_losses: list[float] = []
     validation_losses: list[float] = []
-    
+
     checkpoint_wandb_info = None
-    if config.resume_from_checkpoint:
-        
+    if config.training['resume_from_checkpoint']:
+
         # if checkpoint does not exist, set resume_from_checkpoint to None and start the run from scratch
-        if not Path(config.resume_from_checkpoint).exists():
-            LOGGER.warning(f"Checkpoint file {config.resume_from_checkpoint} does not exist")
-            config.resume_from_checkpoint = None
-        
+        if not Path(config.training['resume_from_checkpoint']).exists():
+            LOGGER.warning(f"Checkpoint file {config.training['resume_from_checkpoint']} does not exist")
+            config.training['resume_from_checkpoint'] = None
+
         else:
             step, train_losses, validation_losses = load_checkpoint(
-                config.resume_from_checkpoint,
+                config.training['resume_from_checkpoint'],
                 model_loss,
                 optimizer,
                 device,
             )
-            checkpoint_wandb_info = _wandb_info_from_checkpoint(config.resume_from_checkpoint)
+            checkpoint_wandb_info = _wandb_info_from_checkpoint(config.training['resume_from_checkpoint'])
 
     LOGGER.info("checkpoint_wandb_info: " + str(checkpoint_wandb_info))
 
@@ -703,7 +704,7 @@ def train(
     _write_reproducibility_config(checkpoint_dir, config)
     _ddp_barrier()
 
-    # 
+    #
     # Training loop
     #
 
@@ -714,15 +715,18 @@ def train(
     train_timer = Timer()
 
     # Training loop.
-    LOGGER.info(f'Training loop starting with num_epochs={config.num_epochs} batch_size={config.batch_size}')
-    for _epoch in range(config.num_epochs or 10**12):
+    LOGGER.info(
+        f"Training loop starting with num_epochs={config.training['num_epochs']} "
+        f"batch_size={config.training['batch_size']}"
+    )
+    for _epoch in range(config.training['num_epochs'] or 10**12):
 
         # epoch_batches = training_batches if _epoch == 0 else loader_training
         # with DeviceTraceMode(only_cpu=True):
         with torch.profiler.record_function("training_loop"):
 
             LOGGER.timer.start("10steps")
-            train_timer.start()   
+            train_timer.start()
             for batch in loader_training:
 
                 step += 1
@@ -745,7 +749,7 @@ def train(
                 LOGGER.debug('Running forward pass')
                 train_loss = model_loss(maps, labels)
                 LOGGER.debug('Running loss')
-                
+
 
                 #
                 # Backward pass
@@ -765,26 +769,26 @@ def train(
                 #
 
                 LOGGER.debug('Clipping gradients')
-                clip_grad_norm_(model_loss.parameters(), config.grad_clip_max_norm)
+                clip_grad_norm_(model_loss.parameters(), config.training['grad_clip_max_norm'])
 
                 LOGGER.debug('Running optimizer step')
                 optimizer.step()
-                
+
                 #
                 # Step housekeeping
-                # 
+                #
 
                 # every step housekeeping
                 LOGGER.debug('Running housekeeping')
                 train_losses.append(train_loss.detach().cpu())
-                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.batch_size
+                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.training['batch_size']
                 train_timer.stop()
-                
+
                 current_learning_rate = optimizer.param_groups[0]["lr"]
                 global_train_loss = reduce_mean(train_loss)
                 if run is not None:
 
-                    # IO statistics    
+                    # IO statistics
                     # This should be at the end of the step to not dilute the timing/rates, but the difference should be negligible.
                     now_t = time.perf_counter()
                     now_read, now_write = tree_io_counters()
@@ -819,7 +823,7 @@ def train(
                         f'Train loss epoch={_epoch:>3d} step={step:>5d} '
                         f'loss={train_loss: .8e} time_elapsed={LOGGER.timer.elapsed("10steps")}')
                     LOGGER.timer.reset("10steps")
-                
+
                 # infrequent metrics
                 if step % 100 == 0:
 
@@ -833,7 +837,7 @@ def train(
                 # Checkpoint management
                 #
 
-                if _is_main_process() and config.checkpoint_dir and config.checkpoint_every_steps and step % config.checkpoint_every_steps == 0:
+                if _is_main_process() and config.training['checkpoint_dir'] and config.training['checkpoint_every_steps'] and step % config.training['checkpoint_every_steps'] == 0:
 
                     LOGGER.info(f'Saving checkpoint at step {step}')
 
@@ -861,7 +865,7 @@ def train(
                 # Validation after each epoch
                 #
 
-                if _is_main_process() and config.validation_every_steps and step % config.validation_every_steps == 0:
+                if _is_main_process() and config.training['validation_every_steps'] and step % config.training['validation_every_steps'] == 0:
 
                     LOGGER.info(f'Running validation at step {step}')
 
@@ -871,7 +875,7 @@ def train(
                         model_loss_eval,
                         loader_validation,
                         device,
-                        num_examples=config.num_validation_examples,
+                        num_examples=config.training['num_validation_examples'],
                         predictions_path=validation_predictions_path,
                     )
                     if validation_metrics is not None:
@@ -884,7 +888,7 @@ def train(
                                 model_loss_eval,
                                 loader_training,
                                 device,
-                                num_examples=config.num_validation_examples,
+                                num_examples=config.training['num_validation_examples'],
                                 predictions_path=training_predictions_path,
                             )
 
@@ -895,7 +899,7 @@ def train(
                                 "learning_rate": optimizer.param_groups[0]["lr"],
                             }
                             wandb.log(validation_log, step=step)
-                            
+
                             plots_log = {}
                             if validation_predictions_path is not None and validation_predictions_path.exists():
                                 fig = plot_evaluation_file(
@@ -921,15 +925,15 @@ def train(
 
 
                 # break dataloader loop if max steps is reached
-                if config.max_steps is not None and session_step >= config.max_steps:
+                if config.training['max_steps'] is not None and session_step >= config.training['max_steps']:
                     LOGGER.debug('Breaking training loop due to max steps')
                     break
 
                 train_timer.start()
                 LOGGER.debug('End of step')
-   
+
             # break epoch if max steps is reached
-            if config.max_steps is not None and session_step >= config.max_steps:
+            if config.training['max_steps'] is not None and session_step >= config.training['max_steps']:
                 break
 
         LOGGER.info(f'Epoch {_epoch} completed')
@@ -1235,7 +1239,7 @@ def print_model_device(model):
 
 #
 # Timer
-# 
+#
 
 class Timer:
 
@@ -1257,7 +1261,7 @@ class Timer:
         else:
             self.elapsed_time += time.perf_counter() - self.start_time
             self.running = False
-        
+
     def elapsed(self):
         if self.running:
             self.elapsed_time += time.perf_counter() - self.start_time
@@ -1269,7 +1273,7 @@ class Timer:
 
 #
 # DDP helpers
-# 
+#
 
 def reduce_mean(x: torch.Tensor) -> torch.Tensor:
     """Return ``x`` averaged across ranks, or a detached local copy outside DDP."""
@@ -1291,7 +1295,7 @@ def load_physics_model_class(model_name: str):
 
     class_names = {'onthefly_linear': 'OntheflyPhysicsModelLinear',
                    'onthefly_linkappa': 'OntheflyPhysicsModelLinkappa'}
-    
+
     if model_name not in class_names:
         raise ValueError(f"Invalid model name: {model_name}")
 

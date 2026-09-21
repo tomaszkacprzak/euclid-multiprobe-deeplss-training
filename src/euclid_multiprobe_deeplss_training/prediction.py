@@ -18,7 +18,7 @@ LOGGER = get_logger(__file__)
 
 
 def _extra_mapping(config: Config, name: str) -> dict[str, Any]:
-    value = config.extra.get(name, {})
+    value = config.training.get(name, {})
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping.")
     return dict(value)
@@ -37,50 +37,50 @@ def predict(
     """Predict every example from the validation split and write an HDF5 file."""
     from msfm.onthefly_pipeline import OntheflyPipeline
 
-    evaluation_batch_size = config.batch_size if batch_size is None else batch_size
+    evaluation_batch_size = config.training['batch_size'] if batch_size is None else batch_size
     if evaluation_batch_size <= 0:
         raise ValueError("batch_size must be positive.")
 
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     indices = load_pixel_indices(config.forward_model)
     nside = config.forward_model["analysis"]["n_side"]
-    physics_model_class = load_physics_model_class(config.physics_model)
+    physics_model_class = load_physics_model_class(config.training['physics_model'])
     physics_model = physics_model_class(
         config.forward_model,
         scalers=True,
         device=device,
         seed=int(time.time()),
         nside=nside,
-        **config.physics_model_args,
+        **config.training['physics_model_args'],
     ).to(device)
     validation_loader = OntheflyPipeline(
-        webds_pattern=config.records_pattern,
+        webds_pattern=config.training['records_pattern'],
         batch_size=evaluation_batch_size,
         physics_model=physics_model,
         downsampler=None,
         smoother=None,
-        num_workers=config.num_workers,
+        num_workers=config.training['num_workers'],
         validation=True,
     )
 
     encoder = build_encoder(
-        config.encoder_name,
+        config.training['encoder_name'],
         num_channels=physics_model.num_channels,
-        embed_dim=config.embed_dim,
+        embed_dim=config.training['embed_dim'],
         num_pixels=validation_loader.num_pixels,
         nside=nside,
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
-        encoder_args=config.encoder_args,
+        encoder_args=config.training['encoder_args'],
         batch_size=evaluation_batch_size,
         indices=indices,
         physics_model=physics_model,
         device=device,
     ).to(device)
     model = build_loss(
-        config.loss_function,
+        config.training['loss_function'],
         encoder=encoder,
         num_targets=physics_model.num_targets,
-        embed_dim=config.embed_dim,
+        embed_dim=config.training['embed_dim'],
         batch_size=evaluation_batch_size,
         loss_args=_extra_mapping(config, "loss_args"),
     ).to(device)
