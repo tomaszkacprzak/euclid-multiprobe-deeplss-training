@@ -233,7 +233,7 @@ training:
 
 likelihood:
 
-  model: "mdn"
+  model_type: "mdn"
   model_args:
     num_components: 10
     num_layers: 2
