@@ -24,11 +24,11 @@ LOGGER = logger.get_logger(__file__)
 
 def sample_astro_parameters_latin_hypercube(astro_params, seed, n_examples, astro_priors):
 
-    from scipy.stats.qmc import LatinHypercube
+    from scipy.stats import qmc
 
-    latin_sampler = LatinHypercube(d=len(astro_params), seed=seed)
+    latin_sampler = qmc.LatinHypercube(d=len(astro_params), seed=seed)
     unscaled_samples = latin_sampler.random(n_examples)
-    astro_samples = latin_sampler.scale(unscaled_samples, l_bounds=astro_priors[:, 0], u_bounds=astro_priors[:, 1])
+    astro_samples = qmc.scale(unscaled_samples, l_bounds=astro_priors[:, 0], u_bounds=astro_priors[:, 1])
     return astro_samples.astype(np.float32)
 
 
