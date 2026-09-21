@@ -71,7 +71,7 @@ def calccls(
         raise TypeError("The optional 'calccls' configuration section must be a mapping.")
     lmax = int(cls_config.get("lmax", raw_config.get("lmax", analysis.get("l_max", 3 * nside))))
 
-    physics_model_class = load_physics_model_class(config.physics_model)
+    physics_model_class = load_physics_model_class(config.training['physics_model'])
     physics_model = physics_model_class(
         config.forward_model,
         scalers=True,
@@ -80,12 +80,12 @@ def calccls(
         nside=nside,
     ).to(run_device)
     loader = OntheflyPipeline(
-        webds_pattern=config.records_pattern,
-        batch_size=config.batch_size,
+        webds_pattern=config.training['records_pattern'],
+        batch_size=config.training['batch_size'],
         physics_model=physics_model,
         downsampler=None,
         smoother=None,
-        num_workers=config.num_workers,
+        num_workers=config.training['num_workers'],
     )
 
     output_path = Path(output_path)
@@ -121,7 +121,7 @@ def calccls(
 
     parameter_names = [str(name) for name in physics_model.params]
     model_information = {
-        "physics_model": config.physics_model,
+        "physics_model": config.training['physics_model'],
         "shape_noise_std": _find_config_value(config.forward_model, "shape_noise_std"),
         "forward_model": config.forward_model,
     }
@@ -662,10 +662,10 @@ def _coerce_config(
 ) -> tuple[Config, dict[str, Any]]:
     """Normalize config input while retaining calccls-specific settings."""
     if isinstance(config_or_path, Config):
-        raw_config = {**config_or_path.extra}
-        for field_name in config_or_path.__dataclass_fields__:
-            if field_name != "extra":
-                raw_config[field_name] = getattr(config_or_path, field_name)
+        raw_config = {
+            "forward_model": config_or_path.forward_model,
+            "training": config_or_path.training,
+        }
         return config_or_path, raw_config
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)

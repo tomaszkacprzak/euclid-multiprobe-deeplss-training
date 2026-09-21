@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,100 +15,43 @@ ConfigPaths = ConfigPath | Sequence[ConfigPath]
 
 @dataclass(slots=True)
 class Config:
-    """Normalized application configuration.
+    """The two sections of the application configuration file.
 
-    Training options are read from the master configuration's ``training``
-    section. Flat keys remain supported for programmatic callers, while keys
-    in ``training`` take precedence when both forms are present. The optional
-    ``model`` and ``physics_model_args`` subsections are also supported. The
-    top-level ``forward_model`` section is retained as part of the normalized
-    configuration.
+    Defaults belong in ``configs/example.yaml`` rather than in this Python
+    representation.  Consequently, consumers read training options from the
+    ``training`` mapping exactly as they were loaded from YAML.
     """
 
-    records_pattern: str = ""
-    encoder_name: str = "nested_transformer"
-    encoder_args: dict[str, Any] = field(default_factory=dict)
-    embed_dim: int = 64
-    forward_model: dict[str, Any] = field(default_factory=dict)
-    physics_model: str = "onthefly_linear"
-    physics_model_args: dict[str, Any] = field(default_factory=dict)
-    loss_function: str = "mse"
-    loss_args: dict[str, Any] = field(default_factory=dict)
-    batch_size: int = 32
-    num_epochs: int | None = 1
-    max_steps: int | None = None
-    learning_rate: float = 1.0e-3
-    grad_clip_max_norm: float = 1.0
-    num_workers: int = 1
-    checkpoint_dir: str | None = None
-    checkpoint_every_steps: int = 0
-    validation_every_steps: int | None = None
-    num_validation_examples: int = 1000
-    evaluation_predictions_dir: str | None = None
-    resume_from_checkpoint: str | None = None
-    tag: str = "test-run"
-    wandb_project: str | None = None
-    wandb_run_name: str | None = None
-    wandb_mode: str | None = None
-    use_wandb: bool = True
-    seed: int = 0
-    drop_last: bool = False
-    in_channels: int = 1
-    hidden_channels: int = 64
-    num_targets: int = 1
-    num_blocks: int = 2
-    dropout: float = 0.0
-    use_ddp: bool = True
-    ddp_backend: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    forward_model: dict[str, Any]
+    training: dict[str, Any]
 
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> Config:
-        """Create a validated config object from merged YAML data."""
-        training_config = raw_config.get("training", {})
-        if training_config is None:
-            training_config = {}
-        if not isinstance(training_config, Mapping):
-            raise TypeError("The 'training' configuration section must be a mapping.")
+        """Create a config from the two required top-level mappings."""
+        sections: dict[str, dict[str, Any]] = {}
+        for name in ("forward_model", "training"):
+            value = raw_config.get(name)
+            if not isinstance(value, Mapping):
+                raise TypeError(f"The '{name}' configuration section must be a mapping.")
+            sections[name] = dict(value)
 
-        # Keep accepting flat mappings for direct Python callers while making
-        # the master configuration's training section authoritative for YAML.
-        normalized = dict(raw_config)
-        normalized.update(training_config)
-        model_config = normalized.get("model", {}) or {}
-        physics_config = normalized.get("physics_model_args", {}) or {}
-        if not isinstance(model_config, Mapping):
-            raise TypeError("The optional 'model' configuration section must be a mapping.")
-
-        names = {item.name for item in fields(cls) if item.name != "extra"}
-        values = {
-            name: normalized[name] if name in normalized else model_config[name]
-            for name in names
-            if name in normalized or name in model_config
-        }
-        for name in names - values.keys():
-            if name in physics_config:
-                values[name] = physics_config[name]
-
-        config = cls(**values)
+        config = cls(**sections)
         config._validate()
-        config.extra = {
-            key: value for key, value in normalized.items() if key not in names and key != "training"
-        }
         return config
 
     def _validate(self) -> None:
-        if self.batch_size <= 0:
+        training = self.training
+        if training["batch_size"] <= 0:
             raise ValueError("batch_size must be positive.")
-        if self.num_epochs is None and self.max_steps is None:
+        if training.get("num_epochs") is None and training.get("max_steps") is None:
             raise ValueError("Set at least one of num_epochs or max_steps.")
-        if self.learning_rate <= 0.0:
+        if training["learning_rate"] <= 0.0:
             raise ValueError("learning_rate must be positive.")
-        if self.num_workers < 0:
+        if training["num_workers"] < 0:
             raise ValueError("num_workers must be non-negative.")
-        if self.checkpoint_every_steps < 0:
+        if training["checkpoint_every_steps"] < 0:
             raise ValueError("checkpoint_every_steps must be non-negative.")
-        if not isinstance(self.encoder_args, Mapping):
+        if not isinstance(training["encoder_args"], Mapping):
             raise TypeError("encoder_args must be a mapping.")
 
 
@@ -151,21 +94,8 @@ def load_config(paths: ConfigPaths) -> dict[str, Any]:
 
 
 def load_pixel_indices(conf: dict):
-    """Loads the .h5 file that contains the pixel indices associated with the survey like the different patches. That
-    file is generated in notebooks/survey_file_gen/pixel_file.ipynb. If the conf argument is not passed, the default
-    within the directory where this file resides is used.
-
-    Args:
-        conf dict: A dictionary with msfm config.
-
-    Returns:
-        data_vec_pix: data vector pixels including padding in NEST ordering (non-tomographic).
-    """
-
+    """Load the survey pixel indices from the configured HDF5 file."""
     import h5py
+
     with h5py.File(conf["files"]["pixels"], "r") as f:
-        # pixel indices of padded data vector
-        data_vec_pix = f["data_vec"][:]
-
-
-    return data_vec_pix
+        return f["data_vec"][:]

@@ -36,21 +36,21 @@ def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     LOGGER.info(f'Using device: {device}')
     config = _coerce_config(config_or_path)
-    
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
+
+    physics_model = OntheflyPhysicsModelLinear(config.forward_model,
                         scalers=True,
                         device=device).to(device)
 
-    smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"], 
-                        nside_base=config.forward_model["analysis"]["n_side_down"], 
-                        nside_lower=[512]*24, 
+    smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"],
+                        nside_base=config.forward_model["analysis"]["n_side_down"],
+                        nside_lower=[512]*24,
                         operator="mean").to(device)
-    
-    loader = OntheflyPipeline(config.records_pattern, 
-                              config.batch_size, 
-                              physics_model, 
+
+    loader = OntheflyPipeline(config.training['records_pattern'],
+                              config.training['batch_size'],
+                              physics_model,
                               smoothing_model,
-                              num_workers=config.num_workers,
+                              num_workers=config.training['num_workers'],
                               device=device)
 
     batch_stats: list[BatchChannelStats] = []
@@ -129,7 +129,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
             LOGGER.debug(f'Batch {batch_count:>4d} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
 
             if batch_count % 10 == 0:
-                
+
                 time_diff = time_end = time.time() - time_start
                 LOGGER.info(f'Batch {batch_count:>4d}, num_examples_per_second: {batch_count * dataloader.batch_size / time_diff:.2f}')
 
@@ -142,10 +142,10 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
             prof.step()
 
     print_profiler_stats(prof)
-    
+
     return map_stats, label_stats
 
-    
+
 def print_profiler_stats(prof: Any, num_rows=20):
 
     events = prof.key_averages()
@@ -180,7 +180,7 @@ def print_profiler_stats(prof: Any, num_rows=20):
             else 0.0
         )
 
-        
+
 
         print(f"\n================================================================ Event #{i}")
         print(f"Name: {event_attr(evt, 'key', '<unknown>')}")
@@ -197,7 +197,7 @@ def print_profiler_stats(prof: Any, num_rows=20):
         print(f"Self device mem: {event_attr(evt, 'self_device_memory_usage', 0) / 1024**2:.2f} MB")
 
     print()
-    
+
 
 def _summarize_maps(maps: torch.Tensor, *, split: str) -> BatchChannelStats:
 
