@@ -14,6 +14,7 @@ from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+import webdataset
 
 import yaml
 
@@ -22,6 +23,130 @@ from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
+
+def full_sky_to_patch(m, conf, pixel_file, i_z, i_patch, sample):
+
+    n_side = conf["analysis"]["n_side"]
+    n_pix = hp.nside2npix(n_side)
+    data_vec_pix, patches_pix_dict, corresponding_pix_dict, gamma2_signs = pixel_file
+    patches_pix = patches_pix_dict[sample][i_z]
+    corresponding_pix = corresponding_pix_dict[sample][i_z]
+    data_vec_len = len(data_vec_pix)
+    base_patch_pix = patches_pix[0]
+
+    m_patch = np.zeros(n_pix, dtype=m.dtype)
+
+    patch_pix = patches_pix[i_patch]
+
+    # The 90° rots do NOT change the shear, however, the mirroring does,
+    # therefore we have to swap sign of gamma2 for the last 2 patches!
+    m_patch[:] = 0
+    m_patch[base_patch_pix] = m[patch_pix]
+
+    if m.dtype == np.complex128:
+        imag_sign = gamma2_signs[i_patch]
+        LOGGER.debug(f"Using imag sign {imag_sign} for patch index {i_patch}")
+        m_patch = m_patch * 1j * imag_sign # possible sign flip
+
+    m_dv = np.zeros(data_vec_len, dtype=m_patch.dtype)
+    m_dv[corresponding_pix] = m_patch[base_patch_pix]
+
+    # shape (data_vec_len,)
+    return m_dv
+
+
+
+def read_full_sky_bin(conf, full_maps_file, in_map_type, z_bin):
+    n_side = conf["analysis"]["n_side"]
+    n_pix = hp.nside2npix(n_side)
+
+    # load the full sky maps
+    LOGGER.timer.start("load_map")
+    map_dir = f"map/{in_map_type}/{z_bin}"
+    with h5py.File(full_maps_file, "r") as f:
+        map_full = f[map_dir][:]
+
+        # ud_grade if the stored map is at a different resolution than the analysis n_side
+        if map_full.shape[0] != n_pix:
+            map_full = hp.ud_grade(map_full, nside_out=n_side, order_in="RING", order_out="RING", pess=True)
+
+    LOGGER.debug(f"Loaded {map_dir} from {full_maps_file} after {LOGGER.timer.elapsed('load_map')}")
+    return map_full
+
+def convert_kappa_to_gamma_alm(kappa_full_sky, hp_datapath, kappa2gamma_fac, n_side):
+
+    # kappa -> gamma (full sky)
+    kappa_alm = hp.map2alm(
+        kappa_full_sky,
+        use_pixel_weights=True,
+        datapath=hp_datapath,
+    )
+
+    gamma_alm = kappa_alm * kappa2gamma_fac
+    dummy_alm = np.zeros_like(gamma_alm)
+    _, gamma1_full, gamma2_full = hp.alm2map(
+        [dummy_alm, gamma_alm, dummy_alm], nside=n_side
+    )
+
+    return gamma1_full, gamma2_full
+
+def get_kaiser_squires_factors(l_max):
+    """Factors for a spherical Kaiser Squires transformation
+    from eq. (11) in https://academic.oup.com/mnras/article/505/3/4626/6287258
+    """
+    l = hp.Alm.getlm(l_max)[0]
+
+    kappa2gamma_fac = np.where(
+        np.logical_and(l != 1, l != 0),
+        -np.sqrt(((l + 2.0) * (l - 1)) / ((l + 1) * l)),
+        0,
+    )
+    gamma2kappa_fac = np.where(
+        np.logical_and(l != 1, l != 0),
+        1 / kappa2gamma_fac,
+        0,
+    )
+    l_mask_fac = np.where(np.logical_and(l != 1, l != 0), 1.0, 0.0)
+
+    return kappa2gamma_fac, gamma2kappa_fac, l_mask_fac
+
+def get_full_sky_perm(args, conf, cosmo_dir_in, i_perm):
+    with_bary = conf["analysis"]["modelling"]["baryonified"]
+
+    # prepare the full sky input file
+    perm_dir_in = os.path.join(cosmo_dir_in,  f"perm_{i_perm:04d}")
+    full_maps_file = filenames.get_filename_full_maps(perm_dir_in, with_bary=with_bary, version=args.cosmogrid_version)
+
+    return full_maps_file
+
+def get_hard_parameters(conf, cosmo_params_info, i_cosmo):
+    """Get the hard parameters for the given cosmology"""
+    cosmo_params = conf["analysis"]["params"]["cosmo"].copy()
+    baryonified = conf["analysis"]["modelling"]["baryonified"]
+    if baryonified:
+        cosmo_params += conf["analysis"]["params"]["bary"]
+    cosmo = [cosmo_params_info[cosmo_param][i_cosmo] for cosmo_param in cosmo_params]
+    cosmo = np.array(cosmo, dtype=np.float32)
+    return cosmo
+
+def get_filename_webdataset(out_dir, index, tag, simset, with_bary=False, return_pattern=False):
+    fname = get_filename_examples_name(index, tag, simset, with_bary, return_pattern)
+    return os.path.join(out_dir, fname+'.tar')
+
+def get_cosmo_params_info(meta_info_file, simset="grid"):
+    """Returns directories on the level of cosmo_000001 and cosmo_delta_H0_p and so on
+
+    Args:
+        meta_info_file (str): path to the modified (in permutations_list.ipynb) CosmoGridV1 metainfo file
+        simset (str, optional): Either "grid" or "fiducial". Defaults to 'grid'.
+
+    Returns:
+        ndarray: List containing the metainfo for all the unique cosmological parameters
+    """
+    with h5py.File(meta_info_file, "r") as f:
+        params_info = f[f"parameters/{simset}"][:]
+
+    return params_info
 
 @dataclass(frozen=True, slots=True)
 class WebDatasetSettings:
@@ -86,24 +211,6 @@ def parse_indices(value: str | list[int]) -> list[int]:
     return indices
 
 
-def _forward_model_modules() -> SimpleNamespace:
-    """Load modules supplied by the separate forward-model installation."""
-    try:
-        return SimpleNamespace(
-            cosmogrid=import_module("msfm.utils.cosmogrid"),
-            filenames=import_module("msfm.utils.filenames"),
-            lensing=import_module("msfm.utils.lensing"),
-            prior=import_module("msfm.utils.prior"),
-            postprocessing=import_module("msfm.postprocessing"),
-            webdataset=import_module("webdataset"),
-        )
-    except ModuleNotFoundError as error:
-        raise RuntimeError(
-            "The webdataset workflow requires the 'webdataset' and private "
-            "'msfm' forward-model packages. Install them in this environment."
-        ) from error
-
-
 def webdataset_from_config(
     paths: ConfigPaths,
     *,
@@ -156,7 +263,6 @@ def build_webdataset(
     import numpy as np
     import torch
 
-    modules = modules or _forward_model_modules()
     indices = parse_indices(settings.indices)
     output_dir = settings.output_dir / "debug" if settings.debug else settings.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,7 +277,7 @@ def build_webdataset(
     analysis = forward_model["analysis"]
     survey = forward_model["survey"]
     meta_info_file = Path(files["meta_info"])
-    cosmo_params_info = modules.cosmogrid.get_cosmo_params_info(str(meta_info_file), "grid")
+    cosmo_params_info = get_cosmo_params_info(str(meta_info_file), "grid")
     cosmo_dirs = [path.decode() if isinstance(path, bytes) else str(path) for path in cosmo_params_info["path_par"]]
     cosmo_dirs_in = [settings.input_dir / "grid" / path for path in cosmo_dirs]
     n_cosmos = len(cosmo_dirs)
@@ -205,27 +311,27 @@ def build_webdataset(
         with ExitStack() as stack:
             writers = []
             for patch in range(n_patches):
-                filename = modules.filenames.get_filename_webdataset(
+                filename = get_filename_webdataset(
                     str(output_dir),
                     tag=f"{survey['name']}_patch{patch:02d}{settings.file_suffix}",
                     index=index,
                     simset="grid",
                     with_bary=bool(analysis["modelling"]["baryonified"]),
                 )
-                writers.append(stack.enter_context(modules.webdataset.TarWriter(filename, encoder=True)))
+                writers.append(stack.enter_context(webdataset.TarWriter(filename, encoder=True)))
 
             for i_cosmo, cosmo_dir in zip(range(start, stop), cosmo_dirs_in[start:stop], strict=True):
-                cosmo = modules.prior.get_hard_parameters(forward_model, cosmo_params_info, i_cosmo)
+                cosmo = get_hard_parameters(forward_model, cosmo_params_info, i_cosmo)
                 i_sobol = int(cosmo_dir.name[-7:-1])
-                full_maps_file = modules.postprocessing._get_full_sky_perm(args, forward_model, str(cosmo_dir), permutation)
-                full_maps = get_postprocessed_maps(forward_model, full_maps_file, modules=modules)
+                full_maps_file = get_full_sky_perm(args, forward_model, str(cosmo_dir), permutation)
+                full_maps = get_postprocessed_maps(forward_model, full_maps_file)
                 for patch in range(n_patches):
                     stored_maps = []
                     channels = []
                     for map_name in maps_to_store:
                         bins = []
                         for redshift_bin, full_map in enumerate(full_maps[map_name]):
-                            cutout = modules.postprocessing.full_sky_to_patch(
+                            cutout = full_sky_to_patch(
                                 full_map, forward_model, pixel_indices, redshift_bin, patch, sample=samples[map_name]
                             )
                             bins.append(cutout[..., np.newaxis])
@@ -257,17 +363,16 @@ def build_webdataset(
 
 
 def get_postprocessed_maps(
-    forward_model: dict[str, Any], full_maps_file: str | Path, *, modules: SimpleNamespace | None = None
+    forward_model: dict[str, Any], full_maps_file: str | Path, *
 ) -> dict[str, list[Any]]:
     """Read derived full-sky maps for all configured redshift bins."""
     import numpy as np
 
-    modules = modules or _forward_model_modules()
     analysis = forward_model["analysis"]
     survey = forward_model["survey"]
     n_side = int(analysis["n_side"])
     hp_data = str(forward_model["files"]["healpy_data"])
-    kappa_to_gamma, _, _ = modules.lensing.get_kaiser_squires_factors(3 * n_side - 1)
+    kappa_to_gamma, _, _ = get_kaiser_squires_factors(3 * n_side - 1)
     maps: dict[str, list[np.ndarray]] = {name: [] for name in ("kg", "ia", "gg", "ga", "gd", "ds", "dg", "qg")}
 
     for redshift_bin in survey["WL"]["z_bins"]:
@@ -276,7 +381,7 @@ def get_postprocessed_maps(
         ## Lensing convergence
         ##
 
-        kg = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "kg", redshift_bin)
+        kg = read_full_sky_bin(forward_model, full_maps_file, "kg", redshift_bin)
         maps["kg"].append(kg.astype(np.float32))
 
         ##
@@ -284,7 +389,7 @@ def get_postprocessed_maps(
         ##
 
         # kappa to shear conversion for intrinsic alignment
-        ia = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "ia", redshift_bin)
+        ia = read_full_sky_bin(forward_model, full_maps_file, "ia", redshift_bin)
         maps["ia"].append(ia.astype(np.float32))
 
         ##
@@ -292,7 +397,7 @@ def get_postprocessed_maps(
         ##
 
         # source sample galaxy counts for shape noise
-        ds = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
+        ds = read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
         maps["ds"].append(ds.astype(np.float32))
 
         ##
@@ -300,7 +405,7 @@ def get_postprocessed_maps(
         ##
 
         # kappa to shear conversion for lensing signal
-        g1, g2 = modules.lensing.kappa_to_gamma(kg, hp_data, kappa_to_gamma, n_side)
+        g1, g2 = convert_kappa_to_gamma_alm(kg, hp_data, kappa_to_gamma, n_side)
         maps["gg"].append((g1 + 1j * g2).astype(np.complex64))
         
         ##
@@ -308,7 +413,7 @@ def get_postprocessed_maps(
         ##
 
         # kappa to shear conversion for intrinsic alignment
-        g1, g2 = modules.lensing.kappa_to_gamma(ia, hp_data, kappa_to_gamma, n_side)
+        g1, g2 = convert_kappa_to_gamma_alm(ia, hp_data, kappa_to_gamma, n_side)
         ga = g1 + 1j * g2
         maps["ga"].append(ga.astype(np.complex64))
         
@@ -328,7 +433,7 @@ def get_postprocessed_maps(
         ## Galaxy counts
         ##
 
-        dg = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
+        dg = read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
         maps["dg"].append(dg.astype(np.float32))
 
         ##
