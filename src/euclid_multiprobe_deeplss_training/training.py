@@ -998,7 +998,11 @@ def train_from_config(
         "wandb_mode": wandb_mode,
         "tag": tag,
     }
+
     training_config = raw_config.setdefault("training", {})
+    training_config.setdefault('grad_clip_max_norm', 1.0)
+    training_config.setdefault('use_ddp', True)
+
     if not isinstance(training_config, dict):
         raise TypeError("The 'training' configuration section must be a mapping.")
     training_config.update({key: value for key, value in overrides.items() if value is not None})

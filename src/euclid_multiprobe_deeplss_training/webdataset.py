@@ -281,18 +281,16 @@ def webdataset_from_config(
     config = Config.from_mapping(raw_config)
     print('config', config)
 
-    webdataset_default = {
-          "input_dir": "/capstor/store/cscs/swissai/a0158/tomaszk/CosmoGridV1",
-          "output_dir": "/capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/webdataset",
-          "indices": "0",
-          "cosmogrid_version": "1.1",
-          "file_suffix": "",
-          "max_sleep": 0,
-          "n_cosmos_per_file": 25,
-          "debug": False
-    }
+    configured = config.forward_model.get("webdataset", {})
+    configured.setdefault("input_dir", "/capstor/store/cscs/swissai/a0158/tomaszk/CosmoGridV1")
+    configured.setdefault("output_dir", "/capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/webdataset")
+    configured.setdefault("indices", "0")
+    configured.setdefault("cosmogrid_version", "1.1")
+    configured.setdefault("file_suffix", "")
+    configured.setdefault("max_sleep", 0)
+    configured.setdefault("n_cosmos_per_file", 25)
+    configured.setdefault("debug", False)
 
-    configured = config.forward_model.get("webdataset", webdataset_default)
     if not isinstance(configured, dict):
         raise TypeError("forward_model.webdataset must be a mapping.")
     print('configured', configured)
