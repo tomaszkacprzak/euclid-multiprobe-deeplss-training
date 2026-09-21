@@ -26,8 +26,6 @@ class Config:
     """
 
     records_pattern: str = ""
-    model_name: str = "nested_transformer"
-    model_args: dict[str, Any] = field(default_factory=dict)
     encoder_name: str = "nested_transformer"
     encoder_args: dict[str, Any] = field(default_factory=dict)
     embed_dim: int = 64
