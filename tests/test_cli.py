@@ -62,6 +62,16 @@ def test_train_command_passes_cli_overrides(monkeypatch) -> None:
     ]
 
 
+def test_train_command_passes_multiple_configs(monkeypatch) -> None:
+    calls = []
+    fake_training = types.ModuleType("euclid_multiprobe_deeplss_training.training")
+    fake_training.train_from_config = lambda config_path, **_kwargs: calls.append(config_path)
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.training", fake_training)
+
+    assert main(["--config", "base.yaml", "override.yaml", "train"]) == 0
+    assert calls == [["base.yaml", "override.yaml"]]
+
+
 def test_predict_command_passes_cli_arguments(monkeypatch) -> None:
     calls = []
     fake_prediction = types.ModuleType("euclid_multiprobe_deeplss_training.prediction")

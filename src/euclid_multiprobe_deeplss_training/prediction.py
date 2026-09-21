@@ -10,14 +10,15 @@ from typing import Any
 import torch
 
 from .networks.builder import build_encoder, build_loss
-from .training import TrainingConfig, load_physics_model_class
+from .training import load_physics_model_class
+from .utils.config import Config, ConfigPaths, config_paths
 from .utils.config import load_config, load_pixel_indices, with_forward_model_config
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
 
-def _extra_mapping(config: TrainingConfig, name: str) -> dict[str, Any]:
+def _extra_mapping(config: Config, name: str) -> dict[str, Any]:
     value = config.extra.get(name, {})
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping.")
@@ -26,7 +27,7 @@ def _extra_mapping(config: TrainingConfig, name: str) -> dict[str, Any]:
 
 @torch.no_grad()
 def predict(
-    config: TrainingConfig,
+    config: Config,
     *,
     checkpoint: str | Path,
     output_file: str | Path,
@@ -139,7 +140,7 @@ def predict(
 
 
 def predict_from_config(
-    config_path: str | Path,
+    config_path: ConfigPaths,
     *,
     checkpoint: str | Path,
     output_file: str | Path,
@@ -148,10 +149,10 @@ def predict_from_config(
     device: torch.device | str | None = None,
 ) -> Path:
     """Load a training config and predict its complete validation set."""
-    config_path = Path(config_path)
-    raw_config = with_forward_model_config(load_config(config_path), config_path.parent)
+    paths = config_paths(config_path)
+    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
     return predict(
-        TrainingConfig.from_mapping(raw_config),
+        Config.from_mapping(raw_config),
         checkpoint=checkpoint,
         output_file=output_file,
         batch_size=batch_size,
