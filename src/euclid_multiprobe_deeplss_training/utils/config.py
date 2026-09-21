@@ -6,6 +6,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from euclid_multiprobe_deeplss_training.utils.logger import get_logger
+
+LOGGER = get_logger(__file__)
 
 import yaml
 
@@ -115,12 +118,91 @@ def load_config(paths: ConfigPaths) -> dict[str, Any]:
         if not isinstance(loaded, dict):
             raise TypeError(f"The YAML config {path} must load to a mapping.")
         merged = _merge_mappings(merged, loaded)
+    print('merged', merged)
     return merged
 
+def load_pixel_file(conf):
+    """Loads the .h5 file that contains the pixel indices associated with the survey like the different patches. That
+    file is generated in notebooks/survey_file_gen/pixel_file.ipynb. If the conf argument is not passed, the default
+    within the directory where this file resides is used.
 
-def load_pixel_indices(conf: dict):
-    """Load the survey pixel indices from the configured HDF5 file."""
+    Args:
+        conf (str, dict, optional): Can be either a string (a config.yaml is read in), a dictionary (the config is
+            passed through) or None (the default config is loaded). The relative paths are stored here. Defaults to
+            None.
+
+    Returns:
+        data_vec_pix: data vector pixels including padding in NEST ordering (non-tomographic).
+        patches_pix_dict: For "WL" (tomographic) and "GC" (non-tomographic), four patch indices in RING
+            ordering to cut out from the full sky maps.
+        corresponding_pix_dict: For "WL" (tomographic) and "GC" (non-tomographic), needed to convert the
+            pixels in RING ordering to NEST inside the datavector.
+        gamma2_signs: Signs for gamma2 that come from mirroring the survey patch, needed for WL only.
+    """
+
     import h5py
+    import os
 
-    with h5py.File(conf["files"]["pixels"], "r") as f:
-        return f["data_vec"][:]
+    if os.path.isabs(conf["files"]["pixels"]):
+        pixel_file = conf["files"]["pixels"]
+    else:
+        file_dir = os.path.dirname(__file__)
+        repo_dir = os.path.abspath(os.path.join(file_dir, "../.."))
+        pixel_file = os.path.join(repo_dir, conf["files"]["pixels"])
+    LOGGER.debug(f"Loading the pixel file from {pixel_file}")
+
+    with h5py.File(pixel_file, "r") as f:
+        # pixel indices of padded data vector
+        data_vec_pix = f["data_vec"][:]
+
+        # WL sample: weak lensing
+        wl_tomo_patches_pix = []
+        wl_tomo_corresponding_pix = []
+        for z_bin in conf["survey"]["WL"]["z_bins"]:
+
+            # shape (n_bins, pix_in_bin)
+            dset = f"WL/patches/{z_bin}"
+
+            assert dset in f.keys(), f"Dataset {dset} not found in {pixel_file}"
+
+            patches_pix = f[dset][:]
+            # shape (pix_in_bin,)
+
+            dset = f"WL/patch_to_data_vec/{z_bin}"
+            assert dset in f.keys(), f"Dataset {dset} not found in {pixel_file}"
+            corresponding_pix = f[dset][:]
+
+            wl_tomo_patches_pix.append(patches_pix)
+            wl_tomo_corresponding_pix.append(corresponding_pix)
+
+        # to correct the shear for patch cut outs that have been mirrored
+        gamma2_signs = f["WL/gamma_2_sign"][:]
+
+        # GC sample: galaxy clustering
+        gc_tomo_patches_pix = []
+        gc_tomo_corresponding_pix = []
+        for z_bin in conf["survey"]["GC"]["z_bins"]:
+
+            dset = f"GC/patches/{z_bin}"
+            assert dset in f.keys(), f"Dataset {dset} not found in {pixel_file}"
+            patches_pix = f[dset][:]
+
+            dset = f"GC/patch_to_data_vec/{z_bin}"
+            assert dset in f.keys(), f"Dataset {dset} not found in {pixel_file}"
+            corresponding_pix = f[dset][:]
+
+            gc_tomo_patches_pix.append(patches_pix)
+            gc_tomo_corresponding_pix.append(corresponding_pix)
+
+    LOGGER.info(f"Loaded the pixel file {pixel_file}")
+
+    # package into dictionaries
+    patches_pix_dict = {}
+    patches_pix_dict["WL"] = wl_tomo_patches_pix
+    patches_pix_dict["GC"] = gc_tomo_patches_pix
+
+    corresponding_pix_dict = {}
+    corresponding_pix_dict["WL"] = wl_tomo_corresponding_pix
+    corresponding_pix_dict["GC"] = gc_tomo_corresponding_pix
+
+    return data_vec_pix, patches_pix_dict, corresponding_pix_dict, gamma2_signs

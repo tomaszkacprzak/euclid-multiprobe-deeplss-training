@@ -13,6 +13,7 @@ forward_model:
     max_sleep: 120
     n_cosmos_per_file: 25
     debug: false
+  
   dirs:
     # absolute on Clariden
     catalog: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F

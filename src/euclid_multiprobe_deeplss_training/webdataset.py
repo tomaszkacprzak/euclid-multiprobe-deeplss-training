@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from .utils.config import Config, ConfigPaths, load_config, load_pixel_indices
+from .utils.config import Config, ConfigPaths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -219,6 +219,7 @@ class WebDatasetSettings:
         """Validate and normalize the YAML workflow settings."""
         missing = [name for name in ("input_dir", "output_dir") if not values.get(name)]
         if missing:
+            print('values', values)
             raise ValueError("Missing forward_model.webdataset setting(s): " + ", ".join(missing))
         settings = cls(
             input_dir=Path(values["input_dir"]),
@@ -280,10 +281,25 @@ def webdataset_from_config(
     from ``forward_model.webdataset`` in the merged YAML configuration.
     """
     raw_config = load_config(paths)
+    print('raw_config', raw_config)
     config = Config.from_mapping(raw_config)
-    configured = config.forward_model.get("webdataset", {})
+    print('config', config)
+
+    webdataset_default = {
+          "input_dir": "/capstor/store/cscs/swissai/a0158/tomaszk/CosmoGridV1",
+          "output_dir": "/capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/webdataset",
+          "indices": "0",
+          "cosmogrid_version": "1.1",
+          "file_suffix": "",
+          "max_sleep": 0,
+          "n_cosmos_per_file": 25,
+          "debug": False
+    }
+
+    configured = config.forward_model.get("webdataset", webdataset_default)
     if not isinstance(configured, dict):
         raise TypeError("forward_model.webdataset must be a mapping.")
+    print('configured', configured)
     settings = WebDatasetSettings.from_mapping(configured)
     overrides = {
         "input_dir": Path(input_dir) if input_dir is not None else None,
@@ -296,8 +312,13 @@ def webdataset_from_config(
         "debug": debug,
     }
     settings = replace(settings, **{key: value for key, value in overrides.items() if value is not None})
+    print('settings', settings)
+
     # Validate values supplied as overrides as well as values read from YAML.
     settings = WebDatasetSettings.from_mapping({name: getattr(settings, name) for name in settings.__dataclass_fields__})
+
+    
+    print('raw_config', raw_config)
     return build_webdataset(config.forward_model, settings, raw_config=raw_config)
 
 
@@ -333,13 +354,13 @@ def build_webdataset(
     meta_info_file = Path(files["meta_info"])
     cosmo_params_info = get_cosmo_params_info(str(meta_info_file), "grid")
     cosmo_dirs = [path.decode() if isinstance(path, bytes) else str(path) for path in cosmo_params_info["path_par"]]
-    cosmo_dirs_in = [settings.input_dir / "grid" / path for path in cosmo_dirs]
+    cosmo_dirs_in = [settings.input_dir / path for path in cosmo_dirs]
     n_cosmos = len(cosmo_dirs)
     if n_cosmos % settings.n_cosmos_per_file:
         raise ValueError(f"{n_cosmos} cosmologies cannot be divided into files of {settings.n_cosmos_per_file}.")
 
     # Load patch lookup arrays and collect the configured map channel names.
-    pixel_indices = load_pixel_indices(forward_model)
+    pixel_indices = load_pixel_file(forward_model)
     n_patches = int(analysis["n_patches"])
     n_perms = int(analysis["grid"]["n_perms_per_cosmo"])
     maps_to_store = survey["WL"]["map_types"]["onthefly_store"] + survey["GC"]["map_types"]["onthefly_store"]
@@ -369,7 +390,7 @@ def build_webdataset(
             # respective tar archives.
             for i_cosmo, cosmo_dir in zip(range(start, stop), cosmo_dirs_in[start:stop], strict=True):
                 cosmo = get_hard_parameters(forward_model, cosmo_params_info, i_cosmo)
-                i_sobol = int(cosmo_dir.name[-7:-1])
+                i_sobol = int(cosmo_dir.name.split('_')[-1])
                 full_maps_file = get_full_sky_perm(settings.cosmogrid_version, forward_model, str(cosmo_dir), permutation)
                 full_maps = get_postprocessed_maps(forward_model, full_maps_file)
                 for patch in range(n_patches):
