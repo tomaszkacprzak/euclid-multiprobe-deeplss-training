@@ -72,6 +72,34 @@ def test_train_command_passes_multiple_configs(monkeypatch) -> None:
     assert calls == [["base.yaml", "override.yaml"]]
 
 
+def test_webdataset_command_passes_config_and_overrides(monkeypatch) -> None:
+    calls = []
+    fake_webdataset = types.ModuleType("euclid_multiprobe_deeplss_training.webdataset")
+
+    def fake_webdataset_from_config(config_path, **kwargs):
+        calls.append((config_path, kwargs))
+
+    fake_webdataset.webdataset_from_config = fake_webdataset_from_config
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.webdataset", fake_webdataset)
+
+    assert main([
+        "--config", "base.yaml", "override.yaml", "webdataset",
+        "--output-dir", "records", "--indices", "3>5", "--max-sleep", "0",
+    ]) == 0
+    assert calls == [
+        (["base.yaml", "override.yaml"], {
+            "input_dir": None,
+            "output_dir": "records",
+            "indices": "3>5",
+            "cosmogrid_version": None,
+            "file_suffix": None,
+            "max_sleep": 0.0,
+            "n_cosmos_per_file": None,
+            "debug": None,
+        })
+    ]
+
+
 def test_predict_command_passes_cli_arguments(monkeypatch) -> None:
     calls = []
     fake_prediction = types.ModuleType("euclid_multiprobe_deeplss_training.prediction")

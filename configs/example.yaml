@@ -2,6 +2,17 @@ forward_model:
 
   # contains the configuration parameters of the forward model pipeline
   master_seed: 4242
+  # Settings used by the `webdataset` command. Command-line flags can override
+  # these values for an individual run.
+  webdataset:
+    input_dir: /capstor/store/cscs/swissai/a0158/tomaszk/CosmoGridV1
+    output_dir: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/webdataset
+    indices: "0"
+    cosmogrid_version: "1.1"
+    file_suffix: ""
+    max_sleep: 120
+    n_cosmos_per_file: 25
+    debug: false
   dirs:
     # absolute on Clariden
     catalog: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F

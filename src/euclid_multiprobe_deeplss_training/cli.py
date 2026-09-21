@@ -57,53 +57,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     webdataset_parser.add_argument(
-        "--dir_in",
+        "--input-dir",
         type=str,
-        required=True,
-        help="input root dir of the full sky CosmoGrid projections",
+        default=None,
+        help="Override the input root directory from the configuration.",
     )
     webdataset_parser.add_argument(
-        "--dir_out",
+        "--output-dir",
         type=str,
-        required=True,
-        help="output root dir of the forward-modeled survey footprints",
+        default=None,
+        help="Override the output root directory from the configuration.",
     )
     webdataset_parser.add_argument(
-        "--config",
+        "--cosmogrid-version",
         type=str,
-        default="configs/config.yaml",
-        help="configuration .yaml file",
-    )
-    webdataset_parser.add_argument(
-        "--cosmogrid_version",
-        type=str,
-        default="1.1",
+        default=None,
         choices=["1.1", "1"],
         help="version of the input CosmoGrid",
     )
     webdataset_parser.add_argument(
-        "--file_suffix",
+        "--file-suffix",
         type=str,
-        default="",
+        default=None,
         help="Optional suffix to be appended to the end of the filename, for example to distinguish different runs",
     )
     webdataset_parser.add_argument(
-        "--max_sleep",
-        type=int,
-        default=120,
+        "--max-sleep",
+        type=float,
+        default=None,
         help="set the maximal amount of time to sleep before copying to avoid clashes",
     )
     webdataset_parser.add_argument(
         "--indices", 
         type=str, 
-        default="0", 
-        help="Indices to process, format: 0,1,2,4 or start>stop. Default is 0.")
+        default=None,
+        help="Indices to process, formatted as 0,1,2,4 or an inclusive start>stop range.")
 
     webdataset_parser.add_argument(
-        "--n_cosmos_per_file", 
+        "--n-cosmos-per-file",
         type=int, 
-        default=25, 
-        help="Number of cosmologies per file. Select depending on the number of fields and nside.")
+        default=None,
+        help="Override the number of cosmologies per output file.")
+    webdataset_parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable debug mode from the configuration.",
+    )
     webdataset_parser.set_defaults(func=_run_webdataset)
 
     #####################################################################################
@@ -297,7 +297,17 @@ def _run_webdataset(args: argparse.Namespace) -> int:
 
     from euclid_multiprobe_deeplss_training.webdataset import webdataset_from_config
 
-    webdataset_from_config(args.config)
+    webdataset_from_config(
+        _config_argument(args),
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        indices=args.indices,
+        cosmogrid_version=args.cosmogrid_version,
+        file_suffix=args.file_suffix,
+        max_sleep=args.max_sleep,
+        n_cosmos_per_file=args.n_cosmos_per_file,
+        debug=args.debug,
+    )
     return 0
 
 
@@ -413,7 +423,7 @@ def _expand_config_arguments(argv: list[str]) -> list[str]:
     subcommand, so contiguous config values are normalized to repeated options
     before parsing. Repeated ``--config`` options continue to work directly.
     """
-    commands = {"info", "train", "predict", "datastats", "modelprofile", "calccls", "calccorrs"}
+    commands = {"info", "webdataset", "train", "predict", "datastats", "modelprofile", "calccls", "calccorrs"}
     expanded: list[str] = []
     index = 0
     while index < len(argv):

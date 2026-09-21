@@ -1,366 +1,291 @@
-"""Small, readable training utilities for DeepLSS regression experiments."""
+"""Build WebDataset shards from post-processed CosmoGrid full-sky maps.
+
+The expensive forward-model dependencies are imported only when this workflow
+is run.  This keeps the rest of the training package importable on machines
+which do not have the private ``msfm`` forward-model package installed.
+"""
 
 from __future__ import annotations
 
-import shutil
 import time
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
+from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
-from .utils.config import load_config 
+import yaml
+
+from .utils.config import Config, ConfigPaths, load_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
 
-# PASTED CODE : START #########################################################################################
+
+@dataclass(frozen=True, slots=True)
+class WebDatasetSettings:
+    """Execution settings stored under ``forward_model.webdataset``."""
+
+    input_dir: Path
+    output_dir: Path
+    indices: str | list[int] = "0"
+    cosmogrid_version: str = "1.1"
+    file_suffix: str = ""
+    max_sleep: float = 120.0
+    n_cosmos_per_file: int = 25
+    debug: bool = False
+
+    @classmethod
+    def from_mapping(cls, values: dict[str, Any]) -> WebDatasetSettings:
+        """Validate and normalize the YAML workflow settings."""
+        missing = [name for name in ("input_dir", "output_dir") if not values.get(name)]
+        if missing:
+            raise ValueError(
+                "Missing forward_model.webdataset setting(s): " + ", ".join(missing)
+            )
+        settings = cls(
+            input_dir=Path(values["input_dir"]),
+            output_dir=Path(values["output_dir"]),
+            indices=values.get("indices", "0"),
+            cosmogrid_version=str(values.get("cosmogrid_version", "1.1")),
+            file_suffix=str(values.get("file_suffix", "")),
+            max_sleep=float(values.get("max_sleep", 120)),
+            n_cosmos_per_file=int(values.get("n_cosmos_per_file", 25)),
+            debug=bool(values.get("debug", False)),
+        )
+        if settings.n_cosmos_per_file <= 0:
+            raise ValueError("n_cosmos_per_file must be positive.")
+        if settings.max_sleep < 0:
+            raise ValueError("max_sleep must be non-negative.")
+        if settings.cosmogrid_version not in {"1", "1.1"}:
+            raise ValueError("cosmogrid_version must be '1' or '1.1'.")
+        return settings
 
 
-    LOGGER.timer.start("main")
-    LOGGER.info(f"Got index set of size {len(indices)}")
+def parse_indices(value: str | list[int]) -> list[int]:
+    """Parse comma-separated indices and inclusive ``start>stop`` ranges."""
+    if isinstance(value, list):
+        indices = value
+    else:
+        indices = []
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if ">" in part:
+                start_text, stop_text = part.split(">", maxsplit=1)
+                start, stop = int(start_text), int(stop_text)
+                if stop < start:
+                    raise ValueError(f"Invalid descending index range: {part}")
+                indices.extend(range(start, stop + 1))
+            else:
+                indices.append(int(part))
+    if not indices or any(index < 0 for index in indices):
+        raise ValueError("indices must contain at least one non-negative integer.")
+    return indices
 
-    # I/O delay
-    if args.debug:
-        args.max_sleep = 0
-        LOGGER.warning("debug mode")
-    sleep_sec = np.random.uniform(0, args.max_sleep) if args.max_sleep > 0 else 0
-    LOGGER.info(f"waiting for {sleep_sec:.2f}s to prevent overloading IO")
-    time.sleep(sleep_sec)
 
-    # configuration
-    conf = files.load_config(args.config)
-    with open(os.path.join(args.dir_out, "config.yaml"), "w") as f:
-        yaml.dump(conf, f)
+def _forward_model_modules() -> SimpleNamespace:
+    """Load modules supplied by the separate forward-model installation."""
+    try:
+        return SimpleNamespace(
+            cosmogrid=import_module("msfm.utils.cosmogrid"),
+            filenames=import_module("msfm.utils.filenames"),
+            lensing=import_module("msfm.utils.lensing"),
+            prior=import_module("msfm.utils.prior"),
+            postprocessing=import_module("msfm.postprocessing"),
+            webdataset=import_module("webdataset"),
+        )
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "The webdataset workflow requires the 'webdataset' and private "
+            "'msfm' forward-model packages. Install them in this environment."
+        ) from error
 
-    # directories
-    file_dir = os.path.dirname(__file__)
-    repo_dir = os.path.abspath(os.path.join(file_dir, "../.."))
-    meta_info_file = os.path.join(repo_dir, conf["files"]["meta_info"])
 
-    cosmo_params_info = cosmogrid.get_cosmo_params_info(meta_info_file, "grid")
-    cosmo_dirs = [cosmo_dir.decode("utf-8") for cosmo_dir in cosmo_params_info["path_par"]]
-    cosmo_dirs_in = [os.path.join(args.dir_in, "grid", cosmo_dir) for cosmo_dir in cosmo_dirs]
+def webdataset_from_config(
+    paths: ConfigPaths,
+    *,
+    input_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    indices: str | None = None,
+    cosmogrid_version: str | None = None,
+    file_suffix: str | None = None,
+    max_sleep: float | None = None,
+    n_cosmos_per_file: int | None = None,
+    debug: bool | None = None,
+) -> int:
+    """Load the merged application config and create the requested shards.
 
-    # CosmoGrid
-    n_patches = conf["analysis"]["n_patches"]
-    n_cosmos = 2500
-    n_cosmos_per_file = args.n_cosmos_per_file
-    assert n_cosmos % n_cosmos_per_file == 0
-    n_perms_per_cosmo = conf["analysis"]["grid"]["n_perms_per_cosmo"]
-    n_examples_per_cosmo = n_patches * n_perms_per_cosmo
-    LOGGER.info(
-        f"for every cosmology, theres {n_examples_per_cosmo} examples: {n_patches} patches times {n_perms_per_cosmo} permutations"
+    Keyword arguments are command-line overrides.  Unspecified values come
+    from ``forward_model.webdataset`` in the merged YAML configuration.
+    """
+    raw_config = load_config(paths)
+    config = Config.from_mapping(raw_config)
+    configured = config.forward_model.get("webdataset", {})
+    if not isinstance(configured, dict):
+        raise TypeError("forward_model.webdataset must be a mapping.")
+    settings = WebDatasetSettings.from_mapping(configured)
+    overrides = {
+        "input_dir": Path(input_dir) if input_dir is not None else None,
+        "output_dir": Path(output_dir) if output_dir is not None else None,
+        "indices": indices,
+        "cosmogrid_version": cosmogrid_version,
+        "file_suffix": file_suffix,
+        "max_sleep": max_sleep,
+        "n_cosmos_per_file": n_cosmos_per_file,
+        "debug": debug,
+    }
+    settings = replace(settings, **{key: value for key, value in overrides.items() if value is not None})
+    # Validate values supplied as overrides as well as values read from YAML.
+    settings = WebDatasetSettings.from_mapping(
+        {name: getattr(settings, name) for name in settings.__dataclass_fields__}
     )
-
-    # modeling
-    baryonified = conf["analysis"]["modelling"]["baryonified"]
-
-    # analysis files
-    pixel_file = files.load_pixel_file(conf)
-    nside = int(conf["analysis"]["n_side"])
-    nside_down = int(conf["analysis"]["n_side_down"])
-    
-
-    # constants
-    maps_to_store = conf["survey"]["WL"]["map_types"]["onthefly_store"] + conf["survey"]["GC"]["map_types"]["onthefly_store"]
-    full_sky_samples = {"kg":'WL', "ia":'WL', "gg":'WL', "ga":'WL', "ds":'WL', "gd":'WL', "dg":'GC', "qg":'GC'}
-    LOGGER.info(f"nside={nside} nside_down={nside_down} maps_to_store={maps_to_store}")
-
-    LOGGER.info(f"starting the main loop trough indices {indices}")
-
-    # index corresponds to a webdataset tar file ###########################################################################
-    for index in indices:
-
-        i_cosmo_set = index % n_cosmos
-        # # index for the cosmological parameters
-        i_cosmo_start = (i_cosmo_set * n_cosmos_per_file) % n_cosmos
-        i_cosmo_end = i_cosmo_start + n_cosmos_per_file
-        i_perm = (index*n_examples_per_cosmo) // n_cosmos
-
-        LOGGER.info(f"starting index {index} i_cosmo_set={i_cosmo_set:>5d} i_perm={i_perm:>2d}/{n_perms_per_cosmo} i_cosmo_start={i_cosmo_start:>5d}/{n_cosmos} i_cosmo_end={i_cosmo_end:>5d}/{n_cosmos}")
-        LOGGER.info(f"cosmo dirs {cosmo_dirs[i_cosmo_start : i_cosmo_end]}")
-        LOGGER.timer.start("index")
-
-        if args.debug:
-            args.dir_out = os.path.join(args.dir_out, "debug")
-            os.makedirs(args.dir_out, exist_ok=True)
-
-        # initialize the webdataset tar file writer
-        num_total_examples = 0
-
-        with ExitStack() as stack:
-
-            list_wds_files = []
-
-            for i_ in range(n_patches):
-
-                wds_file = filenames.get_filename_webdataset(
-                    args.dir_out,
-                    tag=conf["survey"]["name"] + f"_patch{i_:02d}" + args.file_suffix,
-                    index=index,
-                    simset="grid",
-                    with_bary=baryonified,
-                )
-                LOGGER.info(f"index {index} is writing to {wds_file}")
-
-                list_wds_files.append((wds_file, stack.enter_context(webdataset.TarWriter(wds_file, encoder=True))))
-
-            # loop over the cosmological parameters
-            j = 0
-            for i_cosmo, cosmo_dir_in in LOGGER.progressbar(
-                zip(range(i_cosmo_start, i_cosmo_end), cosmo_dirs_in[i_cosmo_start:i_cosmo_end]),
-                at_level="debug",
-                desc="looping through cosmologies\n",
-                total=i_cosmo_end - i_cosmo_start,
-            ):  
-                j += 1
-                LOGGER.info(f"j={j:>3d}/{n_cosmos_per_file} i_cosmo={i_cosmo:>5d} i_perm={i_perm:>2d} cosmo_dir_in={cosmo_dir_in}")
-                LOGGER.timer.start("cosmo")
-
-
-                # constants
-                cosmo = prior.get_hard_parameters(conf, cosmo_params_info, i_cosmo)
-                i_sobol = int(cosmo_dir_in[-7:-1])
-             
-
-                ##
-                ## Main magic - get postprocessed full sky maps
-                ##
-                full_maps_file = postprocessing._get_full_sky_perm(args, conf, cosmo_dir_in, i_perm)
-                full_sky_maps = get_postprocessed_maps(conf, full_maps_file)
-
-                LOGGER.debug('full_sky_maps')
-                for m_name in full_sky_maps.keys():
-                    for i,m in enumerate(full_sky_maps[m_name]):
-                        LOGGER.debug(f"{m_name} {i}: shape={m.shape}, dtype={m.dtype}")
-                    
-                # write patches
-                for i_patch in range(n_patches):
-
-                    patch_maps = {}
-                    for m_name in full_sky_maps.keys():
-
-                        patch_maps[m_name] = []
-                        for i_z, m in enumerate(full_sky_maps[m_name]):
-                            patch_map_ = postprocessing.full_sky_to_patch(m, conf, pixel_file, i_z, i_patch, sample=full_sky_samples[m_name])
-                            patch_maps[m_name].append(patch_map_[..., np.newaxis]) # shape n_pix, n_z_bins
-                        patch_maps[m_name] = np.concatenate(patch_maps[m_name], axis=-1)
-
-                    # build output dict to be stored
-                    # maps_complex = torch.from_numpy(np.concatenate([patch_maps[m_name][..., np.newaxis] for m_name in ['gg', 'ga', 'gd']], axis=-1))
-                    # maps_float = torch.from_numpy(np.concatenate([patch_maps[m_name][..., np.newaxis] for m_name in ['ds', 'dg', 'qg']], axis=-1))
-                    # vec_int = torch.from_numpy(np.array([i_sobol, i_signal, n_z_WL, n_z_GC]))
-
-                    list_maps_to_store = []
-                    list_channels = []
-
-                    for m_name in maps_to_store:
-                            
-                        m = patch_maps[m_name][..., np.newaxis]
-
-                        LOGGER.debug(f'{m_name} shape={m.shape} dtype={m.dtype}')
-
-                        if np.issubdtype(m.dtype, np.complexfloating):
-                            list_maps_to_store.extend([m.real, m.imag])
-                            list_channels.extend([m_name+'1', m_name+'2'])
-                        elif np.issubdtype(m.dtype, np.floating):
-                            list_maps_to_store.append(m)
-                            list_channels.append(m_name)
-                        else:
-                            raise ValueError(f"Unsupported dtype: {m.dtype}")
-
-                    tensor_float = np.concatenate(list_maps_to_store, axis=-1)
-
-                    # LOGGER.warning('TODO: currently the tensor shapes assume that the number of z-bins is the same for all maps, this should be fixed')
-
-
-                    LOGGER.debug(f'tensor_float.shape={tensor_float.shape}')
-
-                    i_signal = index * n_cosmos * n_perms_per_cosmo * n_patches    \
-                                    +  i_cosmo * n_perms_per_cosmo * n_patches   \
-                                    +  i_perm * n_patches   \
-                                    +  i_patch
-
-                    dict_out = {
-                            "__key__": f"{i_signal:09d}",
-                            "maps_float32.pth": torch.from_numpy(tensor_float.astype(np.float32)),
-                            "vec_int32.pth": torch.from_numpy(np.array([i_signal, i_sobol, i_cosmo, i_perm, i_patch, nside, nside_down]).astype(np.int32)),
-                            "vec_float32.pth": torch.from_numpy(cosmo.astype(np.float32)),
-                        }
-
-                    # writeout to webdataset
-                    wds_file, wds_writer = list_wds_files[i_patch]
-                    wds_writer.write(dict_out)
-                    del_dict(dict_out)
-                    num_total_examples += 1
-
-                    
-                    LOGGER.info(f"wrote example to {wds_file} i_cosmo={i_cosmo:>5d} i_perm={i_perm:>2d}, i_patch={i_patch:>2d}, i_signal={i_signal:>8d} channels={list_channels}")
-                    for key in patch_maps.keys():
-                        LOGGER.debug(f"{key}.shape={patch_maps[key].shape}, dtype={patch_maps[key].dtype}")
-
-                LOGGER.info(f"done with i_cosmo={i_cosmo} i_perm={i_perm} after {LOGGER.timer.elapsed('cosmo')}")
-                                   
-        LOGGER.info(f"done with index={index} after {LOGGER.timer.elapsed('index')}")
-
-    return num_total_examples
-
-
-        
-def get_postprocessed_maps(conf, full_maps_file):
-
-    # filepaths
-    file_dir = os.path.dirname(__file__)
-    repo_dir = os.path.abspath(os.path.join(file_dir, "../.."))
-    hp_datapath = os.path.join(repo_dir, conf["files"]["healpy_data"])
-
-    # constants
-    n_side = conf["analysis"]["n_side"]
-    kappa2gamma_fac, gamma2kappa_fac, _ = lensing.get_kaiser_squires_factors(3 * n_side - 1)
-    z_bins_WL = conf["survey"]["WL"]["z_bins"]
-    z_bins_GC = conf["survey"]["GC"]["z_bins"]
-
-
-    # container
-    full_sky_maps = {"kg": [], "ia": [], "gg": [], "ga": [], "gd": [], "ds": [], "dg": [], "qg": []}
-
-    # loop over lensing bins
-    for i_z, z_bin in enumerate(z_bins_WL):
-
-        ##
-        ## Lensing convergence
-        ##
-
-        kg = postprocessing._read_full_sky_bin(conf, full_maps_file, "kg", z_bin)
-        full_sky_maps["kg"].append(kg.astype(np.float32))
-
-        ##
-        ## Lensing shear
-        ##
-
-        # kappa to shear conversion for lensing signal
-        g1_, g2_ = lensing.kappa_to_gamma(kg, hp_datapath, kappa2gamma_fac, n_side)
-        gg_ = g1_ + 1j*g2_
-        full_sky_maps["gg"].append(gg_.astype(np.complex64))
-
-        ##
-        ## Linear intrinsic alignment convergence
-        ##
-
-        ia = postprocessing._read_full_sky_bin(conf, full_maps_file, "ia", z_bin)
-        full_sky_maps["ia"].append(ia.astype(np.float32))
-
-
-        ##
-        ## Linear intrinsic alignment shape
-        ##
-
-        # kappa to shear conversion for intrinsic alignment
-        g1_, g2_ = lensing.kappa_to_gamma(ia, hp_datapath, kappa2gamma_fac, n_side)
-        ga_ = g1_ + 1j*g2_
-        full_sky_maps["ga"].append(ga_.astype(np.complex64)) 
-
-        ##
-        ## Source sample galaxy counts
-        ##
-
-        # source sample galaxy counts for shape noise
-        ds_ = postprocessing._read_full_sky_bin(conf, full_maps_file, "dg", z_bin)
-        full_sky_maps["ds"].append(ds_.astype(np.float32))
-
-        ##
-        ## Delta-NLA intrinsic alignment
-        ##
-
-        # delta-NLA component approximation
-        gd_ = ga_ * ds_ # approximation
-        full_sky_maps["gd"].append(gd_.astype(np.complex64))
-
-    # loop over clustering bins
-    for i_z, z_bin in enumerate(z_bins_GC):
-
-        ##
-        ## Galaxy counts
-        ##
-
-        dg_ = postprocessing._read_full_sky_bin(conf, full_maps_file, "dg", z_bin)
-        full_sky_maps["dg"].append(dg_.astype(np.float32))
-
-        ##
-        ## Quadratic galaxy counts
-        ##
-
-        # quadratic galaxy counts for shape noise
-        qg_ = (dg_**2) # approximation
-        full_sky_maps["qg"].append(qg_.astype(np.float32))
-
-    return full_sky_maps
-
-def del_dict(dict_):
-
-    for key in list(dict_.keys()):
-        del(dict_[key])
-    del(dict_)
-
-
-if __name__ == "__main__":
-
-    args = setup(sys.argv[1:])
-
-    if args.command == 'wds':
-
-        indices = configuration.get_indices(args.indices)
-        main(indices=indices, args=args)
-
-    elif args.command == 'test':
-
-        # # test the onthefly_pipeline
-
-        LOGGER.info("Testing the onthefly_pipeline")
-
-        from msfm.onthefly_pipeline import OntheflyPipeline
-
-        loader = OntheflyPipeline().get_loader(
-            webds_pattern=os.path.join(args.dir_out, "*.tar"),
-            batch_size=8,
+    return build_webdataset(config.forward_model, settings, raw_config=raw_config)
+
+
+def build_webdataset(
+    forward_model: dict[str, Any],
+    settings: WebDatasetSettings,
+    *,
+    raw_config: dict[str, Any] | None = None,
+    modules: SimpleNamespace | None = None,
+) -> int:
+    """Create shards and return the total number of written examples."""
+    import numpy as np
+    import torch
+
+    modules = modules or _forward_model_modules()
+    indices = parse_indices(settings.indices)
+    output_dir = settings.output_dir / "debug" if settings.debug else settings.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "config.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(raw_config or {"forward_model": forward_model}, handle, sort_keys=False)
+
+    delay = 0.0 if settings.debug else float(np.random.uniform(0, settings.max_sleep))
+    LOGGER.info("Waiting %.2fs before starting I/O", delay)
+    time.sleep(delay)
+
+    files = forward_model["files"]
+    analysis = forward_model["analysis"]
+    survey = forward_model["survey"]
+    meta_info_file = Path(files["meta_info"])
+    cosmo_params_info = modules.cosmogrid.get_cosmo_params_info(str(meta_info_file), "grid")
+    cosmo_dirs = [path.decode() if isinstance(path, bytes) else str(path) for path in cosmo_params_info["path_par"]]
+    cosmo_dirs_in = [settings.input_dir / "grid" / path for path in cosmo_dirs]
+    n_cosmos = len(cosmo_dirs)
+    if n_cosmos % settings.n_cosmos_per_file:
+        raise ValueError(
+            f"{n_cosmos} cosmologies cannot be divided into files of "
+            f"{settings.n_cosmos_per_file}."
         )
 
-        for batch in loader:
-            gg, ga, gd, ds, dg, qg, cosmo, i_sobol, i_signal, n_params, n_pix, n_z_WL, n_z_GC = batch
-            print(f"gg.shape = {gg.shape}, gg.dtype = {gg.dtype}")
-            print(f"ga.shape = {ga.shape}, ga.dtype = {ga.dtype}")
-            print(f"gd.shape = {gd.shape}, gd.dtype = {gd.dtype}")
-            print(f"ds.shape = {ds.shape}, ds.dtype = {ds.dtype}")
-            print(f"dg.shape = {dg.shape}, dg.dtype = {dg.dtype}")
-            print(f"qg.shape = {qg.shape}, qg.dtype = {qg.dtype}")
-            print(f"cosmo.shape = {cosmo.shape}, cosmo.dtype = {cosmo.dtype}")
-            print(f"i_sobol.shape = {i_sobol.shape}, i_sobol.dtype = {i_sobol.dtype}")
-            print(f"i_signal.shape = {i_signal.shape}, i_signal.dtype = {i_signal.dtype}")
-            print(f"n_params = {n_params}, n_params.dtype = {n_params.dtype}")
-            print(f"n_pix.shape = {n_pix.shape}, n_pix.dtype = {n_pix.dtype}")
-            print(f"n_z_WL.shape = {n_z_WL.shape}, n_z_WL.dtype = {n_z_WL.dtype}")
-            print(f"n_z_GC.shape = {n_z_GC.shape}, n_z_GC.dtype = {n_z_GC.dtype}")
-            break
+    pixel_indices = load_pixel_indices(forward_model)
+    n_patches = int(analysis["n_patches"])
+    n_perms = int(analysis["grid"]["n_perms_per_cosmo"])
+    maps_to_store = (
+        survey["WL"]["map_types"]["onthefly_store"]
+        + survey["GC"]["map_types"]["onthefly_store"]
+    )
+    samples = {"kg": "WL", "ia": "WL", "gg": "WL", "ga": "WL", "ds": "WL", "gd": "WL", "dg": "GC", "qg": "GC"}
+    args = SimpleNamespace(
+        dir_in=str(settings.input_dir),
+        dir_out=str(output_dir),
+        cosmogrid_version=settings.cosmogrid_version,
+        debug=settings.debug,
+    )
+    total = 0
+    for index in indices:
+        start = (index % n_cosmos) * settings.n_cosmos_per_file % n_cosmos
+        stop = start + settings.n_cosmos_per_file
+        permutation = index * (n_patches * n_perms) // n_cosmos
+        if permutation >= n_perms:
+            raise ValueError(f"Index {index} selects permutation {permutation}, but only {n_perms} exist.")
+        with ExitStack() as stack:
+            writers = []
+            for patch in range(n_patches):
+                filename = modules.filenames.get_filename_webdataset(
+                    str(output_dir),
+                    tag=f"{survey['name']}_patch{patch:02d}{settings.file_suffix}",
+                    index=index,
+                    simset="grid",
+                    with_bary=bool(analysis["modelling"]["baryonified"]),
+                )
+                writers.append(stack.enter_context(modules.webdataset.TarWriter(filename, encoder=True)))
 
-        LOGGER.info("Testing the onthefly_linear physics model")
+            for i_cosmo, cosmo_dir in zip(range(start, stop), cosmo_dirs_in[start:stop], strict=True):
+                cosmo = modules.prior.get_hard_parameters(forward_model, cosmo_params_info, i_cosmo)
+                i_sobol = int(cosmo_dir.name[-7:-1])
+                full_maps_file = modules.postprocessing._get_full_sky_perm(args, forward_model, str(cosmo_dir), permutation)
+                full_maps = get_postprocessed_maps(forward_model, full_maps_file, modules=modules)
+                for patch in range(n_patches):
+                    stored_maps = []
+                    channels = []
+                    for map_name in maps_to_store:
+                        bins = []
+                        for redshift_bin, full_map in enumerate(full_maps[map_name]):
+                            cutout = modules.postprocessing.full_sky_to_patch(
+                                full_map, forward_model, pixel_indices, redshift_bin, patch, sample=samples[map_name]
+                            )
+                            bins.append(cutout[..., np.newaxis])
+                        patch_map = np.concatenate(bins, axis=-1)[..., np.newaxis]
+                        if np.issubdtype(patch_map.dtype, np.complexfloating):
+                            stored_maps.extend((patch_map.real, patch_map.imag))
+                            channels.extend((f"{map_name}1", f"{map_name}2"))
+                        elif np.issubdtype(patch_map.dtype, np.floating):
+                            stored_maps.append(patch_map)
+                            channels.append(map_name)
+                        else:
+                            raise TypeError(f"Unsupported map dtype for {map_name}: {patch_map.dtype}")
 
-        from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-        conf = files.load_config(args.config)
-        model = OntheflyPhysicsModelLinear(conf, num_samples_prior=1_000_000)
-        loader = model.get_loader(
-            webds_pattern=os.path.join(args.dir_out, "*.tar"), 
-            batch_size=8
-            )
+                    signal = index * n_cosmos * n_perms * n_patches + i_cosmo * n_perms * n_patches + permutation * n_patches + patch
+                    sample = {
+                        "__key__": f"{signal:09d}",
+                        "maps_float32.pth": torch.from_numpy(np.concatenate(stored_maps, axis=-1).astype(np.float32)),
+                        "vec_int32.pth": torch.tensor(
+                            [signal, i_sobol, i_cosmo, permutation, patch, analysis["n_side"], analysis["n_side_down"]],
+                            dtype=torch.int32,
+                        ),
+                        "vec_float32.pth": torch.as_tensor(cosmo, dtype=torch.float32),
+                    }
+                    writers[patch].write(sample)
+                    total += 1
+                    LOGGER.debug("Wrote %s with channels %s", sample["__key__"], channels)
+    LOGGER.info("Wrote %d examples", total)
+    return total
 
-        for batch in loader:
-            inputs, targets  = batch
-            print(f"inputs = {inputs.shape}")
-            print(f"targets = {targets.shape}")
-            break
 
-        fname = "inputs.npy"
-        np.save(fname, inputs.numpy())
-        LOGGER.info(f"Saved inputs to {fname} size={inputs.nbytes/1024**2:.2f} MB")
+def get_postprocessed_maps(
+    forward_model: dict[str, Any], full_maps_file: str | Path, *, modules: SimpleNamespace | None = None
+) -> dict[str, list[Any]]:
+    """Read derived full-sky maps for all configured redshift bins."""
+    import numpy as np
 
-# PASTED CODE : END #########################################################################################
+    modules = modules or _forward_model_modules()
+    analysis = forward_model["analysis"]
+    survey = forward_model["survey"]
+    n_side = int(analysis["n_side"])
+    hp_data = str(forward_model["files"]["healpy_data"])
+    kappa_to_gamma, _, _ = modules.lensing.get_kaiser_squires_factors(3 * n_side - 1)
+    maps: dict[str, list[np.ndarray]] = {name: [] for name in ("kg", "ia", "gg", "ga", "gd", "ds", "dg", "qg")}
+
+    for redshift_bin in survey["WL"]["z_bins"]:
+        kg = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "kg", redshift_bin)
+        ia = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "ia", redshift_bin)
+        ds = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
+        maps["kg"].append(kg.astype(np.float32))
+        maps["ia"].append(ia.astype(np.float32))
+        maps["ds"].append(ds.astype(np.float32))
+        g1, g2 = modules.lensing.kappa_to_gamma(kg, hp_data, kappa_to_gamma, n_side)
+        maps["gg"].append((g1 + 1j * g2).astype(np.complex64))
+        g1, g2 = modules.lensing.kappa_to_gamma(ia, hp_data, kappa_to_gamma, n_side)
+        ga = g1 + 1j * g2
+        maps["ga"].append(ga.astype(np.complex64))
+        maps["gd"].append((ga * ds).astype(np.complex64))
+
+    for redshift_bin in survey["GC"]["z_bins"]:
+        dg = modules.postprocessing._read_full_sky_bin(forward_model, full_maps_file, "dg", redshift_bin)
+        maps["dg"].append(dg.astype(np.float32))
+        maps["qg"].append((dg**2).astype(np.float32))
+    return maps

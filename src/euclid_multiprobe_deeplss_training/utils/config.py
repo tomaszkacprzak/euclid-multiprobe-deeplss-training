@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,18 +22,34 @@ class Config:
     ``training`` mapping exactly as they were loaded from YAML.
     """
 
-    forward_model: dict[str, Any]
-    training: dict[str, Any]
+    forward_model: dict[str, Any] = field(default_factory=dict)
+    training: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw_config: Mapping[str, Any]) -> Config:
-        """Create a config from the two required top-level mappings."""
-        sections: dict[str, dict[str, Any]] = {}
-        for name in ("forward_model", "training"):
-            value = raw_config.get(name)
-            if not isinstance(value, Mapping):
-                raise TypeError(f"The '{name}' configuration section must be a mapping.")
-            sections[name] = dict(value)
+        """Create a config from the two top-level mappings.
+
+        Empty sections are allowed for lightweight and legacy programmatic
+        callers; individual workflows validate the settings they require.
+        """
+        training = raw_config.get("training", {})
+        if not isinstance(training, Mapping):
+            raise TypeError("The 'training' configuration section must be a mapping.")
+        forward_model = raw_config.get("forward_model", {})
+        if not isinstance(forward_model, Mapping):
+            raise TypeError("The 'forward_model' configuration section must be a mapping.")
+
+        # Keep accepting the original flat training mapping for programmatic
+        # callers. Values in the merged ``training`` section are authoritative.
+        legacy = {
+            key: value
+            for key, value in raw_config.items()
+            if key not in {"forward_model", "training"}
+        }
+        sections = {
+            "forward_model": dict(forward_model),
+            "training": _merge_mappings(legacy, training),
+        }
 
         config = cls(**sections)
         config._validate()
@@ -41,18 +57,27 @@ class Config:
 
     def _validate(self) -> None:
         training = self.training
-        if training["batch_size"] <= 0:
+        if "batch_size" in training and training["batch_size"] <= 0:
             raise ValueError("batch_size must be positive.")
-        if training.get("num_epochs") is None and training.get("max_steps") is None:
+        if {"num_epochs", "max_steps"} <= training.keys() and training["num_epochs"] is None and training["max_steps"] is None:
             raise ValueError("Set at least one of num_epochs or max_steps.")
-        if training["learning_rate"] <= 0.0:
+        if "learning_rate" in training and training["learning_rate"] <= 0.0:
             raise ValueError("learning_rate must be positive.")
-        if training["num_workers"] < 0:
+        if "num_workers" in training and training["num_workers"] < 0:
             raise ValueError("num_workers must be non-negative.")
-        if training["checkpoint_every_steps"] < 0:
+        if "checkpoint_every_steps" in training and training["checkpoint_every_steps"] < 0:
             raise ValueError("checkpoint_every_steps must be non-negative.")
-        if not isinstance(training["encoder_args"], Mapping):
+        if "encoder_args" in training and not isinstance(training["encoder_args"], Mapping):
             raise TypeError("encoder_args must be a mapping.")
+
+    def __getattr__(self, name: str) -> Any:
+        """Provide read-only compatibility with the former flat interface."""
+        if name in self.training:
+            return self.training[name]
+        model = self.training.get("model", {})
+        if isinstance(model, Mapping) and name in model:
+            return model[name]
+        raise AttributeError(name)
 
 
 def _merge_mappings(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
