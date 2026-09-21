@@ -44,8 +44,8 @@ def predict(
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     indices = load_pixel_indices(config.forward_model)
     nside = config.forward_model["analysis"]["n_side"]
-    physics_model_class = load_physics_model_class(config.training['physics_model'])
-    physics_model = physics_model_class(
+    PhysicsModelClass = load_physics_model_class(config.training['physics_model'])
+    physics_model = PhysicsModelClass(
         config.forward_model,
         scalers=True,
         device=device,
@@ -131,9 +131,12 @@ def predict(
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(output_path, "w") as handle:
-        handle.create_dataset("grid/cosmos/test", data=labels)
-        handle.create_dataset("grid/preds/test", data=predictions)
-        handle.create_dataset("grid/indices/test", data=inds)
+        handle.create_dataset("labels", data=labels)
+        handle.create_dataset("predictions", data=predictions)
+        handle.create_dataset("indices", data=inds)
+        handle.attrs['physics_model'] = config.training['physics_model']
+        handle.attrs['parameter_names'] = physics_model.params
+
     LOGGER.info("Wrote %d validation predictions to %s", len(labels), output_path)
     return output_path
 
