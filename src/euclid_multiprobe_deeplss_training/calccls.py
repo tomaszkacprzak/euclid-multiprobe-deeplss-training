@@ -16,9 +16,8 @@ import numpy as np
 import torch
 
 from .training import load_physics_model_class
-from .utils.config import Config, ConfigPaths, config_paths
 from .utils.cls_cuhpx import PartSkyAutoCls, PartSkyCls
-from .utils.config import load_config, load_pixel_indices, with_forward_model_config
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -60,7 +59,8 @@ def calccls(
     from msfm.onthefly_pipeline import OntheflyPipeline
 
     config, raw_config = _coerce_config(config_or_path)
-    requested_device = device or raw_config.get("device")
+    training_config = raw_config.get("training", {}) or {}
+    requested_device = device or training_config.get("device") or raw_config.get("device")
     run_device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     indices = load_pixel_indices(config.forward_model)
@@ -123,7 +123,7 @@ def calccls(
     model_information = {
         "physics_model": config.physics_model,
         "shape_noise_std": _find_config_value(config.forward_model, "shape_noise_std"),
-        "config_forward_model": config.config_forward_model,
+        "forward_model": config.forward_model,
     }
     dashboard_path = output_path.with_suffix(".html")
     create_power_spectra_dashboard(
@@ -185,7 +185,7 @@ def _cross_output_path(output_path: Path) -> Path:
 def calccls_from_config(config_path: ConfigPaths, *, output_path: str | Path = "cls.h5", num_examples: int = 100) -> Path:
     """Load a YAML configuration file and calculate its training spectra."""
     paths = config_paths(config_path)
-    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+    raw_config = load_config(paths)
     return calccls(raw_config, output_path=output_path, num_examples=num_examples)
 
 
@@ -669,7 +669,7 @@ def _coerce_config(
         return config_or_path, raw_config
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)
-        raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+        raw_config = load_config(paths)
     else:
         raw_config = dict(config_or_path)
     return Config.from_mapping(raw_config), raw_config

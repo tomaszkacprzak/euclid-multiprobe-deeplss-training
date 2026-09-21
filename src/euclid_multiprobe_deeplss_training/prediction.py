@@ -11,8 +11,7 @@ import torch
 
 from .networks.builder import build_encoder, build_loss
 from .training import load_physics_model_class
-from .utils.config import Config, ConfigPaths, config_paths
-from .utils.config import load_config, load_pixel_indices, with_forward_model_config
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -150,7 +149,7 @@ def predict_from_config(
 ) -> Path:
     """Load a training config and predict its complete validation set."""
     paths = config_paths(config_path)
-    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+    raw_config = load_config(paths)
     return predict(
         Config.from_mapping(raw_config),
         checkpoint=checkpoint,

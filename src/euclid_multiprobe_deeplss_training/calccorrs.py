@@ -17,8 +17,7 @@ import numpy as np
 import torch
 
 from .training import load_physics_model_class
-from .utils.config import Config, ConfigPaths, config_paths
-from .utils.config import load_config, load_pixel_indices, with_forward_model_config
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -183,7 +182,7 @@ def calccorrs(
         shard_path,
         dashboard_path,
         parameter_names=[str(name) for name in physics_model.params],
-        model_information={"physics_model": config.physics_model, "config_forward_model": config.config_forward_model},
+        model_information={"physics_model": config.physics_model, "forward_model": config.forward_model},
     )
     LOGGER.info("Wrote interactive correlations dashboard to %s", dashboard_path)
     return [Path(shard_path)]
@@ -349,7 +348,7 @@ def calccorrs_from_config(
 ) -> list[Path]:
     """Load a YAML configuration and calculate its training correlations."""
     paths = config_paths(config_path)
-    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+    raw_config = load_config(paths)
     return calccorrs(
         raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file, dataset_split=dataset_split
     )
@@ -365,7 +364,7 @@ def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> 
         return config_or_path, raw_config
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)
-        raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+        raw_config = load_config(paths)
     else:
         raw_config = dict(config_or_path)
     return Config.from_mapping(raw_config), raw_config

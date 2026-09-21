@@ -38,3 +38,34 @@ def test_load_config_accepts_one_file(tmp_path) -> None:
     path.write_text("batch_size: 4\n", encoding="utf-8")
 
     assert load_config(path) == {"batch_size": 4}
+
+
+def test_config_reads_training_and_forward_model_from_master_mapping() -> None:
+    config = Config.from_mapping(
+        {
+            "forward_model": {"analysis": {"n_side": 512}},
+            "training": {
+                "records_pattern": "records/*.tar",
+                "batch_size": 8,
+                "physics_model_args": {"shape_noise_std": 0.001},
+            },
+        }
+    )
+
+    assert config.forward_model == {"analysis": {"n_side": 512}}
+    assert config.records_pattern == "records/*.tar"
+    assert config.batch_size == 8
+    assert config.physics_model_args == {"shape_noise_std": 0.001}
+
+
+def test_training_section_takes_precedence_over_legacy_flat_values() -> None:
+    config = Config.from_mapping({"batch_size": 32, "training": {"batch_size": 4}})
+
+    assert config.batch_size == 4
+
+
+def test_training_section_must_be_a_mapping() -> None:
+    import pytest
+
+    with pytest.raises(TypeError, match="training.*must be a mapping"):
+        Config.from_mapping({"training": []})

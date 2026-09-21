@@ -79,7 +79,7 @@ def test_power_spectra_dashboard_is_self_contained_and_includes_model_informatio
         model_information={
             "physics_model": "onthefly_linkappa",
             "shape_noise_std": 0.3,
-            "config_forward_model": "forward.yaml",
+            "forward_model": {"analysis": {"n_side": 512}},
         },
     )
 

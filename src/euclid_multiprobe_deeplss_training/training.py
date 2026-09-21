@@ -12,6 +12,7 @@ from typing import Any
 import psutil
 import torch
 import torch.distributed as dist
+import torchinfo
 import wandb
 import yaml
 from torch import nn
@@ -19,10 +20,9 @@ from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
-import torchinfo
 
 from .plots import parameter_names_from_physics_model, plot_evaluation_file
-from .utils.config import Config, ConfigPaths, config_paths, load_config, with_forward_model_config, load_pixel_indices
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -81,7 +81,6 @@ def _ddp_barrier() -> None:
 
 
 # Re-export shared helpers for callers and tests that import them from this module.
-_with_forward_model_config = with_forward_model_config
 
 
 
@@ -530,7 +529,7 @@ def train(
     optimizer/global-step state rather than seeking to the prior stream item.
     """
     from msfm.onthefly_pipeline import OntheflyPipeline
-    from .networks.smoothing import NestDownsampler, NestChannelDownsampler
+
     from .networks.builder import build_encoder, build_loss
     
 
@@ -980,7 +979,7 @@ def train_from_config(
 ) -> dict[str, Any]:
     """Train from a YAML config file with optional CLI-style overrides."""
     paths = config_paths(config_path)
-    raw_config = with_forward_model_config(load_config(paths), paths[-1].parent)
+    raw_config = load_config(paths)
     overrides = {
         "resume_from_checkpoint": resume_from_checkpoint,
         "checkpoint_dir": checkpoint_dir,
@@ -988,7 +987,10 @@ def train_from_config(
         "wandb_mode": wandb_mode,
         "tag": tag,
     }
-    raw_config.update({key: value for key, value in overrides.items() if value is not None})
+    training_config = raw_config.setdefault("training", {})
+    if not isinstance(training_config, dict):
+        raise TypeError("The 'training' configuration section must be a mapping.")
+    training_config.update({key: value for key, value in overrides.items() if value is not None})
     return train(raw_config, device=device)
 
 
@@ -997,17 +999,19 @@ def _coerce_config(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> 
         return config_or_path
     if not isinstance(config_or_path, Mapping):
         paths = config_paths(config_or_path)
-        return Config.from_mapping(with_forward_model_config(load_config(paths), paths[-1].parent))
-    return Config.from_mapping(with_forward_model_config(config_or_path))
+        return Config.from_mapping(load_config(paths))
+    return Config.from_mapping(config_or_path)
 
 
 #
 # Tracing of tensor placement
 #
 
+from collections.abc import Mapping, Sequence
+
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
-from collections.abc import Mapping, Sequence
+
 
 def tree_tensors(x):
     if torch.is_tensor(x):
@@ -1058,8 +1062,9 @@ class DeviceTraceMode(TorchDispatchMode):
 # Prefetcher data loader
 #
 
-import torch
 from collections.abc import Mapping, Sequence
+
+import torch
 
 
 def iter_tensors(x):
@@ -1169,7 +1174,9 @@ class _CUDAPrefetcherIterator:
 
 import os
 import time
+
 import psutil
+
 
 def tree_io_counters(root_pid=None):
     root = psutil.Process(root_pid or os.getpid())

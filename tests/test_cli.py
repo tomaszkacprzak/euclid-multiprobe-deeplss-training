@@ -117,22 +117,24 @@ def test_predict_command_requires_config() -> None:
         main(["predict", "--checkpoint", "model.pt", "--output-file", "predictions.h5"])
 
 
-def test_train_from_config_loads_forward_model_config(tmp_path, monkeypatch) -> None:
+def test_train_from_config_reads_master_config_sections(tmp_path, monkeypatch) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("wandb")
 
     from euclid_multiprobe_deeplss_training import training
 
-    forward_model_path = tmp_path / "forward_model.yaml"
-    forward_model_path.write_text("survey: euclid\nparams:\n  omega_m: 0.3\n", encoding="utf-8")
     config_path = tmp_path / "training.yaml"
     config_path.write_text(
         "\n".join(
             [
-                "records_pattern: records/*.tar",
-                "config_forward_model: forward_model.yaml",
-                "max_steps: 0",
-                "use_wandb: false",
+                "forward_model:",
+                "  survey: euclid",
+                "  params:",
+                "    omega_m: 0.3",
+                "training:",
+                "  records_pattern: records/*.tar",
+                "  max_steps: 0",
+                "  use_wandb: false",
             ]
         ),
         encoding="utf-8",
@@ -152,6 +154,7 @@ def test_train_from_config_loads_forward_model_config(tmp_path, monkeypatch) -> 
     assert result == {"step": 0}
     assert captured["device"] == "cpu"
     assert captured["config"]["forward_model"] == {"survey": "euclid", "params": {"omega_m": 0.3}}
+    assert captured["config"]["training"]["records_pattern"] == "records/*.tar"
 
 
 def test_reduce_mean_without_initialized_process_group_returns_local_copy() -> None:
