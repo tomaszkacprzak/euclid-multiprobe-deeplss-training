@@ -42,7 +42,7 @@ dependencies = [
   "torchinfo",
   "torchdiffeq",
   "pyracorr",
-  "tqdm"
+  "tqdm",
 ]
 
 [project.optional-dependencies]
