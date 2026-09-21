@@ -197,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     predict_parser.set_defaults(func=_run_predict)
 
+    #####################################################################################
+    #
+    # likelihood
+    #
+    #####################################################################################
+
     likelihood_parser = subparsers.add_parser(
         "likelihood",
         help="Train a conditional likelihood from a prediction HDF5 file.",

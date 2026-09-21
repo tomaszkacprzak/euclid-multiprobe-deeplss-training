@@ -77,7 +77,11 @@ def train_likelihood_from_config(
     device: torch.device | str | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Load and merge YAML configuration files, then train a likelihood model."""
-    raw_config = load_config(config_paths(config_path))
+
+    if isinstance(config_path, str):
+        config_path = [path.strip() for path in config_path.split(",") if path.strip()]
+    paths = config_paths(config_path)
+    raw_config = load_config(paths)
     settings = raw_config.get("likelihood")
     if not isinstance(settings, Mapping):
         raise TypeError("The 'likelihood' configuration section must be a mapping.")
