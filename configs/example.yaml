@@ -230,3 +230,10 @@ training:
   wandb_run_name: null
   wandb_mode: null
   use_wandb: true
+
+likelihood:
+
+  model: "mdn"
+  model_args:
+    num_components: 10
+    num_layers: 2
