@@ -13,6 +13,46 @@ from .likelihood_base import LikelihoodBase
 from .likelihood_mdn import GaussianMixtureMDN
 
 
+def plot_likelihood_fit(
+    model: LikelihoodBase,
+    predictions: torch.Tensor,
+    labels: torch.Tensor,
+):
+    """Plot labels against predictions, coloured by their fitted log likelihood."""
+    import matplotlib.pyplot as plt
+
+    LikelihoodBase._validate_pairs(predictions, labels, "plot")
+    device = next(model.parameters()).device
+    model.eval()
+    with torch.no_grad():
+        log_likelihood = model(
+            predictions.float().to(device), labels.float().to(device)
+        ).detach().cpu().numpy()
+
+    predictions_array = predictions.detach().cpu().numpy()
+    labels_array = labels.detach().cpu().numpy()
+    num_parameters = labels.shape[1]
+    fig, axes = plt.subplots(
+        1, num_parameters, figsize=(5 * num_parameters, 4), squeeze=False
+    )
+    scatter = None
+    for index, axis in enumerate(axes[0]):
+        scatter = axis.scatter(
+            labels_array[:, index],
+            predictions_array[:, index],
+            c=log_likelihood,
+            marker="o",
+        )
+        axis.set_xlabel(f"Label {index}")
+        axis.set_ylabel(f"Prediction {index}")
+
+    # Validation above guarantees at least one parameter, and therefore a scatter.
+    assert scatter is not None
+    fig.colorbar(scatter, ax=axes.ravel().tolist(), label="Log likelihood")
+    fig.subplots_adjust(bottom=0.15, right=0.9, wspace=0.3)
+    return fig
+
+
 def build_likelihood(num_parameters: int, settings: Mapping[str, Any]) -> LikelihoodBase:
     """Build the likelihood implementation selected by ``model_type``."""
     model_type = settings.get("model_type")
@@ -66,6 +106,12 @@ def train_likelihood(
         device=device or settings.get("device"),
     )
     model.save(output_file)
+    figure = plot_likelihood_fit(model, theta_obs, theta_true)
+    plot_file = Path(output_file).with_suffix(".png")
+    figure.savefig(plot_file, bbox_inches="tight")
+    import matplotlib.pyplot as plt
+
+    plt.close(figure)
     return model, history
 
 

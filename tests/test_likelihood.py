@@ -4,7 +4,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import GaussianMixtureMDN  # noqa: E402
-from euclid_multiprobe_deeplss_training.likelihood.training import build_likelihood  # noqa: E402
+from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import (  # noqa: E402
+    build_likelihood,
+    plot_likelihood_fit,
+    train_likelihood,
+)
 
 
 def test_mdn_returns_one_finite_log_likelihood_per_sample() -> None:
@@ -41,3 +45,49 @@ def test_mdn_checkpoint_round_trip(tmp_path) -> None:
 
     for expected, actual in zip(model.parameters(), restored.parameters(), strict=True):
         assert torch.equal(expected, actual)
+
+
+def test_plot_likelihood_fit_has_one_panel_per_parameter() -> None:
+    pytest.importorskip("matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    model = GaussianMixtureMDN(2, num_components=2, num_layers=1, hidden_dim=8)
+    labels = torch.randn(5, 2)
+    predictions = labels + 0.1 * torch.randn(5, 2)
+
+    figure = plot_likelihood_fit(model, predictions, labels)
+
+    panels = [axis for axis in figure.axes if axis.get_xlabel().startswith("Label")]
+    assert len(panels) == 2
+    for index, panel in enumerate(panels):
+        assert panel.get_xlabel() == f"Label {index}"
+        assert panel.get_ylabel() == f"Prediction {index}"
+        assert panel.collections[0].get_offsets().shape == (5, 2)
+        assert panel.collections[0].get_array().shape == (5,)
+
+
+def test_train_likelihood_saves_plot_next_to_checkpoint(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    h5py = pytest.importorskip("h5py")
+    input_file = tmp_path / "predictions.h5"
+    output_file = tmp_path / "models" / "likelihood.pt"
+    labels = torch.randn(8, 2)
+    with h5py.File(input_file, "w") as handle:
+        handle["labels"] = labels.numpy()
+        handle["predictions"] = (labels + 0.1 * torch.randn(8, 2)).numpy()
+
+    train_likelihood(
+        {
+            "model_type": "mdn",
+            "model_args": {"num_components": 2, "num_layers": 1, "hidden_dim": 8},
+            "num_epochs": 1,
+            "batch_size": 4,
+        },
+        input_file=input_file,
+        output_file=output_file,
+        device="cpu",
+    )
+
+    assert output_file.is_file()
+    assert output_file.with_suffix(".png").is_file()
