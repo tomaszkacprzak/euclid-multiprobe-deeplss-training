@@ -56,7 +56,7 @@ def calccls(
     :class:`PartSkyCls`. Each batch is appended immediately so neither CPU nor
     GPU memory use grows over either pass through the data.
     """
-    from msfm.onthefly_pipeline import OntheflyPipeline
+    from .dataloaders import OntheflyPipeline
 
     config, raw_config = _coerce_config(config_or_path)
     training_config = raw_config.get("training", {}) or {}

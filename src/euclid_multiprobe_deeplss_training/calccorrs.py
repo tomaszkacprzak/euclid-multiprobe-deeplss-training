@@ -64,7 +64,7 @@ def calccorrs(
     else:
         LOGGER.info(f"Using existing output directory {output_dir}")
 
-    from msfm.onthefly_pipeline import OntheflyPipeline
+    from .dataloaders import OntheflyPipeline
 
     config, raw_config = _coerce_config(config_or_path)
     requested_device = "cuda"
@@ -127,7 +127,8 @@ def calccorrs(
         shard_path = os.path.join(output_dir, f"corrs_{dataset_split}_{file_index:06d}.h5")
         with h5py.File(shard_path, "w") as f:
             LOGGER.info(
-                f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file with {config.training['batch_size']} examples per batch"
+                f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file "
+                f"with {config.training['batch_size']} examples per batch"
             )
 
             for batch_index, (maps, labels, inds) in enumerate(loader):

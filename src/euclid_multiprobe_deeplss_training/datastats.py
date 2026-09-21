@@ -9,10 +9,10 @@ from typing import Any
 
 import numpy as np
 import torch
-from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
-from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 
+from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
+from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
 
 from .utils.config import Config, ConfigPaths, config_paths, load_config
 from .utils.logger import get_logger
@@ -46,12 +46,14 @@ def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[
                         nside_lower=[512]*24,
                         operator="mean").to(device)
 
-    loader = OntheflyPipeline(config.training['records_pattern'],
-                              config.training['batch_size'],
-                              physics_model,
-                              smoothing_model,
-                              num_workers=config.training['num_workers'],
-                              device=device)
+    loader = OntheflyPipeline(
+        webds_pattern=config.training['records_pattern'],
+        batch_size=config.training['batch_size'],
+        physics_model=physics_model,
+        downsampler=smoothing_model,
+        num_workers=config.training['num_workers'],
+        device=device,
+    )
 
     batch_stats: list[BatchChannelStats] = []
     batch_label_stats: list[BatchChannelStats] = []
@@ -130,7 +132,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
 
             if batch_count % 10 == 0:
 
-                time_diff = time_end = time.time() - time_start
+                time_diff = time.time() - time_start
                 LOGGER.info(f'Batch {batch_count:>4d}, num_examples_per_second: {batch_count * dataloader.batch_size / time_diff:.2f}')
 
             map_stats.append(_summarize_maps(maps, split=split))

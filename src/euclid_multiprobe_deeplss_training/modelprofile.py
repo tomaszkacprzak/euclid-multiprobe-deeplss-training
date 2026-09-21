@@ -6,11 +6,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import torch
-from msfm.onthefly_physics.onthefly_linear import OntheflyPhysicsModelLinear
-from msfm.onthefly_pipeline import OntheflyPipeline
 
+from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 from euclid_multiprobe_deeplss_training.networks.builder import build_model
 from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
+from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
 
 from .datastats import print_profiler_stats
 from .utils.config import Config, ConfigPaths, config_paths, load_config
@@ -37,12 +37,11 @@ def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> li
     ).to(device)
 
     loader = OntheflyPipeline(
-        config.training['records_pattern'],
-        physics_model,
-        smoothing_model,
+        webds_pattern=config.training['records_pattern'],
         batch_size=config.training['batch_size'],
+        physics_model=physics_model,
+        downsampler=smoothing_model,
         num_workers=config.training['num_workers'],
-        pin_memory=True,
         device=device,
     )
 
@@ -169,10 +168,10 @@ def _contains_tensor(value: Any) -> bool:
 def _print_table(headers: list[str], rows: list[tuple[str, ...]]) -> None:
     widths = [len(header) for header in headers]
     for row in rows:
-        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row, strict=True)]
 
     def format_row(cells: Sequence[str]) -> str:
-        return " | ".join(cell.ljust(width) for cell, width in zip(cells, widths))
+        return " | ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True))
 
     print("\nNeural network model specifications:")
     print(format_row(headers))

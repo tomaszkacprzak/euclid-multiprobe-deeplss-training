@@ -8,7 +8,7 @@ from torch import nn
 
 
 def test_predict_builds_models_with_training_physics_configuration(monkeypatch, tmp_path) -> None:
-    from euclid_multiprobe_deeplss_training import prediction
+    from euclid_multiprobe_deeplss_training import dataloaders, prediction
     from euclid_multiprobe_deeplss_training.training import TrainingConfig
 
     captured: dict[str, object] = {}
@@ -71,7 +71,7 @@ def test_predict_builds_models_with_training_physics_configuration(monkeypatch, 
     monkeypatch.setattr(prediction, "load_pixel_indices", lambda _config: [1, 2, 3])
     monkeypatch.setattr(prediction, "build_encoder", fake_build_encoder)
     monkeypatch.setattr(prediction, "build_loss", fake_build_loss)
-    monkeypatch.setattr(sys.modules["msfm.onthefly_pipeline"], "OntheflyPipeline", FakePipeline)
+    monkeypatch.setattr(dataloaders, "OntheflyPipeline", FakePipeline)
 
     config = TrainingConfig(
         records_pattern="records-{0..1}.tar",

@@ -9,7 +9,8 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
     from euclid_multiprobe_deeplss_training import datastats
 
     class FakePhysicsModel:
-        def __init__(self, forward_model, *, device):
+        def __init__(self, forward_model, *, scalers, device):
+            assert scalers is True
             self.forward_model = forward_model
             self.device = device
 
@@ -29,21 +30,26 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
             return self
 
     class FakePipeline:
-        def __init__(self, records_pattern, physics_model, smoothing_model, *, batch_size, num_workers, pin_memory, device):
-            assert records_pattern == "records/*.tar"
+        def __init__(self, *, webds_pattern, physics_model, downsampler, batch_size, num_workers, device):
+            assert webds_pattern == "records/*.tar"
             assert physics_model.forward_model == {"survey": "euclid", "analysis": {"n_side": 1024, "n_side_down": 128}}
-            assert isinstance(smoothing_model, FakeSmoothingModel)
+            assert isinstance(downsampler, FakeSmoothingModel)
             assert batch_size == 1
             assert num_workers == 0
-            assert pin_memory is True
             assert device == "cpu"
 
+            self.batch_size = batch_size
+
         def __iter__(self):
-            yield torch.tensor([[[1.0, 10.0], [2.0, 20.0]], [[3.0, 30.0], [4.0, 40.0]]]), torch.tensor([[0.0, 1.0], [2.0, 5.0]])
+            yield (
+                torch.tensor([[[1.0, 10.0], [2.0, 20.0]], [[3.0, 30.0], [4.0, 40.0]]]),
+                torch.tensor([[0.0, 1.0], [2.0, 5.0]]),
+                torch.tensor([0, 1]),
+            )
 
     monkeypatch.setattr(datastats.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(datastats, "OntheflyPhysicsModelLinear", FakePhysicsModel)
-    monkeypatch.setattr(datastats, "HealpyDownsampling", FakeSmoothingModel)
+    monkeypatch.setattr(datastats, "NestChannelDownsampler", FakeSmoothingModel)
     monkeypatch.setattr(datastats, "OntheflyPipeline", FakePipeline)
     monkeypatch.setattr(datastats, "print_profiler_stats", lambda prof: None)
 
