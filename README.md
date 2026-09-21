@@ -24,6 +24,19 @@ Show the installed version with:
 uv run euclid-deeplss-training --version
 ```
 
+Create WebDataset shards with the paths and defaults in
+`forward_model.webdataset` in the merged configuration. Later configuration
+files override earlier ones recursively, and command-line options can override
+settings for one invocation:
+
+```bash
+uv run euclid-deeplss-training \
+  --config configs/example.yaml local-overrides.yaml \
+  webdataset --indices '0>9' --max-sleep 0
+```
+
+This workflow additionally requires the private `msfm` forward-model package.
+
 Generate label/prediction pairs for the complete validation set from a training
 checkpoint. The output is an HDF5 file containing `labels` and `predictions`
 datasets:
