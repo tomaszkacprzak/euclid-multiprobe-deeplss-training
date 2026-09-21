@@ -1,46 +1,209 @@
-# Glob pattern for the WebDataset record shards used for training.
-records_pattern: "webdataset_EuclidDR1F/EuclidDR1F_grid_dmb_*.tar"
-config_forward_model: "config_msfm_EuclidDR1F_onthefly.yaml"
+forward_model:
 
-# Training settings shared by every sweep element.
-sweep:
-  - sweep_tag: default
-    model_name: "nested_transformer"
-    model_args:
-      base_embed_dim: 128
-      growth: "128"
-    loss_function: "mse"
-    learning_rate: 0.00001
-  - sweep_tag: vimm
-    model_name: "nested_transformer"
-    model_args:
-      base_embed_dim: 64
-      growth: "128"
-    loss_function: "vimm_gmm"
-    loss_args:
-      hidden_dim: 128
-    learning_rate: 0.00001
-num_epochs: 1
-batch_size: 16
-num_workers: 8
-max_steps: 100
-validation_fraction: 0.1
-seed: 42
-device: "cuda"
+  # contains the configuration parameters of the forward model pipeline
+  master_seed: 4242
+  dirs:
+    # absolute on Clariden
+    catalog: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F
+    # relative to the root of this repository
+    redshift_distributions: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F
 
-# Model architecture settings.
-in_channels: 3
-num_targets: 1
-hidden_channels: 64
-num_blocks: 4
-dropout: 0.1
+  files:
+    # relative to the root of this repository
+    pixels: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/EuclidDR1F_pixels_fiducial_512.h5
+    noise: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/EuclidDR1F_noise.h5
+    meta_info: data/CosmoGridV1_metainfo.h5
+    healpy_data: data/healpy_data
+    peak_binning: data/peaks/binning/v11_extended.h5
+    source_clustering_bias: /capstor/store/cscs/swissai/a0158/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/metacal_biases_desy3.h5
 
-# Checkpointing settings.
-checkpoint_dir: "checkpoints"
-checkpoint_every_steps: 1000
-resume_from_checkpoint: null
+  survey:
+    name: EuclidDR1F
+    WL:
+      map_types:
+        onthefly_store: [kg, ia, ds]
+      z_bins: [WL1, WL2, WL3, WL4, WL5, WL6]
+      # used in the forward model (in galaxies/deg^2, numbers from https://arxiv.org/abs/2604.00805v1 Sec 4.2) 
+      n_gal: [14580.0, 14580.0, 14580.0, 14580.0, 14580.0, 14580.0]
+      # from Table 1 in https://arxiv.org/pdf/2105.13544
+      shear_bias:
+        multiplicative:
+          mu: [0, 0, 0, 0, 0, 0]
+          sigma: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
+      # pivot redshift from https://arxiv.org/pdf/2105.13543
+      z0: 0.62
+      # used to build the observation like eq. (10) in https://arxiv.org/pdf/2403.02314 and shape noise file
+      # from Table 1 in https://arxiv.org/pdf/2105.13543
+      # R_gamma: [0.7636, 0.7182, 0.6887, 0.6154]
+      # R_s: [0.0046, 0.0083, 0.0126, 0.0145]
+    GC:
+      map_types:
+        input: [dg] # ignored in the onthefly mode
+        output: [dg] # ignored in the onthefly mode
+        onthefly_store: [dg]
+      z_bins: [GC1, GC2, GC3, GC4, GC5, GC6]
+      # used in the forward model (in galaxies/deg^2, numbers from https://arxiv.org/abs/2604.00805v1 Sec 4.2) 
+      n_gal: [2008.8, 2008.8, 2008.8, 2008.8, 2008.8, 2008.8]
+      # used to build the observation, from Table 1 in https://arxiv.org/pdf/2105.13546
+      # z_lims: [[0.2, 0.4], [0.4, 0.55], [0.55, 0.70], [0.70, 0.85]]
+    # from Table 1 in https://arxiv.org/pdf/2105.13543
+    Aeff: 2148.5851747589836 # Euclid_DR1wideNorth_moc.fits + Euclid_DR1wideSouth_moc.fits
 
-# Weights & Biases logging settings.
-wandb_project: "euclid-multiprobe-deeplss-training"
-wandb_run_name: "example-run"
-wandb_mode: "offline"
+  workflow_scheme: "onthefly" # "precompute" or "onthefly"
+
+  analysis:
+    n_side: 512
+    n_pix: 3145728
+    # minimal n_side_for the networks, determines the padding of the data vectors
+    n_side_down: 16
+    # number of cut outs from the full sky
+    n_patches: 4
+    # the six cosmological parameters of the CosmoGrid have to be listed first
+    params:
+      # same ordering as in the CosmoGrid
+      cosmo: [Om, s8, Ob, H0, ns, w0]
+      bary: [bary_Mc, bary_nu]
+      # NLA model + first term of TATT (cross term)
+      ia:
+        nla: [Aia, n_Aia]
+        tatt: [bta]
+      # galaxy biasing
+      bg:
+        linear: [bg1, bg2, bg3, bg4, bg5, bg6]
+        quadratic: [bg1_q, bg2_q, bg3_q, bg4_q, bg5_q, bg6_q]
+        stochasticity: [rg]
+      sc: [bsc1, bsc2, bsc3, bsc4, bsc5, bsc6]
+
+    footprint:
+      # the original DES footprint is first rotated around the y- and then the z-axis to enable the cut-outs
+      rotation:
+        y_rad: -0.125
+        z_rad: -1.22
+    # see scale_cuts.ipynb. All angles are in arcmin. These are the scale cuts that are baked into the .tfrecords.
+    # The angle -> ell conversion is done in the "naive" way in 6.2 of https://academic.oup.com/mnras/article/505/4/5714/6296446
+    scale_cuts:
+      hard_cut: True
+      WL:
+        # from 6.1 in https://arxiv.org/pdf/2110.10135
+        l_min: Null
+        # healpy default of 3 * n_side - 1, since smoothing is done on the fly
+        l_max: Null
+        theta_fwhm: Null
+      GC:
+        # from 6.1 in https://arxiv.org/pdf/2110.10135
+        l_min: Null #[30, 30, 30, 30, 30, 30]
+        # healpy default of 3 * n_side - 1, since smoothing is done on the fly
+        l_max: Null
+        theta_fwhm: Null
+    modelling:
+      baryonified: True
+      store_cross_maps: True
+      # degrade the maps to Gaussian Random Fields for testing and comparison to the power spectra
+      degrade_to_grf: False
+      WL:
+        store: True
+        source_clustering: prior #fixed
+        # whether to include the TATT cross-term on top of NLA
+        extended_nla: True
+        nla:
+          truncate_nz: True
+          z_min_quantile: 0.05
+          z_max_quantile: 0.95
+      GC:
+        store: True
+        power_law_biasing: False
+        per_bin_biasing: True
+        # in addition to linear biasing
+        quadratic_biasing: False
+        # whether to include a stochasticity in the galaxy biasing. This scales the [-pi, pi] interval from which the
+        # random phases with which the alm coefficients are multiplied are drawn. Set to Null to discard.
+        stochasticity: False
+        # whether to include the survey systematics maps from https://arxiv.org/pdf/2105.13540 in the forward model.
+        survey_systematics_map: False
+    normalization:
+      # approximate per tomo bin standard deviation of the kg + ia + sn maps at the fiducial cosmology
+      WL: [0.0086, 0.0137, 0.0174, 0.0229, 0.0254, 0.0282]
+      GC: [1, 1, 1, 1, 1, 1]
+    power_spectra:
+      l_min: 30
+      l_max: 1500
+      n_bins: 33
+    grid:
+      # CosmoGrid
+      # n_cosmos: 2500
+      n_perms_per_cosmo: 10 #20
+      n_noise_per_signal: 3
+      priors:
+        # from Table 1 in https://arxiv.org/pdf/2201.07771
+        Om: [0.1, 0.5]
+        s8: [0.4, 1.4]
+        S8: [0.23094010767585035, 1.8073922282301278]
+        H0: [64, 82]
+        Ob: [0.03, 0.06]
+        ns: [0.87, 1.07]
+        w0: [-2, -0.333]
+        # baryons
+        bary_Mc: [12.0, 15.0]
+        bary_nu: [-2, 2.0]
+        # intrinsic alignment
+        Aia: [-3, 3.0]
+        n_Aia: [-4, 6.0]
+        bta: [0.0, 2.0]
+        # galaxy clustering
+        bg1: [0.8, 3.0]
+        bg2: [0.8, 3.0]
+        bg3: [0.8, 3.0]
+        bg4: [0.8, 3.0]
+        bg5: [0.8, 3.0]
+        bg6: [0.8, 3.0]
+        rg: [0.6, 1.0]
+        bsc1: [1.0, 2.0]
+        bsc2: [1.0, 2.0]
+        bsc3: [1.0, 2.0]
+        bsc4: [1.0, 2.0]
+        bsc5: [1.0, 2.0]
+        bsc6: [1.0, 2.0]
+        Om_s8_border_points:
+          [
+            [0.1, 1.4],
+            [0.2, 1.4],
+            [0.5, 0.65],
+            [0.5, 0.4],
+            [0.3, 0.4],
+            [0.1, 0.9],
+          ]
+
+
+training:
+
+  # Glob pattern for the WebDataset record shards used for training.
+  records_pattern: "/capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/008_kappa512/webdataset_EuclidDR1F_nside512_finished//EuclidDR1F*.tar"
+  physics_model: "onthefly_linkappa"
+  physics_model_args:
+    shape_noise_std: 0.001
+
+  # Training settings.
+  encoder_name: "nested_transformer"
+  embed_dim: 64
+  encoder_args:
+    base_embed_dim: 128
+    growth: "128"
+
+  loss_function: "mse"
+  num_epochs: 1000
+  batch_size: 8
+  num_workers: 2
+  max_steps: 10000
+  learning_rate: 0.00001
+  seed: 42  
+  device: "cuda"
+
+  # Checkpointing settings.
+  validation_every_steps: 1000
+  checkpoint_dir: "results"
+  checkpoint_every_steps: 10000
+  resume_from_checkpoint: null
+
+  # Weights & Biases logging settings.
+  wandb_project: "euclid-multiprobe-deeplss-training"
+  wandb_entity: "euclid-multiprobe-sbi"
