@@ -30,30 +30,6 @@ if "wandb" not in sys.modules:
     sys.modules["wandb"] = wandb_module
 
 
-if "msfm" not in sys.modules:
-    msfm_module = types.ModuleType("msfm")
-    physics_pkg = types.ModuleType("msfm.onthefly_physics")
-    physics_linear = types.ModuleType("msfm.onthefly_physics.onthefly_linear")
-    pipeline_module = types.ModuleType("msfm.onthefly_pipeline")
-
-    class _MissingOptionalDependency:
-        def __init__(self, *_args, **_kwargs):
-            raise RuntimeError("msfm is not installed; tests should monkeypatch this dependency")
-
-    physics_linear.OntheflyPhysicsModelLinear = _MissingOptionalDependency
-    pipeline_module.OntheflyPipeline = _MissingOptionalDependency
-
-    msfm_module.__spec__ = importlib.machinery.ModuleSpec("msfm", loader=None, is_package=True)
-    physics_pkg.__spec__ = importlib.machinery.ModuleSpec("msfm.onthefly_physics", loader=None, is_package=True)
-    physics_linear.__spec__ = importlib.machinery.ModuleSpec("msfm.onthefly_physics.onthefly_linear", loader=None)
-    pipeline_module.__spec__ = importlib.machinery.ModuleSpec("msfm.onthefly_pipeline", loader=None)
-
-    sys.modules["msfm"] = msfm_module
-    sys.modules["msfm.onthefly_physics"] = physics_pkg
-    sys.modules["msfm.onthefly_physics.onthefly_linear"] = physics_linear
-    sys.modules["msfm.onthefly_pipeline"] = pipeline_module
-
-
 if "psutil" not in sys.modules:
     psutil_module = types.ModuleType("psutil")
 

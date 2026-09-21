@@ -35,8 +35,6 @@ uv run euclid-deeplss-training \
   webdataset --indices '0>9' --max-sleep 0
 ```
 
-This workflow additionally requires the private `msfm` forward-model package.
-
 Generate label/prediction pairs for the complete validation set from a training
 checkpoint. The output is an HDF5 file containing `labels` and `predictions`
 datasets:
