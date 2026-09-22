@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_cnf import ConditionalNormalizingFlowFM  # noqa: E402
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import GaussianMixtureMDN  # noqa: E402
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import (  # noqa: E402
+    _BatchedPosteriorEnergy,
     build_likelihood,
     plot_likelihood_fit,
     plot_posterior_samples,
@@ -85,6 +86,35 @@ def test_cnffm_builder_and_flow_matching_loss() -> None:
     assert isinstance(model, ConditionalNormalizingFlowFM)
     assert loss.ndim == 0 and torch.isfinite(loss)
     assert all(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_cnffm_likelihood_is_differentiable_with_respect_to_conditioning_parameters() -> None:
+    torch.manual_seed(5)
+    model = ConditionalNormalizingFlowFM(2, num_layers=1, hidden_dim=8, ode_steps=2)
+    theta_obs = torch.randn(3, 2)
+    theta_true = torch.randn(3, 2, requires_grad=True)
+
+    gradient = torch.autograd.grad(model(theta_obs, theta_true).sum(), theta_true)[0]
+
+    assert torch.isfinite(gradient).all()
+    assert torch.any(gradient != 0)
+
+
+def test_posterior_energy_gradient_includes_likelihood_gradient() -> None:
+    class QuadraticLikelihood(torch.nn.Module):
+        def forward(self, theta_obs, theta_true):
+            return -(theta_obs - theta_true).square().sum(dim=-1)
+
+    observations = torch.tensor([[0.75]])
+    bounds = torch.tensor([[0.0, 1.0]])
+    energy = _BatchedPosteriorEnergy(QuadraticLikelihood(), observations, bounds)
+    unconstrained = torch.zeros(1, 1)
+
+    gradient = energy.gradient(unconstrained)
+
+    # At logit zero theta=0.5 and d(theta)/d(logit)=0.25.  The transform's
+    # log-Jacobian has zero derivative there, leaving 2*(0.5-0.75)*0.25.
+    assert gradient.item() == pytest.approx(-0.125)
 
 
 def test_sample_posteriors_runs_one_chain_per_observation(monkeypatch) -> None:
