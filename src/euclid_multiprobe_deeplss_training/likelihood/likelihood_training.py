@@ -19,6 +19,104 @@ from .likelihood_mdn import GaussianMixtureMDN
 
 LOGGER = get_logger(__file__)
 
+
+class _BatchedPosteriorEnergy(BaseModel):
+    """Posterior energy in unconstrained coordinates for batched observations."""
+
+    def __init__(self, likelihood: LikelihoodBase, observations: torch.Tensor, prior_bounds: torch.Tensor) -> None:
+        super().__init__(dtype=observations.dtype, device=observations.device)
+        self.likelihood = likelihood
+        self.register_buffer("observations", observations)
+        self.register_buffer("lower", prior_bounds[:, 0])
+        self.register_buffer("width", prior_bounds[:, 1] - prior_bounds[:, 0])
+
+    def forward(self, unconstrained: torch.Tensor) -> torch.Tensor:
+        # A logit transform keeps HMC away from the discontinuous edges of the
+        # flat prior. Its Jacobian is required for the transformed density.
+        theta = self.to_parameters(unconstrained)
+        log_jacobian = (
+            torch.log(self.width)
+            + torch.nn.functional.logsigmoid(unconstrained)
+            + torch.nn.functional.logsigmoid(-unconstrained)
+        ).sum(dim=-1)
+        return -self.likelihood(self.observations, theta) - log_jacobian
+
+    def to_parameters(self, unconstrained: torch.Tensor) -> torch.Tensor:
+        """Transform unconstrained states to the open prior intervals."""
+        return self.lower + self.width * torch.sigmoid(unconstrained)
+
+
+def sample_posteriors(
+    model: LikelihoodBase,
+    observations: torch.Tensor,
+    prior_bounds: torch.Tensor,
+    *,
+    num_steps: int = 1000,
+    burn_in: int = 200,
+    step_size: float = 0.01,
+    num_leapfrog_steps: int = 10,
+    seed: int = 42,
+) -> list[torch.Tensor]:
+    """Run one HMC chain for every observation and return post-burn-in samples."""
+    if observations.ndim != 2 or prior_bounds.shape != (observations.shape[1], 2):
+        raise ValueError("observations must have shape (N, M) and prior_bounds must have shape (M, 2).")
+    if not torch.all(prior_bounds[:, 0] < prior_bounds[:, 1]):
+        raise ValueError("Every prior lower bound must be smaller than its upper bound.")
+    if not 0 <= burn_in < num_steps:
+        raise ValueError("mcmc_burn_in must be non-negative and smaller than mcmc_num_steps.")
+    if step_size <= 0 or num_leapfrog_steps <= 0:
+        raise ValueError("MCMC step size and number of leapfrog steps must be positive.")
+
+    parameter = next(model.parameters())
+    observations = observations.to(device=parameter.device, dtype=parameter.dtype)
+    prior_bounds = prior_bounds.to(device=parameter.device, dtype=parameter.dtype)
+    energy = _BatchedPosteriorEnergy(model, observations, prior_bounds)
+    generator = torch.Generator(device=parameter.device).manual_seed(seed)
+    initial_unit = torch.rand(observations.shape, device=parameter.device, dtype=parameter.dtype, generator=generator)
+    epsilon = torch.finfo(parameter.dtype).eps
+    initial_state = torch.logit(initial_unit.clamp(epsilon, 1.0 - epsilon))
+
+    model.eval()
+    sampler = HamiltonianMonteCarlo(
+        model=energy,
+        step_size=step_size,
+        n_leapfrog_steps=num_leapfrog_steps,
+        dtype=parameter.dtype,
+        device=parameter.device,
+    )
+    LOGGER.info(f"Sampling {len(observations)} posterior chains with {num_steps} HMC steps")
+    trajectory = sampler.sample(x=initial_state, n_steps=num_steps, return_trajectory=True, generator=generator)
+    # torchebm trajectories are batch-major: (observations, steps, parameters).
+    transformed = energy.to_parameters(trajectory[:, burn_in:])
+    return [chain.detach().cpu() for chain in transformed]
+
+
+def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor, prior_bounds: torch.Tensor):
+    """Plot posterior marginals for at most the first four mock observations."""
+    import matplotlib.pyplot as plt
+
+    if not samples:
+        raise ValueError("At least one posterior sample set is required.")
+    if labels.ndim != 2:
+        raise ValueError("labels must have shape (N, M).")
+    rows = min(4, len(samples))
+    num_parameters = labels.shape[1]
+    if prior_bounds.shape != (num_parameters, 2):
+        raise ValueError("prior_bounds must have shape (M, 2).")
+
+    bin_edges = [np.linspace(float(lower), float(upper), 41) for lower, upper in prior_bounds]
+    figure, axes = plt.subplots(rows, num_parameters, figsize=(4 * num_parameters, 3 * rows), squeeze=False)
+    for row in range(rows):
+        for column in range(num_parameters):
+            axis = axes[row, column]
+            axis.hist(samples[row][:, column].numpy(), bins=bin_edges[column])
+            axis.axvline(float(labels[row, column]), color="tab:red", linewidth=2, label="True value")
+            axis.set_xlabel(f"Parameter {column}")
+            axis.set_ylabel("Samples")
+            axis.legend(loc="upper right")
+    figure.tight_layout()
+    return figure
+
 def plot_likelihood_fit(
     model: LikelihoodBase,
     predictions: torch.Tensor,
@@ -184,6 +282,45 @@ def train_likelihood(
     import matplotlib.pyplot as plt
 
     plt.close(figure)
+
+    if num_observations < 0 or num_observations > len(theta_obs):
+        raise ValueError("num_observations must be between zero and the size of the predictions dataset.")
+    if num_observations:
+        if prior_bounds is None:
+            raise ValueError("prior_bounds are required when posterior sampling is enabled.")
+        if prior_bounds.shape != (theta_obs.shape[1], 2):
+            raise ValueError("The physics-model priors must match the prediction dimensionality.")
+
+        # Reuse the seeded permutation so selection is reproducible, while
+        # drawing from the complete predictions data set as requested.
+        selected = order[:num_observations]
+        observations = theta_obs[selected]
+        selected_labels = theta_true[selected]
+        samples = sample_posteriors(
+            model,
+            observations,
+            prior_bounds,
+            num_steps=int(settings.get("mcmc_num_steps", 1000)),
+            burn_in=int(settings.get("mcmc_burn_in", 200)),
+            step_size=float(settings.get("mcmc_step_size", 0.01)),
+            num_leapfrog_steps=int(settings.get("mcmc_num_leapfrog_steps", 10)),
+            seed=int(settings.get("seed", 42)),
+        )
+
+        output_path = Path(output_file)
+        samples_file = Path(settings.get("samples_file", output_path.with_name(f"{output_path.stem}_samples.h5")))
+        samples_file.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(samples_file, "w") as handle:
+            for index, chain in enumerate(samples):
+                handle.create_dataset(f"samples{index:04d}", data=chain.numpy())
+        LOGGER.info(f"Saved posterior samples to {samples_file}")
+
+        posterior_figure = plot_posterior_samples(samples, selected_labels, prior_bounds)
+        samples_plot_file = Path(settings.get("samples_plot_file", output_path.with_name(f"{output_path.stem}_samples.png")))
+        samples_plot_file.parent.mkdir(parents=True, exist_ok=True)
+        posterior_figure.savefig(samples_plot_file, bbox_inches="tight")
+        plt.close(posterior_figure)
+        LOGGER.info(f"Saved posterior sampling plot to {samples_plot_file}")
 
     return model, history
 
