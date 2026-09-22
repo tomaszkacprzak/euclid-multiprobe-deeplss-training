@@ -8,6 +8,7 @@ from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import Gaussia
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import (  # noqa: E402
     build_likelihood,
     plot_likelihood_fit,
+    plot_posterior_samples,
     sample_posteriors,
     train_likelihood,
 )
@@ -130,6 +131,34 @@ def test_sample_posteriors_with_torchebm_uses_gradients_and_respects_bounds() ->
     assert [sample.shape for sample in samples] == [(2, 1), (2, 1)]
     assert all(torch.isfinite(sample).all() for sample in samples)
     assert all(((sample > -1.0) & (sample < 1.0)).all() for sample in samples)
+
+
+def test_plot_posterior_samples_reuses_prior_extent_bins_per_parameter() -> None:
+    pytest.importorskip("matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    samples = [
+        torch.tensor([[-0.5, 11.0], [0.0, 12.0]]),
+        torch.tensor([[0.5, 18.0], [0.75, 19.0]]),
+    ]
+    labels = torch.tensor([[0.1, 13.0], [0.2, 17.0]])
+    prior_bounds = torch.tensor([[-1.0, 1.0], [10.0, 20.0]])
+
+    figure = plot_posterior_samples(samples, labels, prior_bounds)
+
+    for column, expected_bounds in enumerate(prior_bounds):
+        first_edges = [patch.get_x() for patch in figure.axes[column].patches]
+        second_edges = [patch.get_x() for patch in figure.axes[2 + column].patches]
+        first_edges.append(figure.axes[column].patches[-1].get_x() + figure.axes[column].patches[-1].get_width())
+        second_edges.append(figure.axes[2 + column].patches[-1].get_x() + figure.axes[2 + column].patches[-1].get_width())
+        assert first_edges == pytest.approx(second_edges)
+        assert first_edges[0] == pytest.approx(float(expected_bounds[0]))
+        assert first_edges[-1] == pytest.approx(float(expected_bounds[1]))
+        assert len(first_edges) == 41
+    plt.close(figure)
 
 
 def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> None:
