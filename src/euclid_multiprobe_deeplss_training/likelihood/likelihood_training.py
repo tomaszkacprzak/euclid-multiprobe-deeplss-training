@@ -50,7 +50,10 @@ def sample_posteriors(
     rng = np.random.default_rng(seed)
     model.eval()
     results = []
-    for observation in observations:
+    for index, observation in enumerate(observations):
+
+        LOGGER.info(f"Sampling posterior for observation {index:>5d} of {len(observations)}")
+
         observed = observation.float().to(device).unsqueeze(0)
 
         def log_probability(theta, observed=observed):
@@ -221,6 +224,8 @@ def train_likelihood(
         theta_obs = torch.as_tensor(handle["predictions"][:], dtype=torch.float32)
         theta_true = torch.as_tensor(handle["labels"][:], dtype=torch.float32)
     LikelihoodBase._validate_pairs(theta_obs, theta_true, "input")
+    LOGGER.info(f"Loaded observations {theta_obs.shape}")
+    LOGGER.info(f"Loaded labels {theta_true.shape}")
 
     validation_fraction = float(settings.get("validation_fraction", 0.2))
     if not 0.0 < validation_fraction < 1.0:
@@ -263,6 +268,9 @@ def train_likelihood(
     if num_observations:
         if prior_bounds is None:
             raise ValueError("prior_bounds are required when posterior sampling is enabled.")
+
+        LOGGER.info(f"Sampling posteriors with {num_observations} observations")
+
         selected = order[:num_observations]
         observations = theta_obs[selected]
         selected_labels = theta_true[selected]
