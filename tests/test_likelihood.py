@@ -3,10 +3,13 @@ from __future__ import annotations
 import pytest
 
 torch = pytest.importorskip("torch")
+from scipy.stats import qmc  # noqa: E402
+
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_cnf import ConditionalNormalizingFlowFM  # noqa: E402
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import GaussianMixtureMDN  # noqa: E402
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import (  # noqa: E402
     _BatchedPosteriorEnergy,
+    _select_initial_parameters,
     build_likelihood,
     plot_likelihood_fit,
     plot_posterior_samples,
@@ -127,10 +130,11 @@ def test_sample_posteriors_runs_one_chain_per_observation(monkeypatch) -> None:
         def __init__(self, *, model, **kwargs):
             self.model = model
 
-        def sample(self, *, x, n_steps, return_trajectory, generator):
+        def sample(self, *, x, n_steps, return_trajectory, generator, return_diagnostics):
             calls.append((x.shape, n_steps, return_trajectory, generator))
             # A zero logit maps to the midpoint of every prior interval.
-            return torch.zeros(x.shape[0], n_steps, x.shape[1], device=x.device, dtype=x.dtype)
+            trajectory = torch.zeros(x.shape[0], n_steps, x.shape[1], device=x.device, dtype=x.dtype)
+            return trajectory, {"acceptance_rate": torch.ones(x.shape[0])}
 
     monkeypatch.setattr("euclid_multiprobe_deeplss_training.likelihood.likelihood_training.HamiltonianMonteCarlo", FakeHMC)
 
@@ -141,6 +145,41 @@ def test_sample_posteriors_runs_one_chain_per_observation(monkeypatch) -> None:
     assert len(samples) == 3
     assert all(sample.shape == (3, 2) for sample in samples)
     assert all(torch.equal(sample, torch.tensor([[0.0, 2.0]]).expand(3, -1)) for sample in samples)
+
+
+def test_latin_hypercube_initialization_selects_best_trial_per_observation() -> None:
+    class MatchingLikelihood(torch.nn.Module):
+        def forward(self, theta_obs, theta_true):
+            return -(theta_obs - theta_true).square().sum(dim=-1)
+
+    observations = torch.tensor([[-1.5, 12.0], [1.5, 19.0]])
+    prior_bounds = torch.tensor([[-2.0, 2.0], [10.0, 20.0]])
+    generator = torch.Generator().manual_seed(3)
+    initial = _select_initial_parameters(
+        MatchingLikelihood(),
+        observations,
+        prior_bounds,
+        method="latin_hypercube",
+        num_initial_trials=20,
+        seed=3,
+        generator=generator,
+    )
+
+    unscaled_trials = qmc.LatinHypercube(d=2, seed=3).random(20)
+    trials = torch.as_tensor(
+        qmc.scale(unscaled_trials, l_bounds=prior_bounds[:, 0].numpy(), u_bounds=prior_bounds[:, 1].numpy()), dtype=observations.dtype
+    )
+    likelihoods = -(observations[:, None, :] - trials[None, :, :]).square().sum(dim=-1)
+    expected = trials[likelihoods.argmax(dim=1)]
+    assert torch.equal(initial, expected)
+    assert not torch.equal(initial[0], initial[1])
+
+
+@pytest.mark.parametrize("method", ["unknown", "latin-hypercube"])
+def test_initialization_rejects_unknown_method(method) -> None:
+    model = GaussianMixtureMDN(1, num_components=1, num_layers=1, hidden_dim=4)
+    with pytest.raises(ValueError, match="mcmc_initialization_method"):
+        sample_posteriors(model, torch.zeros(1, 1), torch.tensor([[0.0, 1.0]]), initialization_method=method)
 
 
 def test_sample_posteriors_with_torchebm_uses_gradients_and_respects_bounds() -> None:
