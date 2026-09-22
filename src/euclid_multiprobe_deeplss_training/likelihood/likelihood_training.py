@@ -6,10 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
-from torchebm.core import BaseModel
-from torchebm.samplers import HamiltonianMonteCarlo
 
 from ..utils.config import ConfigPaths, config_paths, load_config
 from ..utils.logger import get_logger
@@ -132,8 +129,6 @@ def train_likelihood(
     input_file: str | Path,
     output_file: str | Path,
     device: torch.device | str | None = None,
-    num_observations: int = 0,
-    prior_bounds: torch.Tensor | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Train from a prediction HDF5 file containing ``predictions`` and ``labels``.
 
@@ -194,7 +189,6 @@ def train_likelihood_from_config(
     input_file: str | Path,
     output_file: str | Path,
     device: torch.device | str | None = None,
-    num_observations: int | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Load and merge YAML configuration files, then train a likelihood model."""
 
@@ -208,34 +202,9 @@ def train_likelihood_from_config(
         raise ValueError("The 'likelihood' configuration section is missing.")
     if not isinstance(settings, Mapping):
         raise TypeError("The 'likelihood' configuration section must be a mapping.")
-    sample_count = int(settings.get("num_observations", 0) if num_observations is None else num_observations)
-    prior_bounds = None
-    if sample_count:
-        training_settings = raw_config.get("training")
-        forward_model = raw_config.get("forward_model")
-        if not isinstance(training_settings, Mapping) or not isinstance(forward_model, Mapping):
-            raise ValueError("Posterior sampling requires the 'training' and 'forward_model' configuration sections.")
-
-        from ..training import load_physics_model_class
-
-        physics_model_class = load_physics_model_class(str(training_settings["physics_model"]))
-        physics_args = dict(training_settings.get("physics_model_args", {}))
-        physics_args.setdefault("num_samples_prior", 1)
-        physics_args.setdefault("nside", forward_model.get("analysis", {}).get("n_side"))
-        physics_model = physics_model_class(
-            forward_model,
-            scalers=False,
-            seed=int(settings.get("seed", 42)),
-            device=device or settings.get("device"),
-            **physics_args,
-        )
-        prior_bounds = torch.tensor([physics_model.priors[name] for name in physics_model.params], dtype=torch.float32)
-
     return train_likelihood(
         settings,
         input_file=input_file,
         output_file=output_file,
         device=device,
-        num_observations=sample_count,
-        prior_bounds=prior_bounds,
     )

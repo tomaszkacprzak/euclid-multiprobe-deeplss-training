@@ -84,32 +84,24 @@ class ConditionalNormalizingFlowFM(LikelihoodBase):
                 time: torch.Tensor, augmented_state: tuple[torch.Tensor, torch.Tensor]
             ) -> tuple[torch.Tensor, torch.Tensor]:
                 state, _ = augmented_state
-                # Keep the ODE graph connected to ``theta_true``.  Detaching
-                # the velocity (as this code previously did) is sufficient for
-                # likelihood evaluation, but makes the likelihood constant as
-                # far as HMC's gradient with respect to its parameters is
-                # concerned.  ``requires_grad_`` is still needed because the
-                # divergence differentiates the velocity with respect to the
-                # evolving state.
-                state = state.requires_grad_(True)
+                state = state.detach().requires_grad_(True)
                 velocity = self.vector_field(state, time, theta_true)
                 divergence = torch.zeros_like(density_change)
                 for coordinate in range(self.num_parameters):
                     gradient = torch.autograd.grad(
                         velocity[:, coordinate].sum(),
                         state,
-                        create_graph=True,
                         retain_graph=True,
                     )[0]
                     divergence = divergence + gradient[:, coordinate]
                 # Along the probability-flow ODE, d(log p) / dt = -div(v).
                 # Integrating this augmented state from data time 1 to base
                 # time 0 yields the amount subtracted from the base density.
-                return velocity, -divergence
+                return velocity.detach(), -divergence.detach()
 
             states, density_changes = odeint(
                 augmented_dynamics,
-                (theta_obs, density_change),
+                (theta_obs.detach(), density_change),
                 integration_times,
                 method="euler",
             )
