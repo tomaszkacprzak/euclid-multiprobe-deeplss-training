@@ -52,7 +52,7 @@ def sample_posteriors(
     results = []
     for index, observation in enumerate(observations):
 
-        LOGGER.info(f"Sampling posterior for observation {index:>5d} of {len(observations)}")
+        LOGGER.info(f"Sampling posterior for observation {index+1:>5d}/{len(observations)}")
 
         observed = observation.float().to(device).unsqueeze(0)
 
@@ -68,7 +68,7 @@ def sample_posteriors(
 
         initial_state = rng.uniform(lower, upper, size=(num_walkers, observations.shape[1]))
         sampler = emcee.EnsembleSampler(num_walkers, observations.shape[1], log_probability, vectorize=True)
-        sampler.run_mcmc(initial_state, num_steps, progress=False)
+        sampler.run_mcmc(initial_state, num_steps, progress=True)
         results.append(torch.from_numpy(sampler.get_chain(discard=burn_in, flat=True).astype(np.float32)))
     return results
 

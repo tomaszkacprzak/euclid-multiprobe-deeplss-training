@@ -44,7 +44,7 @@ dependencies = [
   "pyracorr",
   "tqdm",
   "matplotlib",
-  "emcee",
+  "torchebm",
 ]
 
 [project.optional-dependencies]
