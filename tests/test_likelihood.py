@@ -3,15 +3,14 @@ from __future__ import annotations
 import pytest
 
 torch = pytest.importorskip("torch")
+from euclid_multiprobe_deeplss_training.likelihood.likelihood_cnf import ConditionalNormalizingFlowFM  # noqa: E402
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import GaussianMixtureMDN  # noqa: E402
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import (  # noqa: E402
     build_likelihood,
     plot_likelihood_fit,
+    sample_posteriors,
     train_likelihood,
 )
-
-from euclid_multiprobe_deeplss_training.likelihood.likelihood_cnf import ConditionalNormalizingFlowFM  # noqa: E402
-from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import GaussianMixtureMDN  # noqa: E402
 
 
 def test_mdn_returns_one_finite_log_likelihood_per_sample() -> None:
@@ -67,17 +66,15 @@ def test_cnffm_zero_velocity_has_standard_normal_likelihood() -> None:
     theta_true = torch.randn(5, 2)
 
     result = model(theta_obs, theta_true)
-    expected = torch.distributions.Independent(
-        torch.distributions.Normal(torch.zeros_like(theta_obs), torch.ones_like(theta_obs)), 1
-    ).log_prob(theta_obs)
+    expected = torch.distributions.Independent(torch.distributions.Normal(torch.zeros_like(theta_obs), torch.ones_like(theta_obs)), 1).log_prob(
+        theta_obs
+    )
 
     assert torch.allclose(result, expected)
 
 
 def test_cnffm_builder_and_flow_matching_loss() -> None:
-    model = build_likelihood(
-        2, {"model_type": "cnffm", "model_args": {"num_layers": 1, "hidden_dim": 8, "ode_steps": 2}}
-    )
+    model = build_likelihood(2, {"model_type": "cnffm", "model_args": {"num_layers": 1, "hidden_dim": 8, "ode_steps": 2}})
     theta_obs = torch.randn(4, 2)
     theta_true = torch.randn(4, 2)
 
@@ -87,7 +84,55 @@ def test_cnffm_builder_and_flow_matching_loss() -> None:
     assert isinstance(model, ConditionalNormalizingFlowFM)
     assert loss.ndim == 0 and torch.isfinite(loss)
     assert all(parameter.grad is not None for parameter in model.parameters())
-    
+
+
+def test_sample_posteriors_batches_all_observations(monkeypatch) -> None:
+    model = GaussianMixtureMDN(2, num_components=2, num_layers=1, hidden_dim=8)
+    observations = torch.randn(3, 2)
+    prior_bounds = torch.tensor([[-2.0, 2.0], [1.0, 3.0]])
+    calls = []
+
+    class FakeHMC:
+        def __init__(self, *, model, **kwargs):
+            self.model = model
+
+        def sample(self, *, x, n_steps, return_trajectory, generator):
+            calls.append((x.shape, n_steps, return_trajectory, generator))
+            # A zero logit maps to the midpoint of every prior interval.
+            return torch.zeros(x.shape[0], n_steps, x.shape[1], device=x.device, dtype=x.dtype)
+
+    monkeypatch.setattr("euclid_multiprobe_deeplss_training.likelihood.likelihood_training.HamiltonianMonteCarlo", FakeHMC)
+
+    samples = sample_posteriors(model, observations, prior_bounds, num_walkers=4, num_steps=5, burn_in=2)
+
+    assert len(calls) == 1
+    assert calls[0][:3] == (torch.Size([12, 2]), 5, True)
+    assert len(samples) == 3
+    assert all(sample.shape == (12, 2) for sample in samples)
+    assert all(torch.equal(sample, torch.tensor([[0.0, 2.0]]).expand(12, -1)) for sample in samples)
+
+
+def test_sample_posteriors_with_torchebm_uses_gradients_and_respects_bounds() -> None:
+    model = GaussianMixtureMDN(1, num_components=1, num_layers=1, hidden_dim=4)
+    observations = torch.randn(2, 1)
+    prior_bounds = torch.tensor([[-1.0, 1.0]])
+
+    samples = sample_posteriors(
+        model,
+        observations,
+        prior_bounds,
+        num_walkers=2,
+        num_steps=3,
+        burn_in=1,
+        num_leapfrog_steps=1,
+        seed=7,
+    )
+
+    assert [sample.shape for sample in samples] == [(4, 1), (4, 1)]
+    assert all(torch.isfinite(sample).all() for sample in samples)
+    assert all(((sample > -1.0) & (sample < 1.0)).all() for sample in samples)
+
+
 def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> None:
     pytest.importorskip("matplotlib")
     import matplotlib
@@ -110,6 +155,7 @@ def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> Non
         assert panel.get_xlabel() == f"Label {index}"
         assert panel.get_ylabel() == f"Prediction {index}"
         assert panel.collections[0].get_array().size == 100 * 100
+
 
 def test_train_likelihood_saves_plot_next_to_checkpoint(tmp_path) -> None:
     pytest.importorskip("matplotlib")
