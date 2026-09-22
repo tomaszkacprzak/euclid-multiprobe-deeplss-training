@@ -11,6 +11,7 @@ import torch
 from ..utils.config import ConfigPaths, config_paths, load_config
 from ..utils.logger import get_logger
 from .likelihood_base import LikelihoodBase
+from .likelihood_cnf import ConditionalNormalizingFlowFM
 from .likelihood_mdn import GaussianMixtureMDN
 
 LOGGER = get_logger(__file__)
@@ -123,12 +124,10 @@ def build_likelihood(num_parameters: int, settings: Mapping[str, Any]) -> Likeli
     if not isinstance(model_args, Mapping):
         raise TypeError("likelihood.model_args must be a mapping.")
     if model_type == "mdn":
-        model = GaussianMixtureMDN(num_parameters, **dict(model_args))
-    else:
-        raise ValueError(f"Unknown likelihood model_type: {model_type!r}.")
-
-    LOGGER.info(f"Built likelihood model: {model}")
-    return model
+        return GaussianMixtureMDN(num_parameters, **dict(model_args))
+    if model_type == "cnffm":
+        return ConditionalNormalizingFlowFM(num_parameters, **dict(model_args))
+    raise ValueError(f"Unknown likelihood model_type: {model_type!r}.")
 
 
 def train_likelihood(
@@ -162,6 +161,9 @@ def train_likelihood(
     order = torch.randperm(len(theta_obs), generator=generator)
     validation_indices, training_indices = order[:validation_size], order[validation_size:]
     model = build_likelihood(theta_obs.shape[1], settings)
+
+    LOGGER.info(f"Training likelihood model {settings.get('model_type')}")
+
     history = model.fit(
         theta_obs[training_indices],
         theta_true[training_indices],
