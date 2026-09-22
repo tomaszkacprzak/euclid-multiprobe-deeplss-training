@@ -53,26 +53,22 @@ def sample_posteriors(
     observations: torch.Tensor,
     prior_bounds: torch.Tensor,
     *,
-    num_walkers: int = 32,
     num_steps: int = 1000,
     burn_in: int = 200,
     step_size: float = 0.01,
     num_leapfrog_steps: int = 10,
     seed: int = 42,
 ) -> list[torch.Tensor]:
-    """Sample ``p(theta_true | theta_obs)`` with batched torchebm HMC chains.
+    """Sample ``p(theta_true | theta_obs)`` with one HMC chain per observation.
 
-    Every observation owns ``num_walkers`` chains, but all observations and
-    chains are advanced together in a single PyTorch batch.  A logit transform
-    enforces the uniform ``prior_bounds`` without introducing a discontinuous
-    energy at the boundary.
+    The independent chains are advanced together in a single PyTorch batch. A
+    logit transform enforces the uniform ``prior_bounds`` without introducing
+    a discontinuous energy at the boundary.
     """
     if observations.ndim != 2 or prior_bounds.shape != (observations.shape[1], 2):
         raise ValueError("observations must have shape (N, M) and prior_bounds must have shape (M, 2).")
     if not torch.all(prior_bounds[:, 0] < prior_bounds[:, 1]):
         raise ValueError("Every prior lower bound must be smaller than its upper bound.")
-    if num_walkers < 2 * observations.shape[1]:
-        raise ValueError("mcmc_num_walkers must be at least twice the parameter dimensionality.")
     if not 0 <= burn_in < num_steps:
         raise ValueError("mcmc_burn_in must be non-negative and smaller than mcmc_num_steps.")
     if step_size <= 0:
@@ -84,16 +80,15 @@ def sample_posteriors(
     dtype = next(model.parameters()).dtype
     observations = observations.to(device=device, dtype=dtype)
     prior_bounds = prior_bounds.to(device=device, dtype=dtype)
-    batched_observations = observations.repeat_interleave(num_walkers, dim=0)
-    energy = _BatchedPosteriorEnergy(model, batched_observations, prior_bounds)
+    energy = _BatchedPosteriorEnergy(model, observations, prior_bounds)
 
     generator = torch.Generator(device=device).manual_seed(seed)
-    initial_unit = torch.rand(len(batched_observations), observations.shape[1], device=device, dtype=dtype, generator=generator)
+    initial_unit = torch.rand(observations.shape, device=device, dtype=dtype, generator=generator)
     epsilon = torch.finfo(dtype).eps
     initial_state = torch.logit(initial_unit.clamp(min=epsilon, max=1.0 - epsilon))
 
     model.eval()
-    LOGGER.info(f"Sampling {len(observations)} posteriors in one batch ({len(batched_observations)} HMC chains)")
+    LOGGER.info(f"Sampling {len(observations)} posteriors with one HMC chain per observation")
     sampler = HamiltonianMonteCarlo(
         model=energy,
         step_size=step_size,
@@ -108,8 +103,7 @@ def sample_posteriors(
         generator=generator,
     )
     parameter_samples = energy.to_parameters(trajectory[:, burn_in:])
-    parameter_samples = parameter_samples.reshape(len(observations), num_walkers, num_steps - burn_in, observations.shape[1])
-    return [samples.reshape(-1, observations.shape[1]).cpu() for samples in parameter_samples]
+    return [samples.cpu() for samples in parameter_samples]
 
 
 def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor):
@@ -315,7 +309,6 @@ def train_likelihood(
             model,
             observations,
             prior_bounds,
-            num_walkers=int(settings.get("mcmc_num_walkers", max(32, 2 * theta_obs.shape[1]))),
             num_steps=int(settings.get("mcmc_num_steps", 1000)),
             burn_in=int(settings.get("mcmc_burn_in", 200)),
             step_size=float(settings.get("mcmc_step_size", 0.01)),
