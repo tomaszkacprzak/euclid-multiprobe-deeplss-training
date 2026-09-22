@@ -56,6 +56,7 @@ def plot_likelihood_fit(
             predictions_array[:, index],
             c=log_likelihood,
             marker="o",
+            cmap="Spectral_r",
         )
         axis.set_xlabel(f"Label {index}")
         axis.set_ylabel(f"Prediction {index}")
@@ -80,29 +81,36 @@ def plot_likelihood_fit(
     surface_max = max(grid_log_likelihood.max() for _, _, grid_log_likelihood in surface_data)
     surface = None
     for index, (axis, (label_values, prediction_values, grid_log_likelihood)) in enumerate(zip(axes[1], surface_data, strict=True)):
+
+
+        likelihood = np.exp(grid_log_likelihood-np.max(grid_log_likelihood))
+        norm = likelihood.sum(axis=1, keepdims=True)
+        likelihood = likelihood / norm
+
         surface = axis.pcolormesh(
             label_values,
             prediction_values,
-            grid_log_likelihood,
-            shading="auto",
-            vmin=surface_min,
-            vmax=surface_max,
+            likelihood,
+            # shading="auto",
+            # vmin=surface_min,
+            # vmax=surface_max,
+            cmap="Spectral_r",
         )
         axis.set_xlabel(f"Label {index}")
         axis.set_ylabel(f"Prediction {index}")
 
     # Validation above guarantees at least one parameter, and therefore a scatter.
-    assert scatter is not None
-    fig.colorbar(scatter, ax=axes.ravel().tolist(), label="Log likelihood", orientation="horizontal", location="bottom", pad=0.15)
-    assert surface is not None
-    fig.colorbar(
-        surface,
-        ax=axes[1].tolist(),
-        label="Predicted log likelihood",
-        orientation="horizontal",
-        location="bottom",
-        pad=0.15,
-    )
+    # assert scatter is not None
+    # fig.colorbar(scatter, ax=axes.ravel().tolist(), label="Log likelihood", orientation="horizontal", location="bottom", pad=0.15)
+    # assert surface is not None
+    # fig.colorbar(
+    #     surface,
+    #     ax=axes[1].tolist(),
+    #     label="Predicted log likelihood",
+    #     orientation="horizontal",
+    #     location="bottom",
+    #     pad=0.15,
+    # )
 
     fig.subplots_adjust(bottom=0.12, right=0.9, hspace=0.45, wspace=0.3)
     return fig
