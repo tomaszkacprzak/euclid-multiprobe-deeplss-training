@@ -252,3 +252,7 @@ likelihood:
   mcmc_burn_in: 200
   mcmc_step_size: 0.01
   mcmc_num_leapfrog_steps: 10
+  # Starting points can be drawn randomly (the original behaviour) or selected
+  # as the highest-likelihood point from a Latin-hypercube sample of the prior.
+  mcmc_initialization_method: "latin_hypercube" # "random" or "latin_hypercube"
+  mcmc_num_initial_trials: 100

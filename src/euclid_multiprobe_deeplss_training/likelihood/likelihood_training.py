@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from scipy.stats import qmc
 from torchebm.core import BaseModel
 from torchebm.samplers import HamiltonianMonteCarlo
 
@@ -49,6 +50,47 @@ class _BatchedPosteriorEnergy(BaseModel):
         return self.lower + self.width * torch.sigmoid(unconstrained)
 
 
+def _select_initial_parameters(
+    model: LikelihoodBase,
+    observations: torch.Tensor,
+    prior_bounds: torch.Tensor,
+    *,
+    method: str,
+    num_initial_trials: int,
+    seed: int,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """Select one initial parameter vector for each observation."""
+    if method == "random":
+        unit_samples = torch.rand(observations.shape, device=observations.device, dtype=observations.dtype, generator=generator)
+        return prior_bounds[:, 0] + unit_samples * (prior_bounds[:, 1] - prior_bounds[:, 0])
+    if method != "latin_hypercube":
+        raise ValueError("mcmc_initialization_method must be 'random' or 'latin_hypercube'.")
+    if num_initial_trials <= 0:
+        raise ValueError("mcmc_num_initial_trials must be positive.")
+
+    latin_sampler = qmc.LatinHypercube(d=observations.shape[1], seed=seed)
+    unscaled_trials = latin_sampler.random(num_initial_trials)
+    bounds = prior_bounds.detach().cpu().numpy()
+    scaled_trials = qmc.scale(
+        unscaled_trials,
+        l_bounds=bounds[:, 0],
+        u_bounds=bounds[:, 1],
+    )
+    trials = torch.as_tensor(scaled_trials, device=observations.device, dtype=observations.dtype)
+
+    num_observations = observations.shape[0]
+    paired_observations = observations[:, None, :].expand(-1, num_initial_trials, -1)
+    paired_trials = trials[None, :, :].expand(num_observations, -1, -1)
+    with torch.no_grad():
+        log_likelihoods = model(
+            paired_observations.reshape(-1, observations.shape[1]),
+            paired_trials.reshape(-1, observations.shape[1]),
+        ).reshape(num_observations, num_initial_trials)
+    best_trials = log_likelihoods.argmax(dim=1)
+    return trials[best_trials]
+
+
 def sample_posteriors(
     model: LikelihoodBase,
     observations: torch.Tensor,
@@ -59,6 +101,8 @@ def sample_posteriors(
     step_size: float = 0.01,
     num_leapfrog_steps: int = 10,
     seed: int = 42,
+    initialization_method: str = "random",
+    num_initial_trials: int = 100,
 ) -> list[torch.Tensor]:
     """Sample ``p(theta_true | theta_obs)`` with one HMC chain per observation.
 
@@ -84,12 +128,26 @@ def sample_posteriors(
     energy = _BatchedPosteriorEnergy(model, observations, prior_bounds)
 
     generator = torch.Generator(device=device).manual_seed(seed)
-    initial_unit = torch.rand(observations.shape, device=device, dtype=dtype, generator=generator)
+    model.eval()
+    initial_parameters = _select_initial_parameters(
+        model,
+        observations,
+        prior_bounds,
+        method=initialization_method,
+        num_initial_trials=num_initial_trials,
+        seed=seed,
+        generator=generator,
+    )
+    initial_unit = (initial_parameters - prior_bounds[:, 0]) / (prior_bounds[:, 1] - prior_bounds[:, 0])
     epsilon = torch.finfo(dtype).eps
     initial_state = torch.logit(initial_unit.clamp(min=epsilon, max=1.0 - epsilon))
 
-    model.eval()
-    LOGGER.info(f"Initializing HMC sampler with step size {step_size} and {num_leapfrog_steps} leapfrog steps")
+    LOGGER.info(
+        "Initializing HMC sampler using %s starting points, step size %s, and %s leapfrog steps",
+        initialization_method,
+        step_size,
+        num_leapfrog_steps,
+    )
     sampler = HamiltonianMonteCarlo(
         model=energy,
         step_size=step_size,
@@ -335,6 +393,8 @@ def train_likelihood(
             step_size=float(settings.get("mcmc_step_size", 0.01)),
             num_leapfrog_steps=int(settings.get("mcmc_num_leapfrog_steps", 10)),
             seed=int(settings.get("seed", 42)),
+            initialization_method=str(settings.get("mcmc_initialization_method", "random")),
+            num_initial_trials=int(settings.get("mcmc_num_initial_trials", 100)),
         )
         samples_file = Path(settings.get("samples_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")))
         samples_file.parent.mkdir(parents=True, exist_ok=True)
