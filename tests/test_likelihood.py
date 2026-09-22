@@ -8,6 +8,8 @@ from euclid_multiprobe_deeplss_training.likelihood.likelihood_mdn import Gaussia
 from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import (  # noqa: E402
     build_likelihood,
     plot_likelihood_fit,
+    plot_posterior_samples,
+    sample_posterior_metropolis_hastings,
     train_likelihood,
 )
 
@@ -83,6 +85,34 @@ def test_cnffm_builder_and_flow_matching_loss() -> None:
     assert isinstance(model, ConditionalNormalizingFlowFM)
     assert loss.ndim == 0 and torch.isfinite(loss)
     assert all(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_metropolis_hastings_samples_inside_box_prior() -> None:
+    class QuadraticLikelihood(GaussianMixtureMDN):
+        def log_likelihood(self, theta_obs, theta_true):
+            return -(theta_obs - theta_true).square().sum(dim=-1)
+
+    model = QuadraticLikelihood(2, num_components=1, num_layers=1, hidden_dim=4)
+    bounds = torch.tensor([[-1.0, 1.0], [2.0, 4.0]])
+
+    samples = sample_posterior_metropolis_hastings(
+        model, torch.tensor([0.0, 3.0]), bounds, num_samples=20, burn_in=5, seed=7
+    )
+
+    assert samples.shape == (20, 2)
+    assert torch.all(samples >= bounds[:, 0])
+    assert torch.all(samples <= bounds[:, 1])
+
+
+def test_plot_posterior_samples_has_one_histogram_per_parameter() -> None:
+    pytest.importorskip("matplotlib")
+    samples = torch.tensor([[-0.5, 2.5], [0.5, 3.5]])
+    bounds = torch.tensor([[-1.0, 1.0], [2.0, 4.0]])
+
+    figure = plot_posterior_samples(samples, bounds)
+
+    assert len(figure.axes) == 2
+    assert [axis.get_xlabel() for axis in figure.axes] == ["Parameter 0", "Parameter 1"]
 
 
 def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> None:
