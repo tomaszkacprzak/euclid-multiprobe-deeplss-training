@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torchebm.core import BaseModel
+from torchebm.samplers import HamiltonianMonteCarlo
 
 from ..utils.config import ConfigPaths, config_paths, load_config
 from ..utils.logger import get_logger
@@ -17,6 +19,35 @@ from .likelihood_mdn import GaussianMixtureMDN
 LOGGER = get_logger(__file__)
 
 
+class _BatchedPosteriorEnergy(BaseModel):
+    """Unconstrained posterior energy for a batch of conditioned observations."""
+
+    def __init__(
+        self,
+        likelihood: LikelihoodBase,
+        observations: torch.Tensor,
+        prior_bounds: torch.Tensor,
+    ) -> None:
+        super().__init__(dtype=observations.dtype, device=observations.device)
+        self.likelihood = likelihood
+        self.register_buffer("observations", observations)
+        self.register_buffer("lower", prior_bounds[:, 0])
+        self.register_buffer("width", prior_bounds[:, 1] - prior_bounds[:, 0])
+
+    def forward(self, unconstrained: torch.Tensor) -> torch.Tensor:
+        # Sampling in logit space gives HMC a smooth energy at the edges of the
+        # uniform prior.  The Jacobian makes the transformed density exact.
+        theta = self.lower + self.width * torch.sigmoid(unconstrained)
+        log_jacobian = (torch.log(self.width) + torch.nn.functional.logsigmoid(unconstrained) + torch.nn.functional.logsigmoid(-unconstrained)).sum(
+            dim=-1
+        )
+        return -self.likelihood(self.observations, theta) - log_jacobian
+
+    def to_parameters(self, unconstrained: torch.Tensor) -> torch.Tensor:
+        """Map unconstrained HMC states back inside the uniform-prior bounds."""
+        return self.lower + self.width * torch.sigmoid(unconstrained)
+
+
 def sample_posteriors(
     model: LikelihoodBase,
     observations: torch.Tensor,
@@ -25,16 +56,17 @@ def sample_posteriors(
     num_walkers: int = 32,
     num_steps: int = 1000,
     burn_in: int = 200,
+    step_size: float = 0.01,
+    num_leapfrog_steps: int = 10,
     seed: int = 42,
 ) -> list[torch.Tensor]:
-    """Sample ``p(theta_true | theta_obs)`` for each observation with emcee.
+    """Sample ``p(theta_true | theta_obs)`` with batched torchebm HMC chains.
 
-    The prior is uniform inside ``prior_bounds`` and zero outside it.  emcee's
-    vectorized mode passes all walkers to the density estimator in one batch.
+    Every observation owns ``num_walkers`` chains, but all observations and
+    chains are advanced together in a single PyTorch batch.  A logit transform
+    enforces the uniform ``prior_bounds`` without introducing a discontinuous
+    energy at the boundary.
     """
-    import emcee
-    import numpy as np
-
     if observations.ndim != 2 or prior_bounds.shape != (observations.shape[1], 2):
         raise ValueError("observations must have shape (N, M) and prior_bounds must have shape (M, 2).")
     if not torch.all(prior_bounds[:, 0] < prior_bounds[:, 1]):
@@ -43,34 +75,41 @@ def sample_posteriors(
         raise ValueError("mcmc_num_walkers must be at least twice the parameter dimensionality.")
     if not 0 <= burn_in < num_steps:
         raise ValueError("mcmc_burn_in must be non-negative and smaller than mcmc_num_steps.")
+    if step_size <= 0:
+        raise ValueError("mcmc_step_size must be positive.")
+    if num_leapfrog_steps <= 0:
+        raise ValueError("mcmc_num_leapfrog_steps must be positive.")
 
     device = next(model.parameters()).device
-    lower = prior_bounds[:, 0].detach().cpu().numpy()
-    upper = prior_bounds[:, 1].detach().cpu().numpy()
-    rng = np.random.default_rng(seed)
+    dtype = next(model.parameters()).dtype
+    observations = observations.to(device=device, dtype=dtype)
+    prior_bounds = prior_bounds.to(device=device, dtype=dtype)
+    batched_observations = observations.repeat_interleave(num_walkers, dim=0)
+    energy = _BatchedPosteriorEnergy(model, batched_observations, prior_bounds)
+
+    generator = torch.Generator(device=device).manual_seed(seed)
+    initial_unit = torch.rand(len(batched_observations), observations.shape[1], device=device, dtype=dtype, generator=generator)
+    epsilon = torch.finfo(dtype).eps
+    initial_state = torch.logit(initial_unit.clamp(min=epsilon, max=1.0 - epsilon))
+
     model.eval()
-    results = []
-    for index, observation in enumerate(observations):
-
-        LOGGER.info(f"Sampling posterior for observation {index+1:>5d}/{len(observations)}")
-
-        observed = observation.float().to(device).unsqueeze(0)
-
-        def log_probability(theta, observed=observed):
-            inside = np.all((theta >= lower) & (theta <= upper), axis=1)
-            values = np.full(theta.shape[0], -np.inf, dtype=np.float64)
-            if np.any(inside):
-                candidates = torch.as_tensor(theta[inside], dtype=torch.float32, device=device)
-                batch_observed = observed.expand(len(candidates), -1)
-                with torch.no_grad():
-                    values[inside] = model(batch_observed, candidates).detach().cpu().numpy()
-            return values
-
-        initial_state = rng.uniform(lower, upper, size=(num_walkers, observations.shape[1]))
-        sampler = emcee.EnsembleSampler(num_walkers, observations.shape[1], log_probability, vectorize=True)
-        sampler.run_mcmc(initial_state, num_steps, progress=True)
-        results.append(torch.from_numpy(sampler.get_chain(discard=burn_in, flat=True).astype(np.float32)))
-    return results
+    LOGGER.info(f"Sampling {len(observations)} posteriors in one batch ({len(batched_observations)} HMC chains)")
+    sampler = HamiltonianMonteCarlo(
+        model=energy,
+        step_size=step_size,
+        n_leapfrog_steps=num_leapfrog_steps,
+        dtype=dtype,
+        device=device,
+    )
+    trajectory = sampler.sample(
+        x=initial_state,
+        n_steps=num_steps,
+        return_trajectory=True,
+        generator=generator,
+    )
+    parameter_samples = energy.to_parameters(trajectory[:, burn_in:])
+    parameter_samples = parameter_samples.reshape(len(observations), num_walkers, num_steps - burn_in, observations.shape[1])
+    return [samples.reshape(-1, observations.shape[1]).cpu() for samples in parameter_samples]
 
 
 def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor):
@@ -156,9 +195,7 @@ def plot_likelihood_fit(
         surface_data.append((label_values.cpu().numpy(), prediction_values.cpu().numpy(), grid_log_likelihood))
 
     for index, (axis, (label_values, prediction_values, grid_log_likelihood)) in enumerate(zip(axes[1], surface_data, strict=True)):
-
-
-        likelihood = np.exp(grid_log_likelihood-np.max(grid_log_likelihood))
+        likelihood = np.exp(grid_log_likelihood - np.max(grid_log_likelihood))
         norm = likelihood.sum(axis=1, keepdims=True)
         likelihood = likelihood / norm
 
@@ -281,6 +318,8 @@ def train_likelihood(
             num_walkers=int(settings.get("mcmc_num_walkers", max(32, 2 * theta_obs.shape[1]))),
             num_steps=int(settings.get("mcmc_num_steps", 1000)),
             burn_in=int(settings.get("mcmc_burn_in", 200)),
+            step_size=float(settings.get("mcmc_step_size", 0.01)),
+            num_leapfrog_steps=int(settings.get("mcmc_num_leapfrog_steps", 10)),
             seed=int(settings.get("seed", 42)),
         )
         samples_file = Path(settings.get("samples_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")))
@@ -291,9 +330,7 @@ def train_likelihood(
         LOGGER.info(f"Saved posterior samples to {samples_file}")
 
         posterior_figure = plot_posterior_samples(samples, selected_labels)
-        posterior_plot_file = Path(
-            settings.get("samples_plot_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.png"))
-        )
+        posterior_plot_file = Path(settings.get("samples_plot_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")))
         posterior_plot_file.parent.mkdir(parents=True, exist_ok=True)
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)

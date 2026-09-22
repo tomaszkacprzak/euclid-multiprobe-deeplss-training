@@ -251,3 +251,5 @@ likelihood:
   mcmc_num_walkers: 64
   mcmc_num_steps: 1000
   mcmc_burn_in: 200
+  mcmc_step_size: 0.01
+  mcmc_num_leapfrog_steps: 10
