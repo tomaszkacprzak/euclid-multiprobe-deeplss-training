@@ -9,12 +9,11 @@ from typing import Any
 import torch
 
 from ..utils.config import ConfigPaths, config_paths, load_config
+from ..utils.logger import get_logger
 from .likelihood_base import LikelihoodBase
 from .likelihood_mdn import GaussianMixtureMDN
 
-from euclid_multiprobe_deeplss_training.utils.logger import get_logger
 LOGGER = get_logger(__file__)
-
 
 
 def plot_likelihood_fit(
@@ -22,21 +21,26 @@ def plot_likelihood_fit(
     predictions: torch.Tensor,
     labels: torch.Tensor,
 ):
-    """Plot labels against predictions, coloured by their fitted log likelihood."""
+    """Plot the samples and fitted log-likelihood surface for each parameter.
+
+    Each surface varies one label/prediction pair over its observed range while
+    holding all other dimensions at their sample means.  This produces a useful
+    two-dimensional slice through a multivariate conditional density.
+    """
     import matplotlib.pyplot as plt
     import numpy as np
 
     LikelihoodBase._validate_pairs(predictions, labels, "plot")
     device = next(model.parameters()).device
     model.eval()
+    predictions_device = predictions.float().to(device)
+    labels_device = labels.float().to(device)
     with torch.no_grad():
-        log_likelihood = model(
-            predictions.float().to(device), labels.float().to(device)
-        ).detach().cpu().numpy()
+        log_likelihood = model(predictions_device, labels_device).detach().cpu().numpy()
 
     predictions_array = predictions.detach().cpu().numpy()
     labels_array = labels.detach().cpu().numpy()
-    
+
     # sort ascending by log likelihood
     sorting = np.argsort(log_likelihood)
     predictions_array = predictions_array[sorting]
@@ -44,9 +48,7 @@ def plot_likelihood_fit(
     log_likelihood = log_likelihood[sorting]
 
     num_parameters = labels.shape[1]
-    fig, axes = plt.subplots(
-        1, num_parameters, figsize=(5 * num_parameters, 4), squeeze=False
-    )
+    fig, axes = plt.subplots(2, num_parameters, figsize=(5 * num_parameters, 8), squeeze=False)
     scatter = None
     for index, axis in enumerate(axes[0]):
         scatter = axis.scatter(
@@ -58,16 +60,51 @@ def plot_likelihood_fit(
         axis.set_xlabel(f"Label {index}")
         axis.set_ylabel(f"Prediction {index}")
 
+    mean_predictions = predictions_device.mean(dim=0)
+    mean_labels = labels_device.mean(dim=0)
+    surface_data = []
+    for index in range(num_parameters):
+        label_values = torch.linspace(labels_device[:, index].min(), labels_device[:, index].max(), 100, device=device)
+        prediction_values = torch.linspace(predictions_device[:, index].min(), predictions_device[:, index].max(), 100, device=device)
+        label_grid, prediction_grid = torch.meshgrid(label_values, prediction_values, indexing="xy")
+        grid_labels = mean_labels.repeat(label_grid.numel(), 1)
+        grid_predictions = mean_predictions.repeat(prediction_grid.numel(), 1)
+        grid_labels[:, index] = label_grid.ravel()
+        grid_predictions[:, index] = prediction_grid.ravel()
+        with torch.no_grad():
+            grid_log_likelihood = model(grid_predictions, grid_labels).reshape(label_grid.shape).cpu().numpy()
+
+        surface_data.append((label_values.cpu().numpy(), prediction_values.cpu().numpy(), grid_log_likelihood))
+
+    surface_min = min(grid_log_likelihood.min() for _, _, grid_log_likelihood in surface_data)
+    surface_max = max(grid_log_likelihood.max() for _, _, grid_log_likelihood in surface_data)
+    surface = None
+    for index, (axis, (label_values, prediction_values, grid_log_likelihood)) in enumerate(zip(axes[1], surface_data, strict=True)):
+        surface = axis.pcolormesh(
+            label_values,
+            prediction_values,
+            grid_log_likelihood,
+            shading="auto",
+            vmin=surface_min,
+            vmax=surface_max,
+        )
+        axis.set_xlabel(f"Label {index}")
+        axis.set_ylabel(f"Prediction {index}")
+
     # Validation above guarantees at least one parameter, and therefore a scatter.
     assert scatter is not None
-    fig.colorbar(scatter, 
-                 ax=axes.ravel().tolist(), 
-                 label="Log likelihood", 
-                 orientation="horizontal",
-                 location="bottom",
-                 pad=0.15)
+    fig.colorbar(scatter, ax=axes.ravel().tolist(), label="Log likelihood", orientation="horizontal", location="bottom", pad=0.15)
+    assert surface is not None
+    fig.colorbar(
+        surface,
+        ax=axes[1].tolist(),
+        label="Predicted log likelihood",
+        orientation="horizontal",
+        location="bottom",
+        pad=0.15,
+    )
 
-    fig.subplots_adjust(bottom=0.15, right=0.9, wspace=0.3)
+    fig.subplots_adjust(bottom=0.12, right=0.9, hspace=0.45, wspace=0.3)
     return fig
 
 
@@ -78,7 +115,7 @@ def build_likelihood(num_parameters: int, settings: Mapping[str, Any]) -> Likeli
     if not isinstance(model_args, Mapping):
         raise TypeError("likelihood.model_args must be a mapping.")
     if model_type == "mdn":
-        model =  GaussianMixtureMDN(num_parameters, **dict(model_args))
+        model = GaussianMixtureMDN(num_parameters, **dict(model_args))
     else:
         raise ValueError(f"Unknown likelihood model_type: {model_type!r}.")
 
@@ -153,7 +190,6 @@ def train_likelihood_from_config(
         config_path = [path.strip() for path in config_path.split(",") if path.strip()]
     paths = config_paths(config_path)
     raw_config = load_config(paths)
-
 
     settings = raw_config.get("likelihood")
     if settings is None:
