@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+import numpy as np
 
 import torch
 from torchebm.core import BaseModel
@@ -88,7 +89,7 @@ def sample_posteriors(
     initial_state = torch.logit(initial_unit.clamp(min=epsilon, max=1.0 - epsilon))
 
     model.eval()
-    LOGGER.info(f"Sampling {len(observations)} posteriors with one HMC chain per observation")
+    LOGGER.info(f"Initializing HMC sampler with step size {step_size} and {num_leapfrog_steps} leapfrog steps")
     sampler = HamiltonianMonteCarlo(
         model=energy,
         step_size=step_size,
@@ -96,6 +97,7 @@ def sample_posteriors(
         dtype=dtype,
         device=device,
     )
+    LOGGER.info(f"Sampling {len(observations)} posteriors with {num_steps} steps on {device}")
     trajectory = sampler.sample(
         x=initial_state,
         n_steps=num_steps,
@@ -117,13 +119,13 @@ def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor):
     figure, axes = plt.subplots(rows, num_parameters, figsize=(4 * num_parameters, 3 * rows), squeeze=False)
     for row in range(rows):
         for column in range(num_parameters):
+            s = samples[row][:, column].numpy()
             axis = axes[row, column]
-            axis.hist(samples[row][:, column].numpy(), bins=40, density=True)
+            axis.hist(s, bins=40, density=False, label=f'num samples: {len(s)}')
             axis.axvline(float(labels[row, column]), color="tab:red", linewidth=2, label="True value")
             axis.set_xlabel(f"Parameter {column}")
             axis.set_ylabel("Density")
-            if row == 0 and column == 0:
-                axis.legend()
+            axis.legend(loc='upper right')
     figure.tight_layout()
     return figure
 
