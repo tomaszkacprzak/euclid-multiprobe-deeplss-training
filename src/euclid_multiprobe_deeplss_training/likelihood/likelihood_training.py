@@ -36,7 +36,7 @@ def plot_likelihood_fit(
     predictions_device = predictions.float().to(device)
     labels_device = labels.float().to(device)
     with torch.no_grad():
-        log_likelihood = model(predictions_device, labels_device).detach().cpu().numpy()
+        log_likelihood = model.log_likelihood(predictions_device, labels_device).detach().cpu().numpy()
 
     predictions_array = predictions.detach().cpu().numpy()
     labels_array = labels.detach().cpu().numpy()
@@ -72,7 +72,7 @@ def plot_likelihood_fit(
         grid_labels[:, index] = label_grid.ravel()
         grid_predictions[:, index] = prediction_grid.ravel()
         with torch.no_grad():
-            grid_log_likelihood = model(grid_predictions, grid_labels).reshape(label_grid.shape).cpu().numpy()
+            grid_log_likelihood = model.log_likelihood(grid_predictions, grid_labels).reshape(label_grid.shape).cpu().numpy()
 
         surface_data.append((label_values.cpu().numpy(), prediction_values.cpu().numpy(), grid_log_likelihood))
 
