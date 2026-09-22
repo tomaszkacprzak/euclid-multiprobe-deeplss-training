@@ -248,5 +248,5 @@ likelihood:
   # Metropolis-Hastings posterior sampling at the mean predicted observation.
   mcmc_num_samples: 1000
   mcmc_burn_in: 200
-  # Gaussian proposal standard deviation as a fraction of each prior width.
+  # Gaussian proposal standard deviation in the min-max transformed [0, 1] space.
   mcmc_proposal_scale: 0.05

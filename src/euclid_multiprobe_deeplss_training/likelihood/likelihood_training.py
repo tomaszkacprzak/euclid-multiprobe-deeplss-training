@@ -27,10 +27,11 @@ def sample_posterior_metropolis_hastings(
     proposal_scale: float = 0.05,
     seed: int = 42,
 ) -> torch.Tensor:
-    """Draw one posterior chain with a Gaussian random-walk MH sampler.
+    """Draw one posterior chain in min-max transformed parameter space.
 
-    The prior is uniform inside ``prior_bounds`` and zero outside it.  Proposal
-    scales are expressed as a fraction of each parameter's prior width.
+    ``theta_obs`` and the sampled ``theta_true`` values are scaled to ``[0, 1]``
+    using the physical box-prior bounds before evaluating the likelihood. The
+    returned samples are transformed back to the original parameter ranges.
     """
     theta_obs = torch.as_tensor(theta_obs)
     prior_bounds = torch.as_tensor(prior_bounds)
@@ -45,11 +46,12 @@ def sample_posterior_metropolis_hastings(
 
     parameter = next(model.parameters())
     device, dtype = parameter.device, parameter.dtype
-    observation = theta_obs.to(device=device, dtype=dtype).unsqueeze(0)
     bounds = prior_bounds.to(device=device, dtype=dtype)
     lower, upper = bounds.unbind(dim=1)
-    proposal_std = proposal_scale * (upper - lower)
-    current = (lower + upper) / 2
+    width = upper - lower
+    observation = ((theta_obs.to(device=device, dtype=dtype) - lower) / width).unsqueeze(0)
+    proposal_std = torch.full_like(lower, proposal_scale)
+    current = torch.full_like(lower, 0.5)
     generator = torch.Generator(device=device).manual_seed(seed)
 
     model.eval()
@@ -59,7 +61,7 @@ def sample_posterior_metropolis_hastings(
         accepted = 0
         for step in range(burn_in + num_samples):
             proposal = current + proposal_std * torch.randn(current.shape, device=device, dtype=dtype, generator=generator)
-            if torch.all((proposal >= lower) & (proposal <= upper)):
+            if torch.all((proposal >= 0) & (proposal <= 1)):
                 proposal_log_probability = model.log_likelihood(observation, proposal.unsqueeze(0))[0]
                 log_acceptance = proposal_log_probability - current_log_probability
                 if torch.log(torch.rand((), device=device, dtype=dtype, generator=generator)) < log_acceptance:
@@ -70,7 +72,8 @@ def sample_posterior_metropolis_hastings(
                 chain.append(current.clone())
 
     LOGGER.info(f"Metropolis-Hastings acceptance rate: {accepted / (burn_in + num_samples):.3f}")
-    return torch.stack(chain).cpu()
+    transformed_samples = torch.stack(chain)
+    return (lower + width * transformed_samples).cpu()
 
 
 def plot_posterior_samples(samples: torch.Tensor, prior_bounds: torch.Tensor):

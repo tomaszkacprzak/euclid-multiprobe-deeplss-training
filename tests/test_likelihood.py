@@ -89,7 +89,12 @@ def test_cnffm_builder_and_flow_matching_loss() -> None:
 
 def test_metropolis_hastings_samples_inside_box_prior() -> None:
     class QuadraticLikelihood(GaussianMixtureMDN):
+        evaluated_observations = []
+        evaluated_parameters = []
+
         def log_likelihood(self, theta_obs, theta_true):
+            self.evaluated_observations.append(theta_obs.clone())
+            self.evaluated_parameters.append(theta_true.clone())
             return -(theta_obs - theta_true).square().sum(dim=-1)
 
     model = QuadraticLikelihood(2, num_components=1, num_layers=1, hidden_dim=4)
@@ -102,6 +107,8 @@ def test_metropolis_hastings_samples_inside_box_prior() -> None:
     assert samples.shape == (20, 2)
     assert torch.all(samples >= bounds[:, 0])
     assert torch.all(samples <= bounds[:, 1])
+    assert all(torch.equal(observation, torch.tensor([[0.5, 0.5]])) for observation in model.evaluated_observations)
+    assert all(torch.all((parameters >= 0) & (parameters <= 1)) for parameters in model.evaluated_parameters)
 
 
 def test_plot_posterior_samples_has_one_histogram_per_parameter() -> None:
