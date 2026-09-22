@@ -98,12 +98,18 @@ def sample_posteriors(
         device=device,
     )
     LOGGER.info(f"Sampling {len(observations)} posteriors with {num_steps} steps on {device}")
-    trajectory = sampler.sample(
+    trajectory, diagnostics = sampler.sample(
         x=initial_state,
         n_steps=num_steps,
         return_trajectory=True,
         generator=generator,
+        return_diagnostics=True,
     )
+
+    a = diagnostics["acceptance_rate"]
+    LOGGER.info("acceptance rate: mean = %f, min = %f, max = %f", a.mean().item(), a.min().item(), a.max().item())
+
+    # return parameters
     parameter_samples = energy.to_parameters(trajectory[:, burn_in:])
     return [samples.cpu() for samples in parameter_samples]
 
@@ -134,10 +140,11 @@ def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor, pr
             s = samples[row][:, column].numpy()
             axis = axes[row, column]
             axis.hist(s, bins=bin_edges[column], density=False, label=f"num samples: {len(s)}")
-            axis.axvline(float(labels[row, column]), color="tab:red", linewidth=2, label="True value")
+            # axis.axvline(float(labels[row, column]), color="tab:red", linewidth=2, label="True value")
             axis.set_xlabel(f"Parameter {column}")
             axis.set_ylabel("Density")
             axis.legend(loc="upper right")
+            # axis.set_xlim(prior_bounds[column, 0], prior_bounds[column, 1])
     figure.tight_layout()
     return figure
 
@@ -323,7 +330,7 @@ def train_likelihood(
             model,
             observations,
             prior_bounds,
-            num_steps=int(settings.get("mcmc_num_steps", 1000)),
+            num_steps=int(settings.get("mcmc_num_steps", 10000)),
             burn_in=int(settings.get("mcmc_burn_in", 200)),
             step_size=float(settings.get("mcmc_step_size", 0.01)),
             num_leapfrog_steps=int(settings.get("mcmc_num_leapfrog_steps", 10)),
