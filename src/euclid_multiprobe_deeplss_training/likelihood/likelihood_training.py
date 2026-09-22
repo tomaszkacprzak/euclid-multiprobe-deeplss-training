@@ -13,6 +13,9 @@ from .likelihood_base import LikelihoodBase
 from .likelihood_cnf import ConditionalNormalizingFlowFM
 from .likelihood_mdn import GaussianMixtureMDN
 
+from euclid_multiprobe_deeplss_training.utils.logger import get_logger
+LOGGER = get_logger(__name__)
+
 
 def build_likelihood(num_parameters: int, settings: Mapping[str, Any]) -> LikelihoodBase:
     """Build the likelihood implementation selected by ``model_type``."""
@@ -58,6 +61,9 @@ def train_likelihood(
     order = torch.randperm(len(theta_obs), generator=generator)
     validation_indices, training_indices = order[:validation_size], order[validation_size:]
     model = build_likelihood(theta_obs.shape[1], settings)
+
+    LOGGER.info(f"Training likelihood model {settings.get('model_type')}")
+
     history = model.fit(
         theta_obs[training_indices],
         theta_true[training_indices],

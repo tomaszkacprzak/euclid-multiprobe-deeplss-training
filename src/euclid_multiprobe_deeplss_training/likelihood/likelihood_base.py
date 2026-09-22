@@ -65,33 +65,25 @@ class LikelihoodBase(nn.Module):
 
         for epoch in range(1, num_epochs + 1):
             self.train()
-            total_log_likelihood = 0.0
-            total_samples = 0
+            
             for theta_obs, theta_true in loader:
                 theta_obs, theta_true = theta_obs.to(target_device), theta_true.to(target_device)
                 optimizer.zero_grad()
                 loss = self.training_loss(theta_obs, theta_true)
                 loss.backward()
                 optimizer.step()
-                # Report the actual likelihood even when a model is trained
-                # with a surrogate objective (for example, flow matching).
-                with torch.no_grad():
-                    log_prob = self.log_likelihood(theta_obs, theta_true)  # (B,)
-                total_log_likelihood += log_prob.sum().item()
-                total_samples += len(theta_obs)
-
+            
             self.eval()
             with torch.no_grad():
                 validation_log_likelihood = self.log_likelihood(
                     theta_obs_validation.float().to(target_device),
                     theta_true_validation.float().to(target_device),
                 ).mean().item()
-            training_log_likelihood = total_log_likelihood / total_samples
-            history["training"].append(training_log_likelihood)
+
             history["validation"].append(validation_log_likelihood)
+
             print(
-                f"Epoch {epoch:4d}/{num_epochs}: training log likelihood "
-                f"{training_log_likelihood:.6f}, validation log likelihood {validation_log_likelihood:.6f}"
+                f"Epoch {epoch:4d}/{num_epochs}: training loss {loss.item():.6e}, validation log likelihood {validation_log_likelihood:.6f}", flush=True
             )
         return history
 
