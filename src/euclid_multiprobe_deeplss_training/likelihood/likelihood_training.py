@@ -17,6 +17,81 @@ from .likelihood_mdn import GaussianMixtureMDN
 LOGGER = get_logger(__file__)
 
 
+def sample_posteriors(
+    model: LikelihoodBase,
+    observations: torch.Tensor,
+    prior_bounds: torch.Tensor,
+    *,
+    num_walkers: int = 32,
+    num_steps: int = 1000,
+    burn_in: int = 200,
+    seed: int = 42,
+) -> list[torch.Tensor]:
+    """Sample ``p(theta_true | theta_obs)`` for each observation with emcee.
+
+    The prior is uniform inside ``prior_bounds`` and zero outside it.  emcee's
+    vectorized mode passes all walkers to the density estimator in one batch.
+    """
+    import emcee
+    import numpy as np
+
+    if observations.ndim != 2 or prior_bounds.shape != (observations.shape[1], 2):
+        raise ValueError("observations must have shape (N, M) and prior_bounds must have shape (M, 2).")
+    if not torch.all(prior_bounds[:, 0] < prior_bounds[:, 1]):
+        raise ValueError("Every prior lower bound must be smaller than its upper bound.")
+    if num_walkers < 2 * observations.shape[1]:
+        raise ValueError("mcmc_num_walkers must be at least twice the parameter dimensionality.")
+    if not 0 <= burn_in < num_steps:
+        raise ValueError("mcmc_burn_in must be non-negative and smaller than mcmc_num_steps.")
+
+    device = next(model.parameters()).device
+    lower = prior_bounds[:, 0].detach().cpu().numpy()
+    upper = prior_bounds[:, 1].detach().cpu().numpy()
+    rng = np.random.default_rng(seed)
+    model.eval()
+    results = []
+    for observation in observations:
+        observed = observation.float().to(device).unsqueeze(0)
+
+        def log_probability(theta, observed=observed):
+            inside = np.all((theta >= lower) & (theta <= upper), axis=1)
+            values = np.full(theta.shape[0], -np.inf, dtype=np.float64)
+            if np.any(inside):
+                candidates = torch.as_tensor(theta[inside], dtype=torch.float32, device=device)
+                batch_observed = observed.expand(len(candidates), -1)
+                with torch.no_grad():
+                    values[inside] = model(batch_observed, candidates).detach().cpu().numpy()
+            return values
+
+        initial_state = rng.uniform(lower, upper, size=(num_walkers, observations.shape[1]))
+        sampler = emcee.EnsembleSampler(num_walkers, observations.shape[1], log_probability, vectorize=True)
+        sampler.run_mcmc(initial_state, num_steps, progress=False)
+        results.append(torch.from_numpy(sampler.get_chain(discard=burn_in, flat=True).astype(np.float32)))
+    return results
+
+
+def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor):
+    """Plot marginal posterior histograms for up to the first four observations."""
+    import matplotlib.pyplot as plt
+
+    if not samples:
+        raise ValueError("At least one posterior sample set is required.")
+    rows = min(4, len(samples))
+    num_parameters = labels.shape[1]
+    figure, axes = plt.subplots(rows, num_parameters, figsize=(4 * num_parameters, 3 * rows), squeeze=False)
+    for row in range(rows):
+        for column in range(num_parameters):
+            axis = axes[row, column]
+            axis.hist(samples[row][:, column].numpy(), bins=40, density=True)
+            axis.axvline(float(labels[row, column]), color="tab:red", linewidth=2, label="True value")
+            axis.set_xlabel(f"Parameter {column}")
+            axis.set_ylabel("Density")
+            if row == 0 and column == 0:
+                axis.legend()
+    figure.tight_layout()
+    return figure
+
+
 def plot_likelihood_fit(
     model: LikelihoodBase,
     predictions: torch.Tensor,
@@ -50,9 +125,8 @@ def plot_likelihood_fit(
 
     num_parameters = labels.shape[1]
     fig, axes = plt.subplots(2, num_parameters, figsize=(5 * num_parameters, 8), squeeze=False)
-    scatter = None
     for index, axis in enumerate(axes[0]):
-        scatter = axis.scatter(
+        axis.scatter(
             labels_array[:, index],
             predictions_array[:, index],
             c=log_likelihood,
@@ -78,9 +152,6 @@ def plot_likelihood_fit(
 
         surface_data.append((label_values.cpu().numpy(), prediction_values.cpu().numpy(), grid_log_likelihood))
 
-    surface_min = min(grid_log_likelihood.min() for _, _, grid_log_likelihood in surface_data)
-    surface_max = max(grid_log_likelihood.max() for _, _, grid_log_likelihood in surface_data)
-    surface = None
     for index, (axis, (label_values, prediction_values, grid_log_likelihood)) in enumerate(zip(axes[1], surface_data, strict=True)):
 
 
@@ -88,7 +159,7 @@ def plot_likelihood_fit(
         norm = likelihood.sum(axis=1, keepdims=True)
         likelihood = likelihood / norm
 
-        surface = axis.pcolormesh(
+        axis.pcolormesh(
             label_values,
             prediction_values,
             likelihood,
@@ -136,6 +207,8 @@ def train_likelihood(
     input_file: str | Path,
     output_file: str | Path,
     device: torch.device | str | None = None,
+    num_observations: int = 0,
+    prior_bounds: torch.Tensor | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Train from a prediction HDF5 file containing ``predictions`` and ``labels``.
 
@@ -184,6 +257,39 @@ def train_likelihood(
     import matplotlib.pyplot as plt
 
     plt.close(figure)
+
+    if num_observations < 0 or num_observations > len(theta_obs):
+        raise ValueError("num_observations must be between zero and the size of the predictions dataset.")
+    if num_observations:
+        if prior_bounds is None:
+            raise ValueError("prior_bounds are required when posterior sampling is enabled.")
+        selected = order[:num_observations]
+        observations = theta_obs[selected]
+        selected_labels = theta_true[selected]
+        samples = sample_posteriors(
+            model,
+            observations,
+            prior_bounds,
+            num_walkers=int(settings.get("mcmc_num_walkers", max(32, 2 * theta_obs.shape[1]))),
+            num_steps=int(settings.get("mcmc_num_steps", 1000)),
+            burn_in=int(settings.get("mcmc_burn_in", 200)),
+            seed=int(settings.get("seed", 42)),
+        )
+        samples_file = Path(settings.get("samples_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")))
+        samples_file.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(samples_file, "w") as handle:
+            for index, posterior_samples in enumerate(samples):
+                handle.create_dataset(f"samples{index:04d}", data=posterior_samples.numpy())
+        LOGGER.info(f"Saved posterior samples to {samples_file}")
+
+        posterior_figure = plot_posterior_samples(samples, selected_labels)
+        posterior_plot_file = Path(
+            settings.get("samples_plot_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.png"))
+        )
+        posterior_plot_file.parent.mkdir(parents=True, exist_ok=True)
+        posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
+        plt.close(posterior_figure)
+        LOGGER.info(f"Saved posterior sampling plot to {posterior_plot_file}")
     return model, history
 
 
@@ -193,6 +299,7 @@ def train_likelihood_from_config(
     input_file: str | Path,
     output_file: str | Path,
     device: torch.device | str | None = None,
+    num_observations: int | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Load and merge YAML configuration files, then train a likelihood model."""
 
@@ -206,4 +313,34 @@ def train_likelihood_from_config(
         raise ValueError("The 'likelihood' configuration section is missing.")
     if not isinstance(settings, Mapping):
         raise TypeError("The 'likelihood' configuration section must be a mapping.")
-    return train_likelihood(settings, input_file=input_file, output_file=output_file, device=device)
+    sample_count = int(settings.get("num_observations", 0) if num_observations is None else num_observations)
+    prior_bounds = None
+    if sample_count:
+        training_settings = raw_config.get("training")
+        forward_model = raw_config.get("forward_model")
+        if not isinstance(training_settings, Mapping) or not isinstance(forward_model, Mapping):
+            raise ValueError("Posterior sampling requires the 'training' and 'forward_model' configuration sections.")
+
+        from ..training import load_physics_model_class
+
+        physics_model_class = load_physics_model_class(str(training_settings["physics_model"]))
+        physics_args = dict(training_settings.get("physics_model_args", {}))
+        physics_args.setdefault("num_samples_prior", 1)
+        physics_args.setdefault("nside", forward_model.get("analysis", {}).get("n_side"))
+        physics_model = physics_model_class(
+            forward_model,
+            scalers=False,
+            seed=int(settings.get("seed", 42)),
+            device=device or settings.get("device"),
+            **physics_args,
+        )
+        prior_bounds = torch.tensor([physics_model.priors[name] for name in physics_model.params], dtype=torch.float32)
+
+    return train_likelihood(
+        settings,
+        input_file=input_file,
+        output_file=output_file,
+        device=device,
+        num_observations=sample_count,
+        prior_bounds=prior_bounds,
+    )

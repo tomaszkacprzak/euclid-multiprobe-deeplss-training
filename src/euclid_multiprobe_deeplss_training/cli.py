@@ -210,6 +210,12 @@ def build_parser() -> argparse.ArgumentParser:
     likelihood_parser.add_argument("--input-file", required=True, help="HDF5 output produced by the predict command.")
     likelihood_parser.add_argument("--output-file", required=True, help="File in which to store the trained likelihood model.")
     likelihood_parser.add_argument("--device", default=None, help="Torch device to train on, such as 'cpu' or 'cuda'.")
+    likelihood_parser.add_argument(
+        "--num-observations",
+        type=int,
+        default=None,
+        help="Number of prediction-set observations for which to sample a posterior (defaults to the config value).",
+    )
     likelihood_parser.set_defaults(func=_run_likelihood)
 
     #####################################################################################
@@ -380,9 +386,10 @@ def _run_likelihood(args: argparse.Namespace) -> int:
         raise ValueError("The likelihood command requires --config.")
     from euclid_multiprobe_deeplss_training.likelihood.likelihood_training import train_likelihood_from_config
 
-    train_likelihood_from_config(
-        _config_argument(args), input_file=args.input_file, output_file=args.output_file, device=args.device
-    )
+    kwargs = {"input_file": args.input_file, "output_file": args.output_file, "device": args.device}
+    if args.num_observations is not None:
+        kwargs["num_observations"] = args.num_observations
+    train_likelihood_from_config(_config_argument(args), **kwargs)
     return 0
 
 

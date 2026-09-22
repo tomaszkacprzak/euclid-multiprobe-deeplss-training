@@ -245,3 +245,9 @@ likelihood:
   validation_fraction: 0.2
   seed: 42
   device: "cuda"
+  # Posterior sampling settings. Samples and their diagnostic plot are written
+  # next to the likelihood checkpoint as *_samples.h5 and *_samples.png.
+  num_observations: 4
+  mcmc_num_walkers: 64
+  mcmc_num_steps: 1000
+  mcmc_burn_in: 200
