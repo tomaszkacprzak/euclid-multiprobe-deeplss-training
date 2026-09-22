@@ -27,9 +27,7 @@ def test_fit_updates_mdn_and_reports_each_epoch(capsys) -> None:
     theta_true = torch.randn(12, 2)
     theta_obs = theta_true + 0.1 * torch.randn(12, 2)
 
-    history = model.fit(
-        theta_obs[:8], theta_true[:8], theta_obs[8:], theta_true[8:], num_epochs=2, batch_size=4, device="cpu"
-    )
+    history = model.fit(theta_obs[:8], theta_true[:8], theta_obs[8:], theta_true[8:], num_epochs=2, batch_size=4, device="cpu")
 
     assert len(history["training"]) == len(history["validation"]) == 2
     assert capsys.readouterr().out.count("validation log likelihood") == 2
@@ -47,7 +45,7 @@ def test_mdn_checkpoint_round_trip(tmp_path) -> None:
         assert torch.equal(expected, actual)
 
 
-def test_plot_likelihood_fit_has_one_panel_per_parameter() -> None:
+def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> None:
     pytest.importorskip("matplotlib")
     import matplotlib
 
@@ -59,12 +57,16 @@ def test_plot_likelihood_fit_has_one_panel_per_parameter() -> None:
     figure = plot_likelihood_fit(model, predictions, labels)
 
     panels = [axis for axis in figure.axes if axis.get_xlabel().startswith("Label")]
-    assert len(panels) == 2
-    for index, panel in enumerate(panels):
+    assert len(panels) == 4
+    for index, panel in enumerate(panels[:2]):
         assert panel.get_xlabel() == f"Label {index}"
         assert panel.get_ylabel() == f"Prediction {index}"
         assert panel.collections[0].get_offsets().shape == (5, 2)
         assert panel.collections[0].get_array().shape == (5,)
+    for index, panel in enumerate(panels[2:]):
+        assert panel.get_xlabel() == f"Label {index}"
+        assert panel.get_ylabel() == f"Prediction {index}"
+        assert panel.collections[0].get_array().size == 100 * 100
 
 
 def test_train_likelihood_saves_plot_next_to_checkpoint(tmp_path) -> None:
