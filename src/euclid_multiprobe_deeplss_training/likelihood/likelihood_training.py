@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-import numpy as np
 
+import numpy as np
 import torch
 from torchebm.core import BaseModel
 from torchebm.samplers import HamiltonianMonteCarlo
@@ -108,24 +108,36 @@ def sample_posteriors(
     return [samples.cpu() for samples in parameter_samples]
 
 
-def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor):
-    """Plot marginal posterior histograms for up to the first four observations."""
+def plot_posterior_samples(samples: list[torch.Tensor], labels: torch.Tensor, prior_bounds: torch.Tensor):
+    """Plot marginal posterior histograms using bins spanning each prior."""
     import matplotlib.pyplot as plt
 
     if not samples:
         raise ValueError("At least one posterior sample set is required.")
+    if labels.ndim != 2:
+        raise ValueError("labels must have shape (N, M).")
     rows = min(4, len(samples))
     num_parameters = labels.shape[1]
+    if prior_bounds.shape != (num_parameters, 2):
+        raise ValueError("prior_bounds must have shape (M, 2).")
+    if not torch.all(prior_bounds[:, 0] < prior_bounds[:, 1]):
+        raise ValueError("Every prior lower bound must be smaller than its upper bound.")
+
+    # Reuse a single set of edges for every observation in a parameter column,
+    # rather than allowing matplotlib to infer different edges from each sample.
+    bin_edges = [
+        np.linspace(float(prior_bounds[column, 0]), float(prior_bounds[column, 1]), 41) for column in range(num_parameters)
+    ]
     figure, axes = plt.subplots(rows, num_parameters, figsize=(4 * num_parameters, 3 * rows), squeeze=False)
     for row in range(rows):
         for column in range(num_parameters):
             s = samples[row][:, column].numpy()
             axis = axes[row, column]
-            axis.hist(s, bins=40, density=False, label=f'num samples: {len(s)}')
+            axis.hist(s, bins=bin_edges[column], density=False, label=f"num samples: {len(s)}")
             axis.axvline(float(labels[row, column]), color="tab:red", linewidth=2, label="True value")
             axis.set_xlabel(f"Parameter {column}")
             axis.set_ylabel("Density")
-            axis.legend(loc='upper right')
+            axis.legend(loc="upper right")
     figure.tight_layout()
     return figure
 
@@ -324,7 +336,7 @@ def train_likelihood(
                 handle.create_dataset(f"samples{index:04d}", data=posterior_samples.numpy())
         LOGGER.info(f"Saved posterior samples to {samples_file}")
 
-        posterior_figure = plot_posterior_samples(samples, selected_labels)
+        posterior_figure = plot_posterior_samples(samples, selected_labels, prior_bounds)
         posterior_plot_file = Path(settings.get("samples_plot_file", Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")))
         posterior_plot_file.parent.mkdir(parents=True, exist_ok=True)
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
