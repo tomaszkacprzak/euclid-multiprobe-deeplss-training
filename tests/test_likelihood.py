@@ -86,7 +86,7 @@ def test_cnffm_builder_and_flow_matching_loss() -> None:
     assert all(parameter.grad is not None for parameter in model.parameters())
 
 
-def test_sample_posteriors_batches_all_observations(monkeypatch) -> None:
+def test_sample_posteriors_runs_one_chain_per_observation(monkeypatch) -> None:
     model = GaussianMixtureMDN(2, num_components=2, num_layers=1, hidden_dim=8)
     observations = torch.randn(3, 2)
     prior_bounds = torch.tensor([[-2.0, 2.0], [1.0, 3.0]])
@@ -103,13 +103,13 @@ def test_sample_posteriors_batches_all_observations(monkeypatch) -> None:
 
     monkeypatch.setattr("euclid_multiprobe_deeplss_training.likelihood.likelihood_training.HamiltonianMonteCarlo", FakeHMC)
 
-    samples = sample_posteriors(model, observations, prior_bounds, num_walkers=4, num_steps=5, burn_in=2)
+    samples = sample_posteriors(model, observations, prior_bounds, num_steps=5, burn_in=2)
 
     assert len(calls) == 1
-    assert calls[0][:3] == (torch.Size([12, 2]), 5, True)
+    assert calls[0][:3] == (torch.Size([3, 2]), 5, True)
     assert len(samples) == 3
-    assert all(sample.shape == (12, 2) for sample in samples)
-    assert all(torch.equal(sample, torch.tensor([[0.0, 2.0]]).expand(12, -1)) for sample in samples)
+    assert all(sample.shape == (3, 2) for sample in samples)
+    assert all(torch.equal(sample, torch.tensor([[0.0, 2.0]]).expand(3, -1)) for sample in samples)
 
 
 def test_sample_posteriors_with_torchebm_uses_gradients_and_respects_bounds() -> None:
@@ -121,14 +121,13 @@ def test_sample_posteriors_with_torchebm_uses_gradients_and_respects_bounds() ->
         model,
         observations,
         prior_bounds,
-        num_walkers=2,
         num_steps=3,
         burn_in=1,
         num_leapfrog_steps=1,
         seed=7,
     )
 
-    assert [sample.shape for sample in samples] == [(4, 1), (4, 1)]
+    assert [sample.shape for sample in samples] == [(2, 1), (2, 1)]
     assert all(torch.isfinite(sample).all() for sample in samples)
     assert all(((sample > -1.0) & (sample < 1.0)).all() for sample in samples)
 
