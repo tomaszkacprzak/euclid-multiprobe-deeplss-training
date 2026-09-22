@@ -10,6 +10,7 @@ import torch
 
 from ..utils.config import ConfigPaths, config_paths, load_config
 from .likelihood_base import LikelihoodBase
+from .likelihood_cnf import ConditionalNormalizingFlowFM
 from .likelihood_mdn import GaussianMixtureMDN
 
 
@@ -21,6 +22,8 @@ def build_likelihood(num_parameters: int, settings: Mapping[str, Any]) -> Likeli
         raise TypeError("likelihood.model_args must be a mapping.")
     if model_type == "mdn":
         return GaussianMixtureMDN(num_parameters, **dict(model_args))
+    if model_type == "cnffm":
+        return ConditionalNormalizingFlowFM(num_parameters, **dict(model_args))
     raise ValueError(f"Unknown likelihood model_type: {model_type!r}.")
 
 

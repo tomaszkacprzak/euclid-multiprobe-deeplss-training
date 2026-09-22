@@ -25,6 +25,15 @@ class LikelihoodBase(nn.Module):
         """Delegate module calls to :meth:`log_likelihood`."""
         return self.log_likelihood(theta_obs, theta_true)
 
+    def training_loss(self, theta_obs: torch.Tensor, theta_true: torch.Tensor) -> torch.Tensor:
+        """Return the scalar objective minimized while fitting the estimator.
+
+        Maximum-likelihood estimators use the negative log likelihood by
+        default.  Models such as flow matching can override this hook while
+        retaining the common batching, reporting, and checkpointing logic.
+        """
+        return -self.log_likelihood(theta_obs, theta_true).mean()
+
     def fit(
         self,
         theta_obs_training: torch.Tensor,
@@ -61,10 +70,14 @@ class LikelihoodBase(nn.Module):
             for theta_obs, theta_true in loader:
                 theta_obs, theta_true = theta_obs.to(target_device), theta_true.to(target_device)
                 optimizer.zero_grad()
-                log_prob = self.log_likelihood(theta_obs, theta_true)  # (B,)
-                (-log_prob.mean()).backward()
+                loss = self.training_loss(theta_obs, theta_true)
+                loss.backward()
                 optimizer.step()
-                total_log_likelihood += log_prob.detach().sum().item()
+                # Report the actual likelihood even when a model is trained
+                # with a surrogate objective (for example, flow matching).
+                with torch.no_grad():
+                    log_prob = self.log_likelihood(theta_obs, theta_true)  # (B,)
+                total_log_likelihood += log_prob.sum().item()
                 total_samples += len(theta_obs)
 
             self.eval()
