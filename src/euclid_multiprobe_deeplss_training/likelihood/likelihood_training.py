@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-
+from tqdm import tqdm
 import torch
 
 from ..utils.config import ConfigPaths, config_paths, load_config
@@ -15,6 +15,83 @@ from .likelihood_cnf import ConditionalNormalizingFlowFM
 from .likelihood_mdn import GaussianMixtureMDN
 
 LOGGER = get_logger(__file__)
+
+
+def sample_posterior_metropolis_hastings(
+    model: LikelihoodBase,
+    theta_obs: torch.Tensor,
+    theta_init: torch.Tensor,
+    prior_bounds: torch.Tensor,
+    *,
+    num_samples: int = 1000,
+    burn_in: int = 200,
+    proposal_scale: float = 0.05,
+    seed: int = 42,
+) -> torch.Tensor:
+    """Draw one posterior chain in min-max transformed parameter space.
+
+    ``theta_obs`` and the sampled ``theta_true`` values are scaled to ``[0, 1]``
+    using the physical box-prior bounds before evaluating the likelihood. The
+    returned samples are transformed back to the original parameter ranges.
+    """
+    theta_obs = torch.as_tensor(theta_obs)
+    prior_bounds = torch.as_tensor(prior_bounds)
+    if theta_obs.ndim != 1 or prior_bounds.shape != (theta_obs.numel(), 2):
+        raise ValueError("theta_obs must have shape (M,) and prior_bounds must have shape (M, 2).")
+    if not torch.all(prior_bounds[:, 0] < prior_bounds[:, 1]):
+        raise ValueError("Every prior lower bound must be smaller than its upper bound.")
+    if num_samples <= 0 or burn_in < 0:
+        raise ValueError("num_samples must be positive and burn_in must be non-negative.")
+    if proposal_scale <= 0:
+        raise ValueError("proposal_scale must be positive.")
+
+    parameter = next(model.parameters())
+    device, dtype = parameter.device, parameter.dtype
+    bounds = prior_bounds.to(device=device, dtype=dtype)
+    lower, upper = bounds.unbind(dim=1)
+    width = upper - lower
+    observation = ((theta_obs.to(device=device, dtype=dtype) - lower) / width).unsqueeze(0)
+    proposal_std = torch.full_like(lower, proposal_scale)
+    current = ((theta_init.to(device=device, dtype=dtype) - lower) / width).unsqueeze(0)
+    generator = torch.Generator(device=device).manual_seed(seed)
+
+    model.eval()
+    with torch.no_grad():
+        current_log_probability = model.log_likelihood(observation, current)[0]
+        chain = []
+        accepted = 0
+        for step in tqdm(range(burn_in + num_samples)):
+            proposal = current + proposal_std * torch.randn(current.shape, device=device, dtype=dtype, generator=generator)
+            if torch.all((proposal >= 0) & (proposal <= 1)):
+                proposal_log_probability = model.log_likelihood(observation, proposal.unsqueeze(0))[0]
+                log_acceptance = proposal_log_probability - current_log_probability
+                if torch.log(torch.rand((), device=device, dtype=dtype, generator=generator)) < log_acceptance:
+                    current = proposal
+                    current_log_probability = proposal_log_probability
+                    accepted += 1
+                    if step >= burn_in:
+                        chain.append(current.clone())
+
+    LOGGER.info(f"Metropolis-Hastings acceptance rate: {accepted / (burn_in + num_samples):.3f}")
+    transformed_samples = torch.stack(chain)
+    return (lower + width * transformed_samples).cpu()
+
+
+def plot_posterior_samples(samples: torch.Tensor, prior_bounds: torch.Tensor, theta_true: torch.Tensor):
+    """Plot one marginal posterior histogram for every parameter dimension."""
+    import matplotlib.pyplot as plt
+
+    if samples.ndim != 2 or prior_bounds.shape != (samples.shape[1], 2):
+        raise ValueError("samples must have shape (N, M) and prior_bounds must have shape (M, 2).")
+    figure, axes = plt.subplots(1, samples.shape[1], figsize=(4 * samples.shape[1], 3), squeeze=False)
+    for index, axis in enumerate(axes[0]):
+        bounds = prior_bounds[index].detach().cpu().tolist()
+        axis.hist(samples[:, index].numpy(), bins=40, range=bounds)
+        axis.set_xlabel(f"Parameter {index}")
+        axis.set_ylabel("Samples")
+        axis.axvline(theta_true[index], color='red', linestyle='--')
+    figure.tight_layout()
+    return figure
 
 def plot_likelihood_fit(
     model: LikelihoodBase,
@@ -129,13 +206,14 @@ def train_likelihood(
     input_file: str | Path,
     output_file: str | Path,
     device: torch.device | str | None = None,
+    prior_bounds: torch.Tensor | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Train from a prediction HDF5 file containing ``predictions`` and ``labels``.
 
     Predictions are theta_obs and labels are theta_true.  Both datasets must
     have shape ``(N, M)`` and are split along N into training and validation.
     """
-    import h5py
+    import h5py, numpy as np
 
     with h5py.File(input_file, "r") as handle:
         theta_obs = torch.as_tensor(handle["predictions"][:], dtype=torch.float32)
@@ -180,8 +258,62 @@ def train_likelihood(
 
     plt.close(figure)
 
+    # run MCMC for the selected observation
+    if prior_bounds is not None:
+
+        # find an observation that is closest to the mean
+        ind_obs = np.argmin(np.linalg.norm(theta_obs - theta_obs.mean(dim=0, keepdim=True), axis=1))
+        theta_obs_select = theta_obs[ind_obs]
+        theta_true_select = theta_true[ind_obs]
+        LOGGER.info(f"Selected observation {theta_obs_select} true {theta_true_select}")
+
+        print(f'theta_obs_select {theta_obs_select} type {type(theta_obs_select)} dtype {theta_obs_select.dtype} shape {theta_obs_select.shape}')
+        print(f'theta_true_select {theta_true_select} type {type(theta_true_select)} dtype {theta_true_select.dtype} shape {theta_true_select.shape}')
+
+        # run MCMC for the selected observation
+        samples = sample_posterior_metropolis_hastings(
+            model,
+            theta_obs_select.to(device),
+            theta_true_select.to(device),
+            prior_bounds,
+            num_samples=int(settings.get("mcmc_num_samples", 100000)),
+            burn_in=int(settings.get("mcmc_burn_in", 1000)),
+            proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
+            seed=int(settings.get("seed", 42)),
+        )
+        samples_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")
+        with h5py.File(samples_file, "w") as handle:
+            handle.create_dataset("samples", data=samples.numpy())
+            handle.create_dataset("theta_obs", data=theta_obs.mean(dim=0).numpy())
+        LOGGER.info(f"Saved posterior samples to {samples_file}")
+        
+        posterior_figure = plot_posterior_samples(samples, prior_bounds, theta_true_select)
+        posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
+        posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
+        plt.close(posterior_figure)
+        LOGGER.info(f"Saved posterior samples plot to {posterior_plot_file}")
+
+        chain_figure = plot_chain(samples)
+        chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_chain.png")
+        chain_figure.savefig(chain_plot_file, bbox_inches="tight")
+        plt.close(chain_figure)
+        LOGGER.info(f"Saved chain plot to {chain_plot_file}")
+
+
+
     return model, history
 
+def plot_chain(samples):
+    import matplotlib.pyplot as plt
+    num_parameters = samples.shape[1]
+    figure, axes = plt.subplots(1, num_parameters, figsize=(4 * num_parameters, 3), squeeze=False)
+    for index, axis in enumerate(axes[0]):
+        axis.plot(samples[:, index].numpy(), 'o-', label=f"Parameter {index}")
+        axis.legend()
+        axis.set_xlabel(f"Step")
+        axis.set_ylabel(f"Parameter {index}")
+    figure.tight_layout()
+    return figure
 
 def train_likelihood_from_config(
     config_path: ConfigPaths,
@@ -202,9 +334,29 @@ def train_likelihood_from_config(
         raise ValueError("The 'likelihood' configuration section is missing.")
     if not isinstance(settings, Mapping):
         raise TypeError("The 'likelihood' configuration section must be a mapping.")
+
+    training_settings = raw_config.get("training")
+    forward_model = raw_config.get("forward_model")
+    if not isinstance(training_settings, Mapping) or not isinstance(forward_model, Mapping):
+        raise ValueError("Posterior sampling requires the 'training' and 'forward_model' configuration sections.")
+    from ..training import load_physics_model_class
+
+    physics_model_class = load_physics_model_class(str(training_settings["physics_model"]))
+    physics_args = dict(training_settings.get("physics_model_args", {}))
+    physics_args.setdefault("num_samples_prior", 1)
+    physics_args.setdefault("nside", forward_model.get("analysis", {}).get("n_side"))
+    physics_model = physics_model_class(
+        forward_model,
+        scalers=False,
+        seed=int(settings.get("seed", 42)),
+        device=device or settings.get("device"),
+        **physics_args,
+    )
+    prior_bounds = torch.tensor([physics_model.priors[name] for name in physics_model.params], dtype=torch.float32)
     return train_likelihood(
         settings,
         input_file=input_file,
         output_file=output_file,
         device=device,
+        prior_bounds=prior_bounds,
     )
