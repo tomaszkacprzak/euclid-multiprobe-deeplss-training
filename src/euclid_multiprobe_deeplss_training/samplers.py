@@ -199,12 +199,14 @@ class MetropolisHastingsBatchSampler(BaseBatchSampler):
                             current = proposal
                             current_log_probability = proposal_log_probability
                             accepted += 1
-                    if step >= self.burn_in:
-                        chain.append(current.squeeze(0).clone())
+                            if step >= self.burn_in:
+                                chain.append(current.squeeze(0).clone())
                 chains.append(torch.stack(chain))
                 LOGGER.info(
-                    f"Metropolis-Hastings acceptance rate for observation {observation_index}: {accepted / total_steps:.3e}"
+                    f"Observation {observation_index + 1}/{len(observations)}: Metropolis-Hastings accepted {accepted}/{total_steps}, acceptance rate {accepted / total_steps:.3e}"
                 )
+        chain_size_min = min([len(chain) for chain in chains])
+        chains = [chain[:chain_size_min] for chain in chains]
         return torch.stack(chains).cpu()
 
 
@@ -243,6 +245,8 @@ class HamiltonianMonteCarloBatchSampler(BaseBatchSampler):
             dtype=initial_parameters.dtype,
             device=initial_parameters.device,
         )
+
+        LOGGER.info(f"Creating HMC sampler with step size {self.step_size}, num leapfrog steps {self.num_leapfrog_steps}, mass {self.mass}")
         sampler = HamiltonianMonteCarlo(
             energy,
             step_size=self.step_size,
@@ -253,14 +257,20 @@ class HamiltonianMonteCarloBatchSampler(BaseBatchSampler):
         )
         generator = torch.Generator(device=initial_parameters.device).manual_seed(self.seed)
         self.likelihood_model.eval()
-        trajectory = sampler.sample(
+        LOGGER.info(f"Sampling {len(initial_parameters)} observations and {self.burn_in + self.num_steps} steps with HMC")
+        trajectory, diagnostics = sampler.sample(
             x=energy.to_unconstrained_space(initial_parameters),
             n_steps=self.burn_in + self.num_steps,
             n_samples=len(initial_parameters),
             return_trajectory=True,
             model_kwargs={"theta_obs": observations},
             generator=generator,
+            return_diagnostics=True,
         )
+        a = diagnostics["acceptance_rate"]
+        print("mean acceptance :", a.mean().item())
+        print("min acceptance  :", a.min().item())
+        print("max acceptance  :", a.max().item())
         samples = energy.to_parameter_space(trajectory[:, self.burn_in :])
         return samples.detach().cpu()
 

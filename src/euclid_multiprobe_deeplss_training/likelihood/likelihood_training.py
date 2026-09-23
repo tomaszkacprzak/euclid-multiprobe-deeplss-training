@@ -211,7 +211,7 @@ def train_likelihood(
     plt.close(figure)
 
     # run MCMC for the selected observation
-    num_observations = 2
+    num_observations = settings.get("mcmc_num_observations", 4)
     num_observations_plot = 4
     if "mcmc_num_samples" in settings:
         
@@ -232,14 +232,14 @@ def train_likelihood(
             sampler = MetropolisHastingsBatchSampler(
                 model,
                 int(settings.get("mcmc_num_samples", 100000)),
-                proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
+                proposal_scale=float(settings.get("mcmc_proposal_scale", 0.01)),
                 **common_arguments,
             )
         elif sampler_name in {"hamiltonian_monte_carlo", "hamiltonian", "hmc"}:
             sampler = HamiltonianMonteCarloBatchSampler(
                 model,
                 int(settings.get("mcmc_num_samples", 100000)),
-                step_size=float(settings.get("mcmc_step_size", 1e-3)),
+                step_size=float(settings.get("mcmc_step_size", 5e-2)),
                 num_leapfrog_steps=int(settings.get("mcmc_num_leapfrog_steps", 10)),
                 **common_arguments,
             )
@@ -248,16 +248,16 @@ def train_likelihood(
 
         samples = sampler.sample(theta_obs_select, theta_true_select)
         samples_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")
-        sampler.save_chains(samples_file, samples, theta_obs_select)
+        # sampler.save_chains(samples_file, samples, theta_obs_select)
 
         posterior_figure = sampler.plot_likelihood_samples(samples[:num_observations_plot], theta_true_select[:num_observations_plot])
-        posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
+        posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_{sampler_name}_samples.png")
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)
         LOGGER.info(f"Saved posterior samples plot to {posterior_plot_file}")
 
         chain_figure = sampler.plot_chain(samples[0])
-        chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_chain.png")
+        chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_{sampler_name}_chain.png")
         chain_figure.savefig(chain_plot_file, bbox_inches="tight")
         plt.close(chain_figure)
         LOGGER.info(f"Saved chain plot to {chain_plot_file}")
