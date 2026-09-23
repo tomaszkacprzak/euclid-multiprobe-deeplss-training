@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-
+from tqdm import tqdm
 import torch
 
 from ..utils.config import ConfigPaths, config_paths, load_config
@@ -20,6 +20,7 @@ LOGGER = get_logger(__file__)
 def sample_posterior_metropolis_hastings(
     model: LikelihoodBase,
     theta_obs: torch.Tensor,
+    theta_init: torch.Tensor,
     prior_bounds: torch.Tensor,
     *,
     num_samples: int = 1000,
@@ -51,15 +52,15 @@ def sample_posterior_metropolis_hastings(
     width = upper - lower
     observation = ((theta_obs.to(device=device, dtype=dtype) - lower) / width).unsqueeze(0)
     proposal_std = torch.full_like(lower, proposal_scale)
-    current = torch.full_like(lower, 0.5)
+    current = ((theta_init.to(device=device, dtype=dtype) - lower) / width).unsqueeze(0)
     generator = torch.Generator(device=device).manual_seed(seed)
 
     model.eval()
     with torch.no_grad():
-        current_log_probability = model.log_likelihood(observation, current.unsqueeze(0))[0]
+        current_log_probability = model.log_likelihood(observation, current)[0]
         chain = []
         accepted = 0
-        for step in range(burn_in + num_samples):
+        for step in tqdm(range(burn_in + num_samples)):
             proposal = current + proposal_std * torch.randn(current.shape, device=device, dtype=dtype, generator=generator)
             if torch.all((proposal >= 0) & (proposal <= 1)):
                 proposal_log_probability = model.log_likelihood(observation, proposal.unsqueeze(0))[0]
@@ -68,15 +69,15 @@ def sample_posterior_metropolis_hastings(
                     current = proposal
                     current_log_probability = proposal_log_probability
                     accepted += 1
-            if step >= burn_in:
-                chain.append(current.clone())
+                    if step >= burn_in:
+                        chain.append(current.clone())
 
     LOGGER.info(f"Metropolis-Hastings acceptance rate: {accepted / (burn_in + num_samples):.3f}")
     transformed_samples = torch.stack(chain)
     return (lower + width * transformed_samples).cpu()
 
 
-def plot_posterior_samples(samples: torch.Tensor, prior_bounds: torch.Tensor):
+def plot_posterior_samples(samples: torch.Tensor, prior_bounds: torch.Tensor, theta_true: torch.Tensor):
     """Plot one marginal posterior histogram for every parameter dimension."""
     import matplotlib.pyplot as plt
 
@@ -88,6 +89,7 @@ def plot_posterior_samples(samples: torch.Tensor, prior_bounds: torch.Tensor):
         axis.hist(samples[:, index].numpy(), bins=40, range=bounds)
         axis.set_xlabel(f"Parameter {index}")
         axis.set_ylabel("Samples")
+        axis.axvline(theta_true[index], color='red', linestyle='--')
     figure.tight_layout()
     return figure
 
@@ -211,7 +213,7 @@ def train_likelihood(
     Predictions are theta_obs and labels are theta_true.  Both datasets must
     have shape ``(N, M)`` and are split along N into training and validation.
     """
-    import h5py
+    import h5py, numpy as np
 
     with h5py.File(input_file, "r") as handle:
         theta_obs = torch.as_tensor(handle["predictions"][:], dtype=torch.float32)
@@ -256,13 +258,26 @@ def train_likelihood(
 
     plt.close(figure)
 
+    # run MCMC for the selected observation
     if prior_bounds is not None:
+
+        # find an observation that is closest to the mean
+        ind_obs = np.argmin(np.linalg.norm(theta_obs - theta_obs.mean(dim=0, keepdim=True), axis=1))
+        theta_obs_select = theta_obs[ind_obs]
+        theta_true_select = theta_true[ind_obs]
+        LOGGER.info(f"Selected observation {theta_obs_select} true {theta_true_select}")
+
+        print(f'theta_obs_select {theta_obs_select} type {type(theta_obs_select)} dtype {theta_obs_select.dtype} shape {theta_obs_select.shape}')
+        print(f'theta_true_select {theta_true_select} type {type(theta_true_select)} dtype {theta_true_select.dtype} shape {theta_true_select.shape}')
+
+        # run MCMC for the selected observation
         samples = sample_posterior_metropolis_hastings(
             model,
-            theta_obs.mean(dim=0),
+            theta_obs_select.to(device),
+            theta_true_select.to(device),
             prior_bounds,
-            num_samples=int(settings.get("mcmc_num_samples", 1000)),
-            burn_in=int(settings.get("mcmc_burn_in", 200)),
+            num_samples=int(settings.get("mcmc_num_samples", 100000)),
+            burn_in=int(settings.get("mcmc_burn_in", 1000)),
             proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
             seed=int(settings.get("seed", 42)),
         )
@@ -271,14 +286,34 @@ def train_likelihood(
             handle.create_dataset("samples", data=samples.numpy())
             handle.create_dataset("theta_obs", data=theta_obs.mean(dim=0).numpy())
         LOGGER.info(f"Saved posterior samples to {samples_file}")
-        posterior_figure = plot_posterior_samples(samples, prior_bounds)
+        
+        posterior_figure = plot_posterior_samples(samples, prior_bounds, theta_true_select)
         posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)
         LOGGER.info(f"Saved posterior samples plot to {posterior_plot_file}")
 
+        chain_figure = plot_chain(samples)
+        chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_chain.png")
+        chain_figure.savefig(chain_plot_file, bbox_inches="tight")
+        plt.close(chain_figure)
+        LOGGER.info(f"Saved chain plot to {chain_plot_file}")
+
+
+
     return model, history
 
+def plot_chain(samples):
+    import matplotlib.pyplot as plt
+    num_parameters = samples.shape[1]
+    figure, axes = plt.subplots(1, num_parameters, figsize=(4 * num_parameters, 3), squeeze=False)
+    for index, axis in enumerate(axes[0]):
+        axis.plot(samples[:, index].numpy(), 'o-', label=f"Parameter {index}")
+        axis.legend()
+        axis.set_xlabel(f"Step")
+        axis.set_ylabel(f"Parameter {index}")
+    figure.tight_layout()
+    return figure
 
 def train_likelihood_from_config(
     config_path: ConfigPaths,
