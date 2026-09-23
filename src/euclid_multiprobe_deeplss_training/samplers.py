@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -118,6 +120,66 @@ class BaseBatchSampler(ABC):
     plot_posterior_samples = plot_likelihood_samples
 
     @staticmethod
+    def plot_triangle_chain(
+        samples: torch.Tensor,
+        truth: torch.Tensor,
+        parameter_names: Sequence[str],
+        priors: Mapping[str, Sequence[float]],
+    ) -> tuple[Any, Any]:
+        """Plot one unit-box chain and its truth in physical coordinates."""
+        import numpy as np
+        from trianglechain import TriangleChain
+
+        chain = torch.as_tensor(samples).detach().cpu().numpy().astype(float, copy=False)
+        truth_array = torch.as_tensor(truth).detach().cpu().numpy().astype(float, copy=False)
+        labels = [str(name) for name in parameter_names]
+        if chain.ndim != 2:
+            raise ValueError("samples must have shape (num_steps, num_parameters).")
+        if len(labels) != chain.shape[1]:
+            raise ValueError("There must be one parameter name per column of samples.")
+        if not np.isfinite(chain).all():
+            raise ValueError("samples contain NaN or infinite values.")
+        if truth_array.shape != (chain.shape[1],):
+            raise ValueError("truth must have shape (num_parameters,).")
+        if not np.isfinite(truth_array).all():
+            raise ValueError("truth contains NaN or infinite values.")
+
+        try:
+            bounds = np.asarray([priors[name] for name in labels], dtype=float)
+        except KeyError as error:
+            raise ValueError(f"No prior is defined for parameter {error.args[0]!r}.") from error
+        if bounds.shape != (chain.shape[1], 2):
+            raise ValueError("Each parameter prior must contain exactly a lower and upper bound.")
+        if not np.isfinite(bounds).all() or np.any(bounds[:, 1] <= bounds[:, 0]):
+            raise ValueError("Parameter priors must have finite, increasing bounds.")
+
+        physical_chain = bounds[:, 0] + chain * (bounds[:, 1] - bounds[:, 0])
+        physical_truth = bounds[:, 0] + truth_array * (bounds[:, 1] - bounds[:, 0])
+        names = [f"p{index}" for index in range(chain.shape[1])]
+        ranges = dict(zip(names, bounds.tolist(), strict=True))
+        triangle = TriangleChain(
+            names=names,
+            labels=labels,
+            ranges=ranges,
+            fill=True,
+            de_kwargs={"levels": [0.68, 0.95]},
+        )
+        figure, axes = triangle.contour_cl(
+            physical_chain,
+            show_values=True,
+            bestfit_method="median",
+            levels_method="percentile",
+            credible_interval=0.68,
+        )
+        triangle.axlines(
+            physical_truth,
+            color="black",
+            plot_histograms_1D=True,
+            axlines_kwargs={"ls": "--", "lw": 1.2, "zorder": 10},
+        )
+        return figure, axes
+
+    @staticmethod
     def plot_chain(samples: torch.Tensor):
         """Plot each parameter of a single chain against sampling step."""
         import matplotlib.pyplot as plt
@@ -203,7 +265,8 @@ class MetropolisHastingsBatchSampler(BaseBatchSampler):
                                 chain.append(current.squeeze(0).clone())
                 chains.append(torch.stack(chain))
                 LOGGER.info(
-                    f"Observation {observation_index + 1}/{len(observations)}: Metropolis-Hastings accepted {accepted}/{total_steps}, acceptance rate {accepted / total_steps:.3e}"
+                    f"Observation {observation_index + 1}/{len(observations)}: Metropolis-Hastings accepted "
+                    f"{accepted}/{total_steps}, acceptance rate {accepted / total_steps:.3e}"
                 )
         chain_size_min = min([len(chain) for chain in chains])
         chains = [chain[:chain_size_min] for chain in chains]
