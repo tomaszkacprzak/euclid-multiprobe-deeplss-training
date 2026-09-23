@@ -28,16 +28,20 @@ def sample_posterior_metropolis_hastings(
     proposal_scale: float = 0.05,
     seed: int = 42,
 ) -> torch.Tensor:
-    """Draw a posterior chain for parameters standardized to ``[0, 1]``.
+    """Draw posterior chains for a batch of observations.
 
     Likelihood training inputs are already standardized by the forward model,
     so observations and parameter samples are passed to the likelihood without
     any further transformation.  The implicit prior is uniform on the unit box.
+    Each ``(theta_obs, theta_init)`` pair is sampled independently and the
+    returned tensor has shape ``(num_observations, num_samples, num_parameters)``.
     """
     theta_obs = torch.as_tensor(theta_obs)
     theta_init = torch.as_tensor(theta_init)
-    if theta_obs.ndim != 1 or theta_init.shape != theta_obs.shape:
-        raise ValueError("theta_obs and theta_init must have shape (M,).")
+    if theta_obs.ndim != 2 or theta_init.shape != theta_obs.shape:
+        raise ValueError("theta_obs and theta_init must have shape (num_observations, num_parameters).")
+    if theta_obs.shape[0] == 0:
+        raise ValueError("theta_obs and theta_init must contain at least one observation.")
     if not torch.all((theta_init >= 0) & (theta_init <= 1)):
         raise ValueError("theta_init must be inside the standardized [0, 1] prior.")
     if num_samples <= 0 or burn_in < 0:
@@ -47,29 +51,37 @@ def sample_posterior_metropolis_hastings(
 
     parameter = next(model.parameters())
     device, dtype = parameter.device, parameter.dtype
-    observation = theta_obs.to(device=device, dtype=dtype).unsqueeze(0)
-    current = theta_init.to(device=device, dtype=dtype).unsqueeze(0)
+    observations = theta_obs.to(device=device, dtype=dtype)
+    initial_parameters = theta_init.to(device=device, dtype=dtype)
     generator = torch.Generator(device=device).manual_seed(seed)
 
     model.eval()
     with torch.no_grad():
-        current_log_probability = model.log_likelihood(observation, current)[0]
-        chain = []
-        accepted = 0
-        for step in tqdm(range(burn_in + num_samples)):
-            proposal = current + proposal_scale * torch.randn(current.shape, device=device, dtype=dtype, generator=generator)
-            if torch.all((proposal >= 0) & (proposal <= 1)):
-                proposal_log_probability = model.log_likelihood(observation, proposal)[0]
-                log_acceptance = proposal_log_probability - current_log_probability
-                if torch.log(torch.rand((), device=device, dtype=dtype, generator=generator)) < log_acceptance:
-                    current = proposal
-                    current_log_probability = proposal_log_probability
-                    accepted += 1
-            if step >= burn_in:
-                chain.append(current.squeeze(0).clone())
+        chains = []
+        for observation_index, (observation, current) in enumerate(zip(observations, initial_parameters, strict=True)):
+            observation = observation.unsqueeze(0)
+            current = current.unsqueeze(0)
+            current_log_probability = model.log_likelihood(observation, current)[0]
+            chain = []
+            accepted = 0
+            for step in tqdm(range(burn_in + num_samples), desc=f"Observation {observation_index + 1}/{len(observations)}"):
+                proposal = current + proposal_scale * torch.randn(current.shape, device=device, dtype=dtype, generator=generator)
+                if torch.all((proposal >= 0) & (proposal <= 1)):
+                    proposal_log_probability = model.log_likelihood(observation, proposal)[0]
+                    log_acceptance = proposal_log_probability - current_log_probability
+                    if torch.log(torch.rand((), device=device, dtype=dtype, generator=generator)) < log_acceptance:
+                        current = proposal
+                        current_log_probability = proposal_log_probability
+                        accepted += 1
+                if step >= burn_in:
+                    chain.append(current.squeeze(0).clone())
+            chains.append(torch.stack(chain))
+            LOGGER.info(
+                f"Metropolis-Hastings acceptance rate for observation {observation_index}: "
+                f"{accepted / (burn_in + num_samples):.3f}"
+            )
 
-    LOGGER.info(f"Metropolis-Hastings acceptance rate: {accepted / (burn_in + num_samples):.3f}")
-    return torch.stack(chain).cpu()
+    return torch.stack(chains).cpu()
 
 
 def plot_posterior_samples(samples: torch.Tensor, theta_true: torch.Tensor):
@@ -264,8 +276,8 @@ def train_likelihood(
         # run MCMC for the selected observation
         samples = sample_posterior_metropolis_hastings(
             model,
-            theta_obs_select.to(device),
-            theta_true_select.to(device),
+            theta_obs_select.unsqueeze(0).to(device),
+            theta_true_select.unsqueeze(0).to(device),
             num_samples=int(settings.get("mcmc_num_samples", 100000)),
             burn_in=int(settings.get("mcmc_burn_in", 1000)),
             proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
@@ -274,16 +286,16 @@ def train_likelihood(
         samples_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")
         with h5py.File(samples_file, "w") as handle:
             handle.create_dataset("samples", data=samples.numpy())
-            handle.create_dataset("theta_obs", data=theta_obs_select.numpy())
+            handle.create_dataset("theta_obs", data=theta_obs_select.unsqueeze(0).numpy())
         LOGGER.info(f"Saved posterior samples to {samples_file}")
 
-        posterior_figure = plot_posterior_samples(samples, theta_true_select)
+        posterior_figure = plot_posterior_samples(samples[0], theta_true_select)
         posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)
         LOGGER.info(f"Saved posterior samples plot to {posterior_plot_file}")
 
-        chain_figure = plot_chain(samples)
+        chain_figure = plot_chain(samples[0])
         chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_chain.png")
         chain_figure.savefig(chain_plot_file, bbox_inches="tight")
         plt.close(chain_figure)
