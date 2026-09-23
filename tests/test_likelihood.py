@@ -98,16 +98,24 @@ def test_metropolis_hastings_samples_inside_box_prior() -> None:
             return -(theta_obs - theta_true).square().sum(dim=-1)
 
     model = QuadraticLikelihood(2, num_components=1, num_layers=1, hidden_dim=4)
-    observation = torch.tensor([0.25, 0.75])
-    initial = torch.tensor([0.5, 0.5])
+    observations = torch.tensor([[0.25, 0.75], [0.8, 0.2]])
+    initial = torch.tensor([[0.5, 0.5], [0.6, 0.4]])
 
-    samples = sample_posterior_metropolis_hastings(model, observation, initial, num_samples=20, burn_in=5, seed=7)
+    samples = sample_posterior_metropolis_hastings(model, observations, initial, num_samples=20, burn_in=5, seed=7)
 
-    assert samples.shape == (20, 2)
+    assert samples.shape == (2, 20, 2)
     assert torch.all(samples >= 0)
     assert torch.all(samples <= 1)
-    assert all(torch.equal(evaluated, observation.unsqueeze(0)) for evaluated in model.evaluated_observations)
+    evaluated_observations = torch.cat(model.evaluated_observations)
+    assert torch.equal(evaluated_observations.unique(dim=0), observations)
     assert all(torch.all((parameters >= 0) & (parameters <= 1)) for parameters in model.evaluated_parameters)
+
+
+def test_metropolis_hastings_requires_batched_inputs() -> None:
+    model = GaussianMixtureMDN(2, num_components=1, num_layers=1, hidden_dim=4)
+
+    with pytest.raises(ValueError, match="num_observations, num_parameters"):
+        sample_posterior_metropolis_hastings(model, torch.tensor([0.25, 0.75]), torch.tensor([0.5, 0.5]))
 
 
 def test_plot_posterior_samples_has_one_histogram_per_parameter() -> None:
