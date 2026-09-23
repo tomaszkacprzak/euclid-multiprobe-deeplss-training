@@ -172,7 +172,7 @@ class BaseBatchSampler(ABC):
             credible_interval=0.68,
         )
         triangle.axlines(
-            physical_truth,
+            physical_truth[np.newaxis, :],
             color="black",
             plot_histograms_1D=True,
             axlines_kwargs={"ls": "--", "lw": 1.2, "zorder": 10},
