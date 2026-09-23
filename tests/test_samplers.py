@@ -73,7 +73,9 @@ def test_triangle_chain_plot_unscales_samples_and_uses_parameter_names(monkeypat
     np.testing.assert_allclose(calls["chain"], [[0.1, 68.5], [0.5, 77.5]])
     np.testing.assert_allclose(calls["truth"], [0.3, 82.0])
     assert calls["init"] == {
+        "names": ["p0", "p1"],
         "labels": ["Om", "H0"],
+        "ranges": {"p0": [0.1, 0.5], "p1": [64.0, 82.0]},
         "fill": True,
         "de_kwargs": {"levels": [0.68, 0.95]},
     }

@@ -155,7 +155,15 @@ class BaseBatchSampler(ABC):
 
         physical_chain = bounds[:, 0] + chain * (bounds[:, 1] - bounds[:, 0])
         physical_truth = bounds[:, 0] + truth_array * (bounds[:, 1] - bounds[:, 0])
-        triangle = TriangleChain(labels=labels, fill=True, de_kwargs={"levels": [0.68, 0.95]})
+        names = [f"p{index}" for index in range(chain.shape[1])]
+        ranges = dict(zip(names, bounds.tolist(), strict=True))
+        triangle = TriangleChain(
+            names=names,
+            labels=labels,
+            ranges=ranges,
+            fill=True,
+            de_kwargs={"levels": [0.68, 0.95]},
+        )
         figure, axes = triangle.contour_cl(
             physical_chain,
             show_values=True,
