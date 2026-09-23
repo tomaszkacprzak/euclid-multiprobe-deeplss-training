@@ -58,6 +58,7 @@ def sample_posterior_metropolis_hastings(
     model.eval()
     with torch.no_grad():
         chains = []
+        LOGGER.info(f'running MCMC for {len(observations)} observations')
         for observation_index, (observation, current) in enumerate(zip(observations, initial_parameters, strict=True)):
             observation = observation.unsqueeze(0)
             current = current.unsqueeze(0)
@@ -78,7 +79,7 @@ def sample_posterior_metropolis_hastings(
             chains.append(torch.stack(chain))
             LOGGER.info(
                 f"Metropolis-Hastings acceptance rate for observation {observation_index}: "
-                f"{accepted / (burn_in + num_samples):.3f}"
+                f"{accepted / (burn_in + num_samples):.3e}"
             )
 
     return torch.stack(chains).cpu()
@@ -87,16 +88,16 @@ def sample_posterior_metropolis_hastings(
 def plot_posterior_samples(samples: torch.Tensor, theta_true: torch.Tensor):
     """Plot one marginal posterior histogram for every parameter dimension."""
     import matplotlib.pyplot as plt
+    num_observations, num_samples, num_parameters = samples.shape
 
-    if samples.ndim != 2 or theta_true.shape != (samples.shape[1],):
-        raise ValueError("samples must have shape (N, M) and theta_true must have shape (M,).")
-    figure, axes = plt.subplots(1, samples.shape[1], figsize=(4 * samples.shape[1], 3), squeeze=False)
-    for index, axis in enumerate(axes[0]):
-        axis.hist(samples[:, index].numpy(), bins=40, range=(0, 1))
-        axis.set_xlabel(f"Parameter {index}")
-        axis.set_ylabel("Samples")
-        axis.axvline(theta_true[index], color="red", linestyle="--")
-    figure.tight_layout()
+    figure, axes = plt.subplots(num_observations, num_parameters, figsize=(4 * num_parameters, 3 * num_observations), squeeze=False)
+    for i in range(num_observations):
+        for j in range(num_parameters):
+            axes[i, j].hist(samples[i, :, j].numpy(), bins=40, range=(0, 1))
+            axes[i, j].set_xlabel(f"Parameter {j}")
+            axes[i, j].set_ylabel("Samples")
+            axes[i, j].axvline(theta_true[i, j], color="red", linestyle="--")
+    figure.subplots_adjust(bottom=0.12, right=0.9, hspace=0.45, wspace=0.3)
     return figure
 
 
@@ -266,18 +267,18 @@ def train_likelihood(
     plt.close(figure)
 
     # run MCMC for the selected observation
+    num_observations = 2
     if "mcmc_num_samples" in settings:
+        
         # find an observation that is closest to the mean
-        ind_obs = np.argmin(np.linalg.norm(theta_obs - theta_obs.mean(dim=0, keepdim=True), axis=1))
-        theta_obs_select = theta_obs[ind_obs]
-        theta_true_select = theta_true[ind_obs]
-        LOGGER.info(f"Selected observation {theta_obs_select} true {theta_true_select}")
+        theta_obs_select = theta_obs[:num_observations]
+        theta_true_select = theta_true[:num_observations]
 
         # run MCMC for the selected observation
         samples = sample_posterior_metropolis_hastings(
             model,
-            theta_obs_select.unsqueeze(0).to(device),
-            theta_true_select.unsqueeze(0).to(device),
+            theta_obs_select.to(device),
+            theta_true_select.to(device),
             num_samples=int(settings.get("mcmc_num_samples", 100000)),
             burn_in=int(settings.get("mcmc_burn_in", 1000)),
             proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
@@ -289,7 +290,7 @@ def train_likelihood(
             handle.create_dataset("theta_obs", data=theta_obs_select.unsqueeze(0).numpy())
         LOGGER.info(f"Saved posterior samples to {samples_file}")
 
-        posterior_figure = plot_posterior_samples(samples[0], theta_true_select)
+        posterior_figure = plot_posterior_samples(samples, theta_true_select)
         posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)
