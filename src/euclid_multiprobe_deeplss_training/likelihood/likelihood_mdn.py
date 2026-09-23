@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import torch
-from torch import nn
-from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
-
-from .likelihood_base import LikelihoodBase
-
-
 import math
 from collections.abc import Sequence
 from typing import Literal
 
 import torch
-from torch import Tensor, nn
 import torch.nn.functional as F
+from torch import Tensor, nn
+
+from .likelihood_base import LikelihoodBase
 
 
 class GaussianMixtureMDN(LikelihoodBase):
@@ -166,8 +161,8 @@ class GaussianMixtureMDN(LikelihoodBase):
 
     def log_likelihood(
         self,
-        x_true: Tensor,
         x_obs: Tensor,
+        x_true: Tensor,
         *,
         reduction: Literal["none", "mean", "sum"] = "none",
     ) -> Tensor:
@@ -186,6 +181,9 @@ class GaussianMixtureMDN(LikelihoodBase):
                 "reduction must be 'none', 'mean', or 'sum'."
             )
 
+        # LikelihoodBase consistently exposes p(theta_obs | theta_true) with
+        # the observation first. Condition the mixture on the standardized
+        # true parameters without transforming their [0, 1] values.
         log_weights, means, L = self._predict(x_true)
 
         if (
