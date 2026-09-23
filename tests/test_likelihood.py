@@ -98,25 +98,24 @@ def test_metropolis_hastings_samples_inside_box_prior() -> None:
             return -(theta_obs - theta_true).square().sum(dim=-1)
 
     model = QuadraticLikelihood(2, num_components=1, num_layers=1, hidden_dim=4)
-    bounds = torch.tensor([[-1.0, 1.0], [2.0, 4.0]])
+    observation = torch.tensor([0.25, 0.75])
+    initial = torch.tensor([0.5, 0.5])
 
-    samples = sample_posterior_metropolis_hastings(
-        model, torch.tensor([0.0, 3.0]), bounds, num_samples=20, burn_in=5, seed=7
-    )
+    samples = sample_posterior_metropolis_hastings(model, observation, initial, num_samples=20, burn_in=5, seed=7)
 
     assert samples.shape == (20, 2)
-    assert torch.all(samples >= bounds[:, 0])
-    assert torch.all(samples <= bounds[:, 1])
-    assert all(torch.equal(observation, torch.tensor([[0.5, 0.5]])) for observation in model.evaluated_observations)
+    assert torch.all(samples >= 0)
+    assert torch.all(samples <= 1)
+    assert all(torch.equal(evaluated, observation.unsqueeze(0)) for evaluated in model.evaluated_observations)
     assert all(torch.all((parameters >= 0) & (parameters <= 1)) for parameters in model.evaluated_parameters)
 
 
 def test_plot_posterior_samples_has_one_histogram_per_parameter() -> None:
     pytest.importorskip("matplotlib")
-    samples = torch.tensor([[-0.5, 2.5], [0.5, 3.5]])
-    bounds = torch.tensor([[-1.0, 1.0], [2.0, 4.0]])
+    samples = torch.tensor([[0.25, 0.75], [0.5, 0.5]])
+    theta_true = torch.tensor([0.4, 0.6])
 
-    figure = plot_posterior_samples(samples, bounds)
+    figure = plot_posterior_samples(samples, theta_true)
 
     assert len(figure.axes) == 2
     assert [axis.get_xlabel() for axis in figure.axes] == ["Parameter 0", "Parameter 1"]
