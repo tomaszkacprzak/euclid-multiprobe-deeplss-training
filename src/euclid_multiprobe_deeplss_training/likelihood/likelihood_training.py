@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from tqdm import tqdm
 
 from ..utils.config import ConfigPaths, config_paths, load_config
 from ..utils.logger import get_logger
@@ -28,77 +27,23 @@ def sample_posterior_metropolis_hastings(
     proposal_scale: float = 0.05,
     seed: int = 42,
 ) -> torch.Tensor:
-    """Draw posterior chains for a batch of observations.
+    """Backward-compatible convenience wrapper for Metropolis--Hastings."""
+    from ..samplers import MetropolisHastingsBatchSampler
 
-    Likelihood training inputs are already standardized by the forward model,
-    so observations and parameter samples are passed to the likelihood without
-    any further transformation.  The implicit prior is uniform on the unit box.
-    Each ``(theta_obs, theta_init)`` pair is sampled independently and the
-    returned tensor has shape ``(num_observations, num_samples, num_parameters)``.
-    """
-    theta_obs = torch.as_tensor(theta_obs)
-    theta_init = torch.as_tensor(theta_init)
-    if theta_obs.ndim != 2 or theta_init.shape != theta_obs.shape:
-        raise ValueError("theta_obs and theta_init must have shape (num_observations, num_parameters).")
-    if theta_obs.shape[0] == 0:
-        raise ValueError("theta_obs and theta_init must contain at least one observation.")
-    if not torch.all((theta_init >= 0) & (theta_init <= 1)):
-        raise ValueError("theta_init must be inside the standardized [0, 1] prior.")
-    if num_samples <= 0 or burn_in < 0:
-        raise ValueError("num_samples must be positive and burn_in must be non-negative.")
-    if proposal_scale <= 0:
-        raise ValueError("proposal_scale must be positive.")
-
-    parameter = next(model.parameters())
-    device, dtype = parameter.device, parameter.dtype
-    observations = theta_obs.to(device=device, dtype=dtype)
-    initial_parameters = theta_init.to(device=device, dtype=dtype)
-    generator = torch.Generator(device=device).manual_seed(seed)
-
-    model.eval()
-    with torch.no_grad():
-        chains = []
-        LOGGER.info(f'running MCMC for {len(observations)} observations')
-        for observation_index, (observation, current) in enumerate(zip(observations, initial_parameters, strict=True)):
-            observation = observation.unsqueeze(0)
-            current = current.unsqueeze(0)
-            current_log_probability = model.log_likelihood(observation, current)[0]
-            chain = []
-            accepted = 0
-            for step in tqdm(range(burn_in + num_samples), desc=f"Observation {observation_index + 1}/{len(observations)}"):
-                proposal = current + proposal_scale * torch.randn(current.shape, device=device, dtype=dtype, generator=generator)
-                if torch.all((proposal >= 0) & (proposal <= 1)):
-                    proposal_log_probability = model.log_likelihood(observation, proposal)[0]
-                    log_acceptance = proposal_log_probability - current_log_probability
-                    if torch.log(torch.rand((), device=device, dtype=dtype, generator=generator)) < log_acceptance:
-                        current = proposal
-                        current_log_probability = proposal_log_probability
-                        accepted += 1
-                if step >= burn_in:
-                    chain.append(current.squeeze(0).clone())
-            chains.append(torch.stack(chain))
-            LOGGER.info(
-                f"Metropolis-Hastings acceptance rate for observation {observation_index}: "
-                f"{accepted / (burn_in + num_samples):.3e}"
-            )
-
-    return torch.stack(chains).cpu()
+    return MetropolisHastingsBatchSampler(
+        model,
+        num_samples,
+        burn_in=burn_in,
+        proposal_scale=proposal_scale,
+        seed=seed,
+    ).sample(theta_obs, theta_init)
 
 
 def plot_posterior_samples(samples: torch.Tensor, theta_true: torch.Tensor):
-    """Plot one marginal posterior histogram for every parameter dimension."""
-    import matplotlib.pyplot as plt
-    num_observations, num_samples, num_parameters = samples.shape
+    """Backward-compatible wrapper for the sampler histogram helper."""
+    from ..samplers import BaseBatchSampler
 
-    figure, axes = plt.subplots(num_observations, num_parameters, figsize=(4 * num_parameters, 3 * num_observations), squeeze=False)
-    for i in range(num_observations):
-        for j in range(num_parameters):
-            axes[i, j].hist(samples[i, :, j].numpy(), bins=40, range=(0, 1))
-            axes[i, j].set_xlabel(f"Parameter {j}")
-            axes[i, j].set_ylabel("Samples")
-            axes[i, j].axvline(theta_true[i, j], color="red", linestyle="--")
-    figure.subplots_adjust(bottom=0.12, right=0.9, hspace=0.45, wspace=0.3)
-    return figure
+    return BaseBatchSampler.plot_posterior_samples(samples, theta_true)
 
 
 def plot_likelihood_fit(
@@ -221,7 +166,6 @@ def train_likelihood(
     have shape ``(N, M)`` and are split along N into training and validation.
     """
     import h5py
-    import numpy as np
 
     with h5py.File(input_file, "r") as handle:
         theta_obs = torch.as_tensor(handle["predictions"][:], dtype=torch.float32)
@@ -275,29 +219,44 @@ def train_likelihood(
         theta_obs_select = theta_obs[:num_observations]
         theta_true_select = theta_true[:num_observations]
 
-        # run MCMC for the selected observation
-        samples = sample_posterior_metropolis_hastings(
-            model,
-            theta_obs_select.to(device),
-            theta_true_select.to(device),
-            num_samples=int(settings.get("mcmc_num_samples", 100000)),
-            burn_in=int(settings.get("mcmc_burn_in", 1000)),
-            proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
-            seed=int(settings.get("seed", 42)),
-        )
-        samples_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")
-        with h5py.File(samples_file, "w") as handle:
-            handle.create_dataset("samples", data=samples.numpy())
-            handle.create_dataset("theta_obs", data=theta_obs_select.unsqueeze(0).numpy())
-        LOGGER.info(f"Saved posterior samples to {samples_file}")
+        # Run the configured sampler. Metropolis--Hastings remains the default
+        # so existing configuration files retain their previous behaviour.
+        from ..samplers import HamiltonianMonteCarloBatchSampler, MetropolisHastingsBatchSampler
 
-        posterior_figure = plot_posterior_samples(samples[:num_observations_plot], theta_true_select[:num_observations_plot])
+        sampler_name = str(settings.get("mcmc_sampler", "metropolis_hastings")).lower().replace("-", "_")
+        common_arguments = {
+            "burn_in": int(settings.get("mcmc_burn_in", 1000)),
+            "seed": int(settings.get("seed", 42)),
+        }
+        if sampler_name in {"metropolis", "metropolis_hastings", "mh"}:
+            sampler = MetropolisHastingsBatchSampler(
+                model,
+                int(settings.get("mcmc_num_samples", 100000)),
+                proposal_scale=float(settings.get("mcmc_proposal_scale", 0.05)),
+                **common_arguments,
+            )
+        elif sampler_name in {"hamiltonian_monte_carlo", "hamiltonian", "hmc"}:
+            sampler = HamiltonianMonteCarloBatchSampler(
+                model,
+                int(settings.get("mcmc_num_samples", 100000)),
+                step_size=float(settings.get("mcmc_step_size", 1e-3)),
+                num_leapfrog_steps=int(settings.get("mcmc_num_leapfrog_steps", 10)),
+                **common_arguments,
+            )
+        else:
+            raise ValueError(f"Unknown mcmc_sampler: {sampler_name!r}.")
+
+        samples = sampler.sample(theta_obs_select, theta_true_select)
+        samples_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")
+        sampler.save_chains(samples_file, samples, theta_obs_select)
+
+        posterior_figure = sampler.plot_likelihood_samples(samples[:num_observations_plot], theta_true_select[:num_observations_plot])
         posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)
         LOGGER.info(f"Saved posterior samples plot to {posterior_plot_file}")
 
-        chain_figure = plot_chain(samples[0])
+        chain_figure = sampler.plot_chain(samples[0])
         chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_chain.png")
         chain_figure.savefig(chain_plot_file, bbox_inches="tight")
         plt.close(chain_figure)
@@ -306,18 +265,11 @@ def train_likelihood(
     return model, history
 
 
-def plot_chain(samples):
-    import matplotlib.pyplot as plt
+def plot_chain(samples: torch.Tensor):
+    """Backward-compatible wrapper for the sampler chain-plot helper."""
+    from ..samplers import BaseBatchSampler
 
-    num_parameters = samples.shape[1]
-    figure, axes = plt.subplots(1, num_parameters, figsize=(4 * num_parameters, 3), squeeze=False)
-    for index, axis in enumerate(axes[0]):
-        axis.plot(samples[:, index].numpy(), "o-", label=f"Parameter {index}")
-        axis.legend()
-        axis.set_xlabel("Step")
-        axis.set_ylabel(f"Parameter {index}")
-    figure.tight_layout()
-    return figure
+    return BaseBatchSampler.plot_chain(samples)
 
 
 def train_likelihood_from_config(
