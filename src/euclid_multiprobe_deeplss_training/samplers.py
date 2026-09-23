@@ -122,14 +122,16 @@ class BaseBatchSampler(ABC):
     @staticmethod
     def plot_triangle_chain(
         samples: torch.Tensor,
+        truth: torch.Tensor,
         parameter_names: Sequence[str],
         priors: Mapping[str, Sequence[float]],
     ) -> tuple[Any, Any]:
-        """Plot one unit-box chain in the physical coordinates of its priors."""
+        """Plot one unit-box chain and its truth in physical coordinates."""
         import numpy as np
         from trianglechain import TriangleChain
 
         chain = torch.as_tensor(samples).detach().cpu().numpy().astype(float, copy=False)
+        truth_array = torch.as_tensor(truth).detach().cpu().numpy().astype(float, copy=False)
         labels = [str(name) for name in parameter_names]
         if chain.ndim != 2:
             raise ValueError("samples must have shape (num_steps, num_parameters).")
@@ -137,6 +139,10 @@ class BaseBatchSampler(ABC):
             raise ValueError("There must be one parameter name per column of samples.")
         if not np.isfinite(chain).all():
             raise ValueError("samples contain NaN or infinite values.")
+        if truth_array.shape != (chain.shape[1],):
+            raise ValueError("truth must have shape (num_parameters,).")
+        if not np.isfinite(truth_array).all():
+            raise ValueError("truth contains NaN or infinite values.")
 
         try:
             bounds = np.asarray([priors[name] for name in labels], dtype=float)
@@ -148,14 +154,22 @@ class BaseBatchSampler(ABC):
             raise ValueError("Parameter priors must have finite, increasing bounds.")
 
         physical_chain = bounds[:, 0] + chain * (bounds[:, 1] - bounds[:, 0])
+        physical_truth = bounds[:, 0] + truth_array * (bounds[:, 1] - bounds[:, 0])
         triangle = TriangleChain(labels=labels, fill=True, de_kwargs={"levels": [0.68, 0.95]})
-        return triangle.contour_cl(
+        figure, axes = triangle.contour_cl(
             physical_chain,
             show_values=True,
             bestfit_method="median",
             levels_method="percentile",
             credible_interval=0.68,
         )
+        triangle.axlines(
+            physical_truth,
+            color="black",
+            plot_histograms_1D=True,
+            axlines_kwargs={"ls": "--", "lw": 1.2, "zorder": 10},
+        )
+        return figure, axes
 
     @staticmethod
     def plot_chain(samples: torch.Tensor):

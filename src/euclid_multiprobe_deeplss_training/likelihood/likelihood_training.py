@@ -252,7 +252,12 @@ def train_likelihood(
         samples = sampler.sample(theta_obs_select, theta_true_select)
 
         for observation_index, chain in enumerate(samples[:num_observations_plot]):
-            chain_figure, _ = sampler.plot_triangle_chain(chain, physics_model.params, physics_model.priors)
+            chain_figure, _ = sampler.plot_triangle_chain(
+                chain,
+                theta_true_select[observation_index],
+                physics_model.params,
+                physics_model.priors,
+            )
             chain_plot_file = Path(output_file).with_name(
                 f"{Path(output_file).stem}_{sampler_name}_triangle_chain_{observation_index + 1}.png"
             )

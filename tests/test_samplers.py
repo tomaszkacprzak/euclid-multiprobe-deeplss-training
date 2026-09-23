@@ -54,17 +54,24 @@ def test_triangle_chain_plot_unscales_samples_and_uses_parameter_names(monkeypat
             calls["contour"] = kwargs
             return "figure", "axes"
 
+        def axlines(self, truth, **kwargs):
+            calls["truth"] = truth
+            calls["axlines"] = kwargs
+
     monkeypatch.setitem(sys.modules, "trianglechain", types.SimpleNamespace(TriangleChain=FakeTriangleChain))
     samples = torch.tensor([[0.0, 0.25], [1.0, 0.75]])
+    truth = torch.tensor([0.5, 1.0])
 
     result = BaseBatchSampler.plot_triangle_chain(
         samples,
+        truth,
         ["Om", "H0"],
         {"Om": [0.1, 0.5], "H0": [64.0, 82.0]},
     )
 
     assert result == ("figure", "axes")
     np.testing.assert_allclose(calls["chain"], [[0.1, 68.5], [0.5, 77.5]])
+    np.testing.assert_allclose(calls["truth"], [0.3, 82.0])
     assert calls["init"] == {
         "labels": ["Om", "H0"],
         "fill": True,
@@ -76,8 +83,13 @@ def test_triangle_chain_plot_unscales_samples_and_uses_parameter_names(monkeypat
         "levels_method": "percentile",
         "credible_interval": 0.68,
     }
+    assert calls["axlines"] == {
+        "color": "black",
+        "plot_histograms_1D": True,
+        "axlines_kwargs": {"ls": "--", "lw": 1.2, "zorder": 10},
+    }
 
 
 def test_triangle_chain_plot_requires_one_parameter_name_per_column() -> None:
     with pytest.raises(ValueError, match="one parameter name"):
-        BaseBatchSampler.plot_triangle_chain(torch.ones(3, 2), ["Om"], {"Om": [0.1, 0.5]})
+        BaseBatchSampler.plot_triangle_chain(torch.ones(3, 2), torch.ones(2), ["Om"], {"Om": [0.1, 0.5]})
