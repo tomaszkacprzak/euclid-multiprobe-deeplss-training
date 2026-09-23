@@ -159,6 +159,7 @@ def train_likelihood(
     input_file: str | Path,
     output_file: str | Path,
     device: torch.device | str | None = None,
+    physics_model: Any | None = None,
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Train from a prediction HDF5 file containing ``predictions`` and ``labels``.
 
@@ -212,9 +213,10 @@ def train_likelihood(
 
     # run MCMC for the selected observation
     num_observations = settings.get("mcmc_num_observations", 4)
-    num_observations_plot = 4
     if "mcmc_num_samples" in settings:
-        
+        if physics_model is None:
+            raise ValueError("physics_model is required to label and unscale MCMC samples.")
+
         # find an observation that is closest to the mean
         theta_obs_select = theta_obs[:num_observations]
         theta_true_select = theta_true[:num_observations]
@@ -247,20 +249,15 @@ def train_likelihood(
             raise ValueError(f"Unknown mcmc_sampler: {sampler_name!r}.")
 
         samples = sampler.sample(theta_obs_select, theta_true_select)
-        samples_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.h5")
-        # sampler.save_chains(samples_file, samples, theta_obs_select)
 
-        posterior_figure = sampler.plot_likelihood_samples(samples[:num_observations_plot], theta_true_select[:num_observations_plot])
-        posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_{sampler_name}_samples.png")
-        posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
-        plt.close(posterior_figure)
-        LOGGER.info(f"Saved posterior samples plot to {posterior_plot_file}")
-
-        chain_figure = sampler.plot_chain(samples[0])
-        chain_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_{sampler_name}_chain.png")
-        chain_figure.savefig(chain_plot_file, bbox_inches="tight")
-        plt.close(chain_figure)
-        LOGGER.info(f"Saved chain plot to {chain_plot_file}")
+        for observation_index, chain in enumerate(samples):
+            chain_figure, _ = sampler.plot_triangle_chain(chain, physics_model.params, physics_model.priors)
+            chain_plot_file = Path(output_file).with_name(
+                f"{Path(output_file).stem}_{sampler_name}_triangle_chain_{observation_index + 1}.png"
+            )
+            chain_figure.savefig(chain_plot_file, dpi=200, bbox_inches="tight")
+            plt.close(chain_figure)
+            LOGGER.info(f"Saved triangle-chain plot to {chain_plot_file}")
 
     return model, history
 
@@ -292,9 +289,28 @@ def train_likelihood_from_config(
     if not isinstance(settings, Mapping):
         raise TypeError("The 'likelihood' configuration section must be a mapping.")
 
+    physics_model = None
+    if "mcmc_num_samples" in settings:
+        from ..training import load_physics_model_class
+
+        training_settings = raw_config.get("training")
+        forward_model = raw_config.get("forward_model")
+        if not isinstance(training_settings, Mapping) or not isinstance(forward_model, Mapping):
+            raise ValueError("The 'training' and 'forward_model' configuration sections are required for MCMC plots.")
+        physics_model_class = load_physics_model_class(str(training_settings["physics_model"]))
+        physics_model = physics_model_class(
+            forward_model,
+            scalers=True,
+            device=device or settings.get("device"),
+            nside=forward_model["analysis"]["n_side"],
+            seed=int(settings.get("seed", 42)),
+            **dict(training_settings.get("physics_model_args", {})),
+        )
+
     return train_likelihood(
         settings,
         input_file=input_file,
         output_file=output_file,
         device=device,
+        physics_model=physics_model,
     )
