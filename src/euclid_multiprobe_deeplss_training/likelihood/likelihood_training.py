@@ -16,6 +16,18 @@ from .likelihood_mdn import GaussianMixtureMDN
 
 LOGGER = get_logger(__file__)
 
+STANDARDIZED_PARAMETER_MIN = 0.0
+STANDARDIZED_PARAMETER_MAX = 1.0
+
+
+def _validate_standardized_labels(labels: torch.Tensor) -> None:
+    """Ensure conditioning parameters use the forward-model scale unchanged."""
+    if not torch.isfinite(labels).all():
+        raise ValueError("labels must contain only finite standardized parameter values.")
+    if torch.any(labels < STANDARDIZED_PARAMETER_MIN) or torch.any(labels > STANDARDIZED_PARAMETER_MAX):
+        raise ValueError("labels must be standardized parameter values in the inclusive range [0, 1].")
+
+
 def plot_likelihood_fit(
     model: LikelihoodBase,
     predictions: torch.Tensor,
@@ -23,14 +35,16 @@ def plot_likelihood_fit(
 ):
     """Plot the samples and fitted log-likelihood surface for each parameter.
 
-    Each surface varies one label/prediction pair over its observed range while
-    holding all other dimensions at their sample means.  This produces a useful
-    two-dimensional slice through a multivariate conditional density.
+    Each surface varies one prediction over its observed range and one label
+    over the full standardized prior [0, 1], while holding all other dimensions
+    at their sample means. This produces a useful two-dimensional slice through
+    a multivariate conditional density.
     """
     import matplotlib.pyplot as plt
     import numpy as np
 
     LikelihoodBase._validate_pairs(predictions, labels, "plot")
+    _validate_standardized_labels(labels)
     device = next(model.parameters()).device
     model.eval()
     predictions_device = predictions.float().to(device)
@@ -64,7 +78,12 @@ def plot_likelihood_fit(
     mean_labels = labels_device.mean(dim=0)
     surface_data = []
     for index in range(num_parameters):
-        label_values = torch.linspace(labels_device[:, index].min(), labels_device[:, index].max(), 100, device=device)
+        label_values = torch.linspace(
+            STANDARDIZED_PARAMETER_MIN,
+            STANDARDIZED_PARAMETER_MAX,
+            100,
+            device=device,
+        )
         prediction_values = torch.linspace(predictions_device[:, index].min(), predictions_device[:, index].max(), 100, device=device)
         label_grid, prediction_grid = torch.meshgrid(label_values, prediction_values, indexing="xy")
         grid_labels = mean_labels.repeat(label_grid.numel(), 1)
@@ -132,8 +151,10 @@ def train_likelihood(
 ) -> tuple[LikelihoodBase, dict[str, list[float]]]:
     """Train from a prediction HDF5 file containing ``predictions`` and ``labels``.
 
-    Predictions are theta_obs and labels are theta_true.  Both datasets must
+    Predictions are theta_obs and labels are theta_true. Both datasets must
     have shape ``(N, M)`` and are split along N into training and validation.
+    Labels are consumed directly on the standardized scale produced by the
+    forward model and must lie in [0, 1]; no prior-range rescaling is applied.
     """
     import h5py
 
@@ -141,6 +162,7 @@ def train_likelihood(
         theta_obs = torch.as_tensor(handle["predictions"][:], dtype=torch.float32)
         theta_true = torch.as_tensor(handle["labels"][:], dtype=torch.float32)
     LikelihoodBase._validate_pairs(theta_obs, theta_true, "input")
+    _validate_standardized_labels(theta_true)
     LOGGER.info(f"Loaded observations {theta_obs.shape}")
     LOGGER.info(f"Loaded labels {theta_true.shape}")
 

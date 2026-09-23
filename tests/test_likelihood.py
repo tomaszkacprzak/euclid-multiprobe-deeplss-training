@@ -23,6 +23,24 @@ def test_mdn_returns_one_finite_log_likelihood_per_sample() -> None:
     assert torch.isfinite(result).all()
 
 
+def test_mdn_conditions_on_standardized_true_parameters() -> None:
+    model = GaussianMixtureMDN(1, num_components=1, num_layers=0)
+    with torch.no_grad():
+        model.weight_head.weight.zero_()
+        model.weight_head.bias.zero_()
+        model.mean_head.weight.fill_(2.0)
+        model.mean_head.bias.zero_()
+        model.precision_head.weight.zero_()
+        model.precision_head.bias.zero_()
+
+    theta_obs = torch.tensor([[0.0], [0.0]])
+    theta_true = torch.tensor([[0.0], [1.0]])
+
+    likelihood = model(theta_obs, theta_true)
+
+    assert likelihood[0] > likelihood[1]
+
+
 def test_fit_updates_mdn_and_reports_each_epoch(capsys) -> None:
     model = GaussianMixtureMDN(2, num_components=2, num_layers=1, hidden_dim=8)
     theta_true = torch.randn(12, 2)
@@ -91,7 +109,7 @@ def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> Non
 
     matplotlib.use("Agg")
     model = GaussianMixtureMDN(2, num_components=2, num_layers=1, hidden_dim=8)
-    labels = torch.randn(5, 2)
+    labels = torch.rand(5, 2)
     predictions = labels + 0.1 * torch.randn(5, 2)
 
     figure = plot_likelihood_fit(model, predictions, labels)
@@ -107,6 +125,25 @@ def test_plot_likelihood_fit_has_sample_and_surface_panel_per_parameter() -> Non
         assert panel.get_xlabel() == f"Label {index}"
         assert panel.get_ylabel() == f"Prediction {index}"
         assert panel.collections[0].get_array().size == 100 * 100
+        assert panel.get_xlim()[0] <= 0.0
+        assert panel.get_xlim()[1] >= 1.0
+
+
+def test_train_likelihood_rejects_unstandardized_labels(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    input_file = tmp_path / "predictions.h5"
+    labels = torch.tensor([[0.0], [1.1]])
+    with h5py.File(input_file, "w") as handle:
+        handle["labels"] = labels.numpy()
+        handle["predictions"] = labels.numpy()
+
+    with pytest.raises(ValueError, match=r"inclusive range \[0, 1\]"):
+        train_likelihood(
+            {"model_type": "mdn", "model_args": {"num_components": 1}},
+            input_file=input_file,
+            output_file=tmp_path / "likelihood.pt",
+            device="cpu",
+        )
 
 
 def test_train_likelihood_saves_plot_next_to_checkpoint(tmp_path) -> None:
@@ -114,7 +151,7 @@ def test_train_likelihood_saves_plot_next_to_checkpoint(tmp_path) -> None:
     h5py = pytest.importorskip("h5py")
     input_file = tmp_path / "predictions.h5"
     output_file = tmp_path / "models" / "likelihood.pt"
-    labels = torch.randn(8, 2)
+    labels = torch.rand(8, 2)
     with h5py.File(input_file, "w") as handle:
         handle["labels"] = labels.numpy()
         handle["predictions"] = (labels + 0.1 * torch.randn(8, 2)).numpy()
