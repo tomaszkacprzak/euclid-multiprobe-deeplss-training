@@ -268,6 +268,7 @@ def train_likelihood(
 
     # run MCMC for the selected observation
     num_observations = 2
+    num_observations_plot = 4
     if "mcmc_num_samples" in settings:
         
         # find an observation that is closest to the mean
@@ -290,7 +291,7 @@ def train_likelihood(
             handle.create_dataset("theta_obs", data=theta_obs_select.unsqueeze(0).numpy())
         LOGGER.info(f"Saved posterior samples to {samples_file}")
 
-        posterior_figure = plot_posterior_samples(samples, theta_true_select)
+        posterior_figure = plot_posterior_samples(samples[:num_observations_plot], theta_true_select[:num_observations_plot])
         posterior_plot_file = Path(output_file).with_name(f"{Path(output_file).stem}_samples.png")
         posterior_figure.savefig(posterior_plot_file, bbox_inches="tight")
         plt.close(posterior_figure)
