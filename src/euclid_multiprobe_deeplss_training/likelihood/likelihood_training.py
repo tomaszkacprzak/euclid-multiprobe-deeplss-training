@@ -213,6 +213,7 @@ def train_likelihood(
 
     # run MCMC for the selected observation
     num_observations = settings.get("mcmc_num_observations", 4)
+    num_observations_plot = 4
     if "mcmc_num_samples" in settings:
         if physics_model is None:
             raise ValueError("physics_model is required to label and unscale MCMC samples.")
@@ -250,7 +251,7 @@ def train_likelihood(
 
         samples = sampler.sample(theta_obs_select, theta_true_select)
 
-        for observation_index, chain in enumerate(samples):
+        for observation_index, chain in enumerate(samples[:num_observations_plot]):
             chain_figure, _ = sampler.plot_triangle_chain(chain, physics_model.params, physics_model.priors)
             chain_plot_file = Path(output_file).with_name(
                 f"{Path(output_file).stem}_{sampler_name}_triangle_chain_{observation_index + 1}.png"
