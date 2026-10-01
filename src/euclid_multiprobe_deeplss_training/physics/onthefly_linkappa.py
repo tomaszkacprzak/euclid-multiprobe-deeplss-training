@@ -49,7 +49,7 @@ def galaxy_density_to_count(ng_bar, dg, bg):
 
 class OntheflyPhysicsModelLinkappa(nn.Module):
 
-    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, **kwargs):
+    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, **kwargs):
 
         super().__init__()
 
@@ -71,6 +71,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         self.channel_spins = torch.from_numpy(np.array([0]*18)).to(self.device)
         # self.param_names = ['Om', 's8', 'Ob', 'H0', 'ns', 'w0', 'bary_Mc', 'bary_nu', 'Aia', 'n_Aia', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'bsc1', 'bsc2', 'bsc3', 'bsc4', 'bsc5', 'bsc6']
         self.scalers = scalers
+        self.randomize_astro_params = randomize_astro_params
         if self.scalers:
             self.set_scalers()
         LOGGER.info(f"Created physics model Linear, num_channels={self.num_channels}, num_targets={self.num_targets}, apply_scalers={self.scalers}, shape_noise_std={self.shape_noise_std}")
@@ -152,9 +153,12 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
         return torch.from_numpy(self.onthefly_samples).to(self.device)
 
-    def sample_onthefly_parameters(self, batch_size):
+    def select_onthefly_parameters(self, batch_size, id_cosmo):
 
-        j = torch.randint(0, self.onthefly_samples.shape[0], (batch_size,), device=self.device)
+        if self.randomize_astro_params:
+            j = torch.randint(0, self.onthefly_samples.shape[0], (batch_size,), device=self.device)
+        else:
+            j = id_cosmo.to(self.device)
         return self.onthefly_samples[j].squeeze().to(self.device)
 
     def forward_physics(self, example):
@@ -165,6 +169,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
         # unpack the example
         maps, vec_int, hard_params = example
+        id_cosmo = vec_int[:, 2]
 
         # this was created in the postprocessing pipeline, check if we are using the right data
         assert hard_params.shape[1] == 8, f"Expected 8 parameters, got {hard_params.shape[1]}"
@@ -178,7 +183,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         kg_tot = kg
 
         # get onthefly parameters
-        onthefly_params = self.sample_onthefly_parameters(hard_params.shape[0])
+        onthefly_params = self.select_onthefly_parameters(hard_params.shape[0], id_cosmo)
         onthefly_params = torch.atleast_2d(onthefly_params)
         targets = torch.cat([hard_params, onthefly_params], dim=1)
 

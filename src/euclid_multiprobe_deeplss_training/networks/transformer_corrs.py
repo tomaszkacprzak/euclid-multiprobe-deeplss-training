@@ -5,9 +5,105 @@ import torch.nn.functional as F
 from torch import nn
 import numpy as np
 import healpy as hp
-
+import warnings
 from pyracorr import PyracorrFastFootprint
 
+import math
+
+import torch
+from torch import Tensor, nn
+
+
+class RunningMedianAsinh(nn.Module):
+    """
+    Apply asinh(x / running_median) to a finite floating-point tensor.
+
+    Input/output shape:
+        (batch_size, num_pixels, num_channels)
+
+    Training:
+        1. Compute each sample's median along the pixel axis.
+        2. Average those medians across the batch.
+        3. Update the cumulative average across training batches.
+        4. Transform the input using the updated running statistic.
+
+    Evaluation:
+        Transform the input using the stored statistic without updating it.
+    """
+
+    def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
+        super().__init__()
+
+        if not isinstance(num_channels, int) or num_channels <= 0:
+            raise ValueError("num_channels must be a positive integer.")
+        if not math.isfinite(eps) or eps <= 0:
+            raise ValueError("eps must be finite and positive.")
+
+        self.num_channels = num_channels
+        self.eps = eps
+
+        self.register_buffer("running_median", torch.zeros(num_channels))
+        self.register_buffer(
+            "num_batches_tracked",
+            torch.tensor(0, dtype=torch.long),
+        )
+
+    @torch.no_grad()
+    def reset_running_stats(self) -> None:
+        self.running_median.zero_()
+        self.num_batches_tracked.zero_()
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim != 3 or x.shape[-1] != self.num_channels:
+            raise ValueError(
+                f"Expected (B, P, {self.num_channels}), got {tuple(x.shape)}."
+            )
+        if not x.is_floating_point():
+            raise TypeError("x must be a floating-point tensor.")
+        if x.shape[0] == 0 or x.shape[1] == 0:
+            raise ValueError("Batch and pixel dimensions must be nonempty.")
+        if x.device != self.running_median.device:
+            raise ValueError(
+                "Move the module to x.device using module.to(x.device)."
+            )
+
+        # Avoid doing the division in float16/bfloat16.
+        work = (
+            x.float()
+            if x.dtype in (torch.float16, torch.bfloat16)
+            else x
+        )
+
+        if self.training:
+            # Statistics are not part of the gradient computation.
+            with torch.no_grad():
+                sample_medians = work.median(dim=1).values  # (B, C)
+                batch_median = sample_medians.mean(dim=0)   # (C,)
+                batch_median = batch_median.to(self.running_median.dtype)
+
+                self.num_batches_tracked.add_(1)
+
+                # Cumulative average: r_t = r_(t-1) + (m_t - r_(t-1)) / t
+                self.running_median.add_(
+                    (batch_median - self.running_median)
+                    / self.num_batches_tracked
+                )
+
+        elif self.num_batches_tracked.item() == 0:
+            warnings.warn("Run at least one training batch before evaluation.")
+
+        median = self.running_median.to(dtype=work.dtype)
+
+        # Enforce |denominator| >= eps while preserving negative signs.
+        # An exactly zero median becomes +eps.
+        scale = torch.where(
+            median < 0,
+            median.clamp(max=-self.eps),
+            median.clamp(min=self.eps),
+        )
+
+        # (1, 1, C) broadcasts across samples and pixels.
+        return torch.asinh(work / scale.view(1, 1, -1)).to(dtype=x.dtype)
 
 class FeedForward(nn.Module):
     def __init__(
@@ -488,7 +584,7 @@ class InputBatchNorm(nn.Module):
         self.num_dimensions = num_dimensions
         self.num_channels = num_channels
 
-        self.bn = nn.BatchNorm1d(num_dimensions * num_channels)
+        self.bn = nn.BatchNorm1d(num_dimensions * num_channels, track_running_stats=True)
 
     def forward(self, x):
         # x: (B, D, C)
@@ -542,6 +638,7 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         attention_dropout: float = 0.0,
+        scaler: str = "none", # "none", "asinh"
     ) -> None:
         super().__init__()
 
@@ -590,6 +687,11 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         self.correlation_batch_norm = InputBatchNorm(
             self.num_corrs, self.num_channel_pairs
         )
+
+        self.scaler = None
+        if scaler == "asinh":
+            self.scaler = RunningMedianAsinh(self.num_channel_pairs)
+
         self.register_buffer(
             "upper_triangular_idx",
             torch.triu_indices(self.num_channels, self.num_channels),
@@ -628,11 +730,11 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             self.upper_triangular_idx[1],
             :,
         ].transpose(1, 2)
-        correlations_normalized = self.correlation_batch_norm(
-            correlations_unique
-        )
-        correlations_flat = correlations_normalized.reshape(
-            correlations_normalized.shape[0], -1, 1
-        )
+
+        if self.scaler is not None:
+            correlations_unique = self.scaler(correlations_unique)
+
+        correlations_normalized = self.correlation_batch_norm(correlations_unique)
+        correlations_flat = correlations_normalized.reshape(correlations_normalized.shape[0], -1, 1)
     
         return self.transformer(correlations_flat)
