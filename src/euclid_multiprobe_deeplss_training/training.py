@@ -380,10 +380,13 @@ def _prepare_checkpoint_dir(config: Config, *, clear_existing: bool | None = Non
             raise NotADirectoryError(f"Checkpoint path exists and is not a directory: {checkpoint_dir}")
         if clear_existing:
             for child in checkpoint_dir.iterdir():
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                except Exception as e:
+                    LOGGER.warning(f"Error deleting {child}: {e}")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return checkpoint_dir
 
@@ -547,6 +550,8 @@ def train(
     LOGGER.info(f"Training on {device} with config: {config}")
     if ddp_enabled:
         LOGGER.info(f"DDP enabled: rank={rank} local_rank={local_rank} world_size={world_size}")
+    else:
+        LOGGER.info(f"DDP disabled")
 
     # cuda info
     LOGGER.info(f"CUDA available: {torch.cuda.is_available()}")
@@ -1002,6 +1007,7 @@ def train_from_config(
     training_config = raw_config.setdefault("training", {})
     training_config.setdefault('grad_clip_max_norm', 1.0)
     training_config.setdefault('use_ddp', True)
+    training_config.setdefault('ddp_backend', 'nccl')
     num_validation_examples = training_config.setdefault('num_validation_examples', 1000)
 
     if not isinstance(training_config, dict):
