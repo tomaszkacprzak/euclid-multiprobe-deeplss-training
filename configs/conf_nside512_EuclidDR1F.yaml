@@ -3,17 +3,17 @@ forward_model:
   # contains the configuration parameters of the forward model pipeline
   master_seed: 4242
   dirs:
-    catalog: /scratch/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F
-    redshift_distributions: /scratch/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F
+    catalog: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F
+    redshift_distributions: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F
 
   files:
     # relative to the root of this repository
-    pixels: /scratch/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/EuclidDR1F_pixels_fiducial_512.h5
-    noise: /scratch/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/EuclidDR1F_noise.h5
+    pixels: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/EuclidDR1F_pixels_fiducial_512.h5
+    noise: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/EuclidDR1F_noise.h5
     meta_info: CosmoGridV11_bary_Fluri+2022_metainfo.h5
-    healpy_data: /scratch/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/healpy_data
+    healpy_data: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/healpy_data
     peak_binning: data/peaks/binning/v11_extended.h5
-    source_clustering_bias: /scratch/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/metacal_biases_desy3.h5
+    source_clustering_bias: /capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/data_EuclidDR1F/metacal_biases_desy3.h5
 
   survey:
     name: EuclidDR1F
