@@ -1,0 +1,58 @@
+training:
+
+  # Glob pattern for the WebDataset record shards used for training.
+  records_pattern: "/capstor/scratch/cscs/tomaszk/260205_euclid_multiprobe_sbi/008_kappa512/webdataset_EuclidDR1F_nside512_finished//EuclidDR1F*.tar"
+  config_forward_model: "conf_nside512_EuclidDR1F.yaml"
+  physics_model: "onthefly_linkappa"
+  physics_model_args:
+    shape_noise_std: 0.3
+
+  # Training settings.
+  encoder_name: "corrs_transformer"
+  embed_dim: 64
+  encoder_args:
+    depth: 8
+    inner_embed_dim: 256
+
+  loss_function: "mse"
+  num_epochs: 10000
+  batch_size: 24
+  num_workers: 16
+  max_steps: 10000
+  learning_rate: 0.0001
+  seed: 42  
+  device: "cuda"
+  use_ddp: False
+
+  # Checkpointing settings.
+  validation_every_steps: 2000
+  checkpoint_dir: "results"
+  checkpoint_every_steps: 10000
+  resume_from_checkpoint: null
+
+  # Weights & Biases logging settings.
+  wandb_project: "euclid-multiprobe-deeplss-training"
+  wandb_entity: "euclid-multiprobe-sbi"
+
+
+likelihood:
+
+  model_type: "mdn"
+  model_args:
+    num_components: 10
+    num_layers: 2
+    hidden_dims: 64
+    min_diag: 0.0001
+  num_epochs: 1000
+  batch_size: 128
+  learning_rate: 0.001
+  validation_fraction: 0.2
+  seed: 42
+  device: "cuda"
+  mcmc_num_observations: 10
+  mcmc_sampler: "hmc"
+  mcmc_num_samples: 100000
+  mcmc_step_size: 5e-2
+  mcmc_num_leapfrog_steps: 10
+  mcmc_burn_in: 1000
+
