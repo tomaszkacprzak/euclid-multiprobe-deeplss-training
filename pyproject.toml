@@ -8,7 +8,7 @@ name = "euclid-multiprobe-deeplss-training"
 version = "0.1.0"
 description = "Euclid multiprobe DeepLSS pipeline training of neural networks."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
   { name = "Euclid Multiprobe DeepLSS Training Contributors" }
@@ -19,8 +19,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: GNU Affero General Public License v3",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Astronomy",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -45,7 +43,7 @@ dependencies = [
   "matplotlib",
   "torchebm>=0.8.9",
   "trianglechain",
-  "nestcorr[cuda]",
+  "nestcorr",
 ]
 
 [project.optional-dependencies]
@@ -84,3 +82,4 @@ cuhpx = [{ requirement = "torch", match-runtime = true }]
 
 [tool.uv.sources]
 trianglechain = { git = "https://cosmo-gitlab.phys.ethz.ch/cosmo_public/trianglechain.git" }
+nestcorr = { git = "https://github.com/tomaszkacprzak/nestcorr.git", rev = "126845a452bb93082aac0ed5b1c43ee63bf41ceb" }

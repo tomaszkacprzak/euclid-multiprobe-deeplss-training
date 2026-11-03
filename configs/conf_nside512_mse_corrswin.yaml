@@ -13,6 +13,8 @@ training:
   encoder_args:
     depth: 8
     inner_embed_dim: 256
+    # Generate this schema-9 cache once with: nestcorr generate_pairs 9 --nd 1
+    pairs_filename: "pairs_L09_nd1.h5"
 
   loss_function: "mse"
   num_epochs: 10000

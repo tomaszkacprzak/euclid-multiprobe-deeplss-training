@@ -14,19 +14,51 @@ the underlying cosmological simulations.
 
 ## Installation
 
-Python 3.10 or later is required. Install with uv:
+Python 3.12 or later is required (matching Nestcorr). Install with uv:
 
 ```bash
 uv sync --extra dev
 uv run euclid-deeplss-training info
 ```
 
-Power-spectrum routes require `cuhpx` and CUDA; correlation routes require
-`pyracorr` and use CUDA. `trianglechain` is fetched from the external GitLab
-source in `pyproject.toml`. A complete installation requires access to that
-source and an installation source for `pyracorr`; `cuhpx` is imported by the
-relevant modules but is not declared as a runtime dependency. CPU execution is
-available for compatible model routes, not every command.
+Power-spectrum routes require `cuhpx` and CUDA. Correlation routes use
+`nestcorr` on CPU or CUDA; its Git source is pinned in `pyproject.toml` to the
+current API. `trianglechain` is fetched from the external GitLab source in
+`pyproject.toml`. A complete installation requires access to both sources.
+`cuhpx` is imported by the relevant modules but is not declared as a runtime
+dependency. CPU execution is available for compatible model routes, not every
+command.
+
+For development with the sibling Nestcorr checkout, install it into the same
+environment with `uv pip install --python .venv/bin/python --no-deps -e ../nestcorr`.
+Use `.venv/bin/python` and `.venv/bin/euclid-deeplss-training` directly to retain
+that editable installation without an automatic project sync.
+
+### Correlation geometry
+
+Generate a reusable Nestcorr schema-9 cache before training a `corrs_cnn` or
+`corrs_transformer` encoder or running `calccorrs`. For `nside=512` (`L=9`):
+
+```bash
+uv run nestcorr generate_pairs 9 --nd 1 -o pairs_L09_nd1.h5
+```
+
+The default cache is `pairs_L{L:02d}_nd1.h5` in the working directory. Set
+`training.encoder_args.pairs_filename` for an encoder, or
+`calccorrs.pairs_filename` for the diagnostic, to use another path. Generate
+angular bins with `--binning angular`; both encoders read the bin count from
+the cache rather than assuming a fixed sequence length. Old Pyracorr caches
+must be regenerated; models never generate geometry during construction.
+
+The integration uses `NestcorrFastFootprint` with symmetrized channel pairs.
+Inputs contain all descendants of the sorted NESTED footprint pixels at
+`nside_down`. Outputs are real plus-like correlations with shape
+`[batch, channels, channels, bins]`; spin-2 minus and imaginary components are
+not included. Standard caches have `L+1` bins, so older correlation-network
+checkpoints using doubled bins are incompatible and must be retrained.
+Empty/zero-weight bins remain NaN in diagnostic files and are replaced by zero
+before the encoders' normalization layers. Encoder execution uses PyTorch to
+preserve gradients.
 
 The supplied configs contain machine-specific dataset and auxiliary-file paths.
 Adapt them before running data-dependent commands.
@@ -93,6 +125,7 @@ after merging. Some flags have explicit defaults that also override YAML values.
 | `training` | Records pattern, physics model, encoder, loss, optimization, batching, device, validation, checkpoints and W&B. Also supplies data/model settings for diagnostics and prediction. |
 | `likelihood` | Density-model type/arguments, fitting settings and optional MCMC settings for `likelihood`. |
 | `calccls` | Optional `lmax` override for the power-spectrum diagnostic. |
+| `calccorrs` | Optional `pairs_filename` geometry cache and `device` override for the correlation diagnostic. |
 
 The supplied files illustrate this organization:
 
@@ -197,7 +230,16 @@ HTML dashboards alongside both files.
 
 **Config:** `forward_model` and `training`: survey geometry,
 `analysis.n_side`/`n_side_down`, physics model, records, batch size and workers.
-The current implementation uses CUDA and Pyracorr.
+Uses Nestcorr and a pre-generated geometry cache (see installation above).
+`calccorrs.device` overrides `training.device`; if neither is set, CUDA is
+selected when available and CPU otherwise. `calccorrs.pairs_filename` overrides
+the default `pairs_L{L:02d}_nd1.h5` path. For example:
+
+```yaml
+calccorrs:
+  pairs_filename: /data/geometry/pairs_L09_nd1.h5
+  device: cpu
+```
 
 | Additional argument | Meaning / default |
 | --- | --- |
@@ -292,6 +334,6 @@ uv run ruff check .
 ```
 
 The command reference describes current interfaces and intended outputs.
-In the current source, `calccls` and `calccorrs` import `load_pixel_indices`,
-which is absent from the configuration module; these routes need that repository
-issue resolved before they can run.
+In the current source, `calccls` imports `load_pixel_indices`, which is absent
+from the configuration module; that route needs the repository issue resolved
+before it can run.

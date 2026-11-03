@@ -197,6 +197,7 @@ def build_encoder(encoder_name: str,
             "embed_dim": embed_dim,
             "weight_function": physics_model.get_weight_maps,
             "preprocess_function": physics_model.preprocess_for_correlations,
+            "device": device,
         }
         constructor_args.update(encoder_args or {})
         model = ShiftedWindowTransformerCorrNetwork(**constructor_args)

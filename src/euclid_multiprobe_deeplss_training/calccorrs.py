@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from .training import load_physics_model_class
-from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -45,13 +45,12 @@ def calccorrs(
     file_index: int = 0,
     dataset_split: str = "training",
 ) -> list[Path]:
-    """Calculate all auto/cross map correlations and write batched WebDataset shards.
+    """Write real auto/cross correlations to HDF5, one group per input batch.
 
-    Each WebDataset sample is one input batch.  ``xi_p.pth`` and ``xi_m.pth``
-    contain all shear--shear pairs, while ``xi.pth`` contains scalar--scalar and
-    scalar--shear pairs.  The corresponding pair-index tensors identify the
-    input probes for every correlation.  Labels and source indices retain the
-    same batch dimension as the correlation tensors.
+    ``correlations`` has shape ``(batch, channels, channels, bins)`` and contains
+    the real plus-like correlation for spin fields. ``separations`` uses the
+    output bins of the pre-generated Nestcorr pair cache. Labels and source
+    indices retain the same batch dimension as the correlation tensors.
     """
 
     LOGGER.info(f"Calculating correlations {file_index}")
@@ -67,10 +66,11 @@ def calccorrs(
     from .dataloaders import OntheflyPipeline
 
     config, raw_config = _coerce_config(config_or_path)
-    requested_device = "cuda"
+    correlation_config = raw_config.get("calccorrs", config.training.get("calccorrs", {}))
+    requested_device = correlation_config.get("device", config.training.get("device"))
     run_device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
     LOGGER.info(f"Running on {run_device}")
-    indices = np.asarray(load_pixel_indices(config.forward_model), dtype=np.int64)
+    indices = np.asarray(load_pixel_file(config.forward_model)[0], dtype=np.int64)
     analysis = config.forward_model["analysis"]
     nside = int(analysis["n_side"])
     nside_down = int(analysis["n_side_down"])
@@ -105,21 +105,21 @@ def calccorrs(
     examples_written = 0
     compression_args = {"compression": "lzf", "shuffle": True}
 
-    from pyracorr import PyracorrFastFootprint
+    from nestcorr.nestcorr import NestcorrFastFootprint
+    from nestcorr.pairs import get_pairs_filename
 
-    device = torch.device("cuda")
-    LOGGER.info(f"Using PyracorrFast with L={L}")
-    spins = [0] * physics_model.num_channels
-    correlator = PyracorrFastFootprint(
+    LOGGER.info(f"Using NestcorrFastFootprint with L={L}")
+    spins = torch.as_tensor(physics_model.channel_spins).detach().cpu().tolist()
+    pairs_filename = correlation_config.get("pairs_filename") or get_pairs_filename(L)
+    correlator = NestcorrFastFootprint(
         L,
         spins,
         R_footprint=R,
         matmul_precision="high",
         footprint_indices=footprint_indices,
-        recompute_pairs=False,
-        doublesets=True,
-        pairs_filename=f"pairs_L{L:02d}.h5",
-    ).to(device)
+        symmetrize=True,
+        pairs_filename=pairs_filename,
+    ).to(run_device)
 
     time_start = time.time()
     time_corr = 0
@@ -133,7 +133,8 @@ def calccorrs(
 
             for batch_index, (maps, labels, inds) in enumerate(loader):
                 # raw batch of shape (batch_size, num_pixels, num_channels)
-                maps = maps.to(device=run_device, dtype=torch.float32)
+                map_dtype = torch.complex64 if torch.is_complex(maps) else torch.float32
+                maps = maps.to(device=run_device, dtype=map_dtype)
 
                 # calculate wegiths used for correlations
                 # weights of shape (batch_size, num_pixels, num_channels)
@@ -153,8 +154,8 @@ def calccorrs(
                 time_start_corr = time.time()
 
                 # main magic - calculate the correlations
-                # num_correlationis 2*(L+1) for pyracorr with doublesets
-                # correlations of shape (batch_size, num_channels, num_channels, num_correlations)
+                # The cache determines the bin count: L+1 for standard bins,
+                # or its saved angular intervals for angular bins.
                 correlations = correlator(maps, weights)
 
                 time_corr += time.time() - time_start_corr
@@ -170,7 +171,7 @@ def calccorrs(
                 f.create_dataset(f"batch{batch_index:04d}/labels", data=labels.cpu().numpy(), **compression_args)
                 f.create_dataset(f"batch{batch_index:04d}/inds", data=inds.cpu().numpy(), **compression_args)
 
-                examples_written += config.training['batch_size']
+                examples_written += maps.shape[0]
 
                 if batch_index == num_batches_per_file - 1:
                     break
@@ -224,7 +225,7 @@ def create_correlations_dashboard(
                 raise ValueError(f"{batch_name}/separations length does not match the correlation dimension.")
             if separations is None:
                 separations = batch_separations
-            elif not np.array_equal(separations, batch_separations):
+            elif not np.array_equal(separations, batch_separations, equal_nan=True):
                 raise ValueError("All batches must use identical separations.")
             correlations_by_batch.append(batch_correlations)
             labels_by_batch.append(batch_labels)

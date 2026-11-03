@@ -1,10 +1,11 @@
-"""Convolutional encoder for pyracorr auto- and cross-correlations."""
+"""Convolutional encoder for nestcorr auto- and cross-correlations."""
 
 from __future__ import annotations
 
 import healpy as hp
 import torch
-from pyracorr import PyracorrFastFootprint
+from nestcorr.nestcorr import NestcorrFastFootprint
+from nestcorr.pairs import get_pairs_filename
 from torch import nn
 
 from .transformer_corrs import get_footprint_indices
@@ -60,7 +61,7 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
     Inputs have shape ``(batch, pixels, channels)``. The input maps and their
     weights are prepared in the same way as for
     :class:`~.transformer_corrs.ShiftedWindowTransformerCorrNetwork`, then
-    pyracorr computes every auto- and cross-correlation. Strided convolutions
+    nestcorr computes every auto- and cross-correlation. Strided convolutions
     reduce the correlation-bin axis, residual blocks refine the
     representation, and global average pooling produces a fixed-size input for
     the embedding head.
@@ -77,6 +78,7 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
         num_channels: int,
         spins: list[int],
         embed_dim: int,
+        pairs_filename: str | None = None,
         device: torch.device | str | None = None,
         weight_function: callable | None = None,
         preprocess_function: callable | None = None,
@@ -111,8 +113,7 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
         level = hp.nside2order(self.nside)
         footprint_level = hp.nside2order(self.nside_down)
 
-        self.num_corrs = 2 * (level + 1)
-        self.correlator = PyracorrFastFootprint(
+        self.correlator = NestcorrFastFootprint(
             L=level,
             spins=spins,
             R_footprint=footprint_level,
@@ -120,10 +121,11 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
             footprint_indices=get_footprint_indices(
                 indices, level, footprint_level
             ),
-            recompute_pairs=False,
-            doublesets=True,
-            pairs_filename=f"pairs_L{level:02d}.h5",
+            symmetrize=True,
+            execution="pytorch",
+            pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(level),
         ).to(device)
+        self.num_corrs = self.correlator.num_output_bins
 
         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
         padding = kernel_size // 2
@@ -186,6 +188,9 @@ class ConvolutionalResidualCorrNetwork(nn.Module):
         maps = torch.movedim(maps, -1, 1).contiguous()
         weights = torch.movedim(weights, -1, 1).contiguous()
         correlations = self.correlator(maps, weights)
+        # Empty or entirely masked bins are NaN in nestcorr. Keep them from
+        # contaminating batch-normalization statistics and the embedding.
+        correlations = torch.nan_to_num(correlations, nan=0.0, posinf=0.0, neginf=0.0)
         correlations = correlations[
             :,
             self.upper_triangular_idx[0],

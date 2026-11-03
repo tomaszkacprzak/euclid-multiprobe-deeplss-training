@@ -1,16 +1,14 @@
 from __future__ import annotations
 
+import math
+import warnings
+
+import healpy as hp
+import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import nn
-import numpy as np
-import healpy as hp
-import warnings
-from pyracorr import PyracorrFastFootprint
-
-import math
-
-import torch
+from nestcorr.nestcorr import NestcorrFastFootprint
+from nestcorr.pairs import get_pairs_filename
 from torch import Tensor, nn
 
 
@@ -90,7 +88,7 @@ class RunningMedianAsinh(nn.Module):
                 )
 
         elif self.num_batches_tracked.item() == 0:
-            warnings.warn("Run at least one training batch before evaluation.")
+            warnings.warn("Run at least one training batch before evaluation.", stacklevel=2)
 
         median = self.running_median.to(dtype=work.dtype)
 
@@ -610,7 +608,7 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
     """Encode part-sky maps by applying a transformer to their correlations.
 
     As in :class:`~.transformer_cls.ShiftedWindowTransformerClsNetwork`, inputs have shape
-    ``(batch, pixels, channels)``, and pyracorr computes every correlation.  
+    ``(batch, pixels, channels)``, and nestcorr computes every correlation.
     The resulting correlation sequence is passed to a 
     :class:`ShiftedWindowTransformerRegressor`, with one input feature per
     correlation.
@@ -627,6 +625,7 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         num_channels: int,
         spins: list[int],
         embed_dim: int,
+        pairs_filename: str | None = None,
         sub_batch_size: int = 16,
         device: torch.device | str | None = None,
         weight_function: callable | None = None,
@@ -655,21 +654,22 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         R = hp.nside2order(self.nside_down)
 
         self.indices = indices
-        assert len(spins) == self.num_channels, "spins must have the same length as num_channels"
+        if len(spins) != self.num_channels:
+            raise ValueError("spins must have the same length as num_channels.")
         self.spins = spins
-        self.num_corrs = 2*(L+1)
         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
 
-        self.correlator = PyracorrFastFootprint(
+        self.correlator = NestcorrFastFootprint(
             L=L,
             spins=self.spins,
             R_footprint=R,
             matmul_precision="high",
             footprint_indices=get_footprint_indices(self.indices, L, R),
-            recompute_pairs=False,
-            doublesets=True,
-            pairs_filename=f"pairs_L{L:02d}.h5",
+            symmetrize=True,
+            execution="pytorch",
+            pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(L),
         ).to(device)
+        self.num_corrs = self.correlator.num_output_bins
         
         self.transformer = ShiftedWindowTransformerRegressor(
             input_channels=1,
@@ -724,6 +724,9 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         weights = torch.movedim(weights, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
 
         correlations = self.correlator(maps, weights)
+        # Empty or entirely masked bins have no measured correlation. Encode
+        # them as zero before scaling and updating normalization statistics.
+        correlations = torch.nan_to_num(correlations, nan=0.0, posinf=0.0, neginf=0.0)
         correlations_unique = correlations[
             :,
             self.upper_triangular_idx[0],
