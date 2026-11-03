@@ -41,11 +41,11 @@ dependencies = [
   "graphviz",
   "torchinfo",
   "torchdiffeq",
-  "pyracorr",
   "tqdm",
   "matplotlib",
   "torchebm>=0.8.9",
   "trianglechain",
+  "nestcorr[cuda]",
 ]
 
 [project.optional-dependencies]
