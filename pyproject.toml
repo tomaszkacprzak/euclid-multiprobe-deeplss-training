@@ -82,4 +82,4 @@ cuhpx = [{ requirement = "torch", match-runtime = true }]
 
 [tool.uv.sources]
 trianglechain = { git = "https://cosmo-gitlab.phys.ethz.ch/cosmo_public/trianglechain.git" }
-nestcorr = { git = "https://github.com/tomaszkacprzak/nestcorr.git", rev = "126845a452bb93082aac0ed5b1c43ee63bf41ceb" }
+

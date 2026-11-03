@@ -175,3 +175,38 @@ def peak_memory(label="block", interval=0.01):
         print(f"  peak:       {peak / 1024**2:.2f} MiB")
         print(f"  peak delta: {(peak - start) / 1024**2:.2f} MiB")
         print(f"  end delta:  {(end - start) / 1024**2:+.2f} MiB")
+
+
+
+from contextlib import contextmanager, redirect_stdout
+import io
+
+class LoggerWrapper(io.TextIOBase):
+    """File-like object that sends written text to a logger, line by line."""
+
+    def __init__(self, name: str, level: int = logging.INFO):
+        self.logger = logging.getLogger(name)
+        self.level = level
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                self.logger.log(self.level, line.rstrip())
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer.strip():
+            self.logger.log(self.level, self._buffer.rstrip())
+        self._buffer = ""
+
+@contextmanager
+def prints_to_log(name: str, level: int = logging.INFO):
+    writer = LoggerWrapper(name, level)
+    with redirect_stdout(writer):
+        try:
+            yield
+        finally:
+            writer.flush()

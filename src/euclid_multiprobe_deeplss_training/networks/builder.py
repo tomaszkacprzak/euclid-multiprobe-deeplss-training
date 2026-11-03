@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from ..utils.logger import get_logger
+from ..utils.logger import get_logger, prints_to_log
 
 LOGGER = get_logger(__file__)
 
@@ -200,6 +200,8 @@ def build_encoder(encoder_name: str,
             "device": device,
         }
         constructor_args.update(encoder_args or {})
+
+        # with prints_to_log("corrs_transformer"):
         model = ShiftedWindowTransformerCorrNetwork(**constructor_args)
 
     elif encoder_name == "corrs_cnn":

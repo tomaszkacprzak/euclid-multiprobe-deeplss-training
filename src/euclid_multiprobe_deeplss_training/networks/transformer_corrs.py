@@ -666,7 +666,7 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             matmul_precision="high",
             footprint_indices=get_footprint_indices(self.indices, L, R),
             symmetrize=True,
-            execution="pytorch",
+            execution="fused",
             pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(L),
         ).to(device)
         self.num_corrs = self.correlator.num_output_bins
