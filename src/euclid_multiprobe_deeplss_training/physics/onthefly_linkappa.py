@@ -98,6 +98,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
         # from Table 1 in https://arxiv.org/pdf/2201.07771
         self.priors = {
+            # cosmology parameters
             'Om':   [0.1, 0.5],
             's8':   [0.4, 1.4],
             'S8':   [0.23094010767585035, 1.8073922282301278],
@@ -105,6 +106,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
             'Ob':   [0.03, 0.06],
             'ns':   [0.87, 1.07],
             'w0':   [-2, -0.333],
+            # baryonification parameters
             'bary_Mc': [12.0, 15.0], # log10(bary_Mc)
             'bary_nu': [-2, 2.0],
             'bg1':  [0.8, 3.0],
