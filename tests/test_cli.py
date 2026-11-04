@@ -356,7 +356,7 @@ def test_calccorrs_command_requires_config() -> None:
         main(["calccorrs"])
 
 
-def test_calccorrs_command_passes_cache_and_output_options(monkeypatch) -> None:
+def test_calccorrs_command_passes_device_and_output_options(monkeypatch) -> None:
     calls = []
     fake_calccorrs = types.ModuleType("euclid_multiprobe_deeplss_training.calccorrs")
 
@@ -371,8 +371,6 @@ def test_calccorrs_command_passes_cache_and_output_options(monkeypatch) -> None:
             "--config",
             "configs/example.yaml",
             "calccorrs",
-            "--pairs",
-            "pairs_L09_nd2_angular_bpo4.h5",
             "--device",
             "cpu",
             "--output-dir",
@@ -395,7 +393,6 @@ def test_calccorrs_command_passes_cache_and_output_options(monkeypatch) -> None:
                 "num_batches_per_file": 4,
                 "file_index": 3,
                 "dataset_split": "validation",
-                "pairs_filename": "pairs_L09_nd2_angular_bpo4.h5",
                 "device": "cpu",
             },
         )
@@ -423,7 +420,16 @@ def test_calccorrs_help_describes_cached_bins_and_hdf5(capsys) -> None:
 
     assert exc.value.code == 0
     help_text = capsys.readouterr().out
-    assert "--pairs" in help_text
+    assert "--pairs" not in help_text
+    assert "calccorrs.pairs_filename" in help_text
     assert "saved output bins" in " ".join(help_text.split())
     assert "HDF5" in help_text
     assert "tar shard" not in help_text
+
+
+def test_calccorrs_rejects_pairs_cli_option(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--config", "config.yaml", "calccorrs", "--pairs", "pairs.h5"])
+
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --pairs" in capsys.readouterr().err

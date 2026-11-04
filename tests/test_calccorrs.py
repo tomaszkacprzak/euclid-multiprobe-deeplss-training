@@ -146,8 +146,7 @@ def _check_calccorrs_with_cache(tmp_path, monkeypatch, cache_case, device_source
     }
     overrides = {}
     if device_source == "argument":
-        overrides = {"pairs_filename": pairs_filename, "device": torch.device("cpu")}
-        config["calccorrs"]["pairs_filename"] = str(tmp_path / "ignored.h5")
+        overrides = {"device": torch.device("cpu")}
         config["calccorrs"]["device"] = "cuda"
     elif device_source == "calccorrs":
         config["calccorrs"]["device"] = "cpu"
@@ -165,7 +164,7 @@ def _check_calccorrs_with_cache(tmp_path, monkeypatch, cache_case, device_source
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.safe_dump(config), encoding="utf-8")
         result = main([
-            "--config", str(config_file), "calccorrs", "--pairs", str(pairs_filename), "--device", "cpu",
+            "--config", str(config_file), "calccorrs", "--device", "cpu",
             "--output-dir", str(tmp_path / "output"), "--num-batches-per-file", "2", "--file-index", "3",
             "--dataset-split", "validation",
         ])
@@ -232,24 +231,23 @@ def test_calccorrs_rejects_pair_file_before_initializing_survey(tmp_path, monkey
 
     monkeypatch.setattr(calccorrs_module, "load_pixel_file", unexpected_survey_load)
     config = {"forward_model": {"analysis": {"n_side": 4, "n_side_down": 1}}}
-    overrides = {}
+    config["calccorrs"] = {}
     if cache_case == "unspecified":
-        error_type, message = ValueError, "use --pairs or set calccorrs.pairs_filename"
+        error_type, message = ValueError, "set calccorrs.pairs_filename"
     elif cache_case == "missing":
-        overrides["pairs_filename"] = tmp_path / "missing.h5"
+        config["calccorrs"]["pairs_filename"] = tmp_path / "missing.h5"
         error_type, message = FileNotFoundError, "nestcorr generate_pairs 2"
     else:
-        overrides["pairs_filename"] = generate_pairs(1, tmp_path / "L01.h5")
+        config["calccorrs"]["pairs_filename"] = generate_pairs(1, tmp_path / "L01.h5")
         error_type, message = RuntimeError, "built for L=1, not L=2"
     with pytest.raises(error_type, match=message):
-        calccorrs_module.calccorrs(config, output_dir=tmp_path / "output", **overrides)
+        calccorrs_module.calccorrs(config, output_dir=tmp_path / "output")
     assert not (tmp_path / "output").exists()
 
 
-def test_calccorrs_from_config_forwards_pair_and_device_overrides(tmp_path, monkeypatch) -> None:
+def test_calccorrs_from_config_preserves_pair_setting_and_forwards_device_override(tmp_path, monkeypatch) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text("calccorrs:\n  pairs_filename: configured.h5\n  device: cuda\n", encoding="utf-8")
-    pairs_filename = tmp_path / "override.h5"
     received = {}
 
     def fake_calccorrs(config, **kwargs):
@@ -257,9 +255,9 @@ def test_calccorrs_from_config_forwards_pair_and_device_overrides(tmp_path, monk
         return [tmp_path / "result.h5"]
 
     monkeypatch.setattr(calccorrs_module, "calccorrs", fake_calccorrs)
-    result = calccorrs_module.calccorrs_from_config(config_file, pairs_filename=pairs_filename, device="cpu")
+    result = calccorrs_module.calccorrs_from_config(config_file, device="cpu")
     assert result == [tmp_path / "result.h5"]
-    assert received["pairs_filename"] == pairs_filename
+    assert "pairs_filename" not in received
     assert received["device"] == "cpu"
     assert received["num_batches_per_file"] == 100
     assert received["config"]["calccorrs"]["pairs_filename"] == "configured.h5"

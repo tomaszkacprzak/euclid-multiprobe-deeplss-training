@@ -44,7 +44,6 @@ def calccorrs(
     num_batches_per_file: int = 100,
     file_index: int = 0,
     dataset_split: str = "training",
-    pairs_filename: str | Path | None = None,
     device: str | torch.device | None = None,
 ) -> list[Path]:
     """Write real auto/cross correlations to HDF5, one group per input batch.
@@ -68,14 +67,14 @@ def calccorrs(
     nside_down = int(analysis["n_side_down"])
     L = hp.nside2order(nside)
     R = hp.nside2order(nside_down)
-    pairs_filename = pairs_filename if pairs_filename is not None else correlation_config.get("pairs_filename")
+    pairs_filename = correlation_config.get("pairs_filename")
     if not pairs_filename:
-        raise ValueError("calccorrs requires a pair cache: use --pairs or set calccorrs.pairs_filename.")
+        raise ValueError("calccorrs requires a pair cache: set calccorrs.pairs_filename.")
     pairs_path = Path(pairs_filename).expanduser()
     if not pairs_path.is_file():
         raise FileNotFoundError(
             f"Pair cache {pairs_path} does not exist. Create it with 'nestcorr generate_pairs {L}' "
-            "and pass its path using --pairs or calccorrs.pairs_filename."
+            "and set calccorrs.pairs_filename to its path."
         )
     # The file fixes the hierarchy, opening distance, and output bins. Validate
     # it before expensive survey/physics/data initialization.
@@ -390,7 +389,6 @@ def calccorrs_from_config(
     file_index: int = 0,
     num_batches_per_file: int = 100,
     dataset_split: str = "training",
-    pairs_filename: str | Path | None = None,
     device: str | torch.device | None = None,
 ) -> list[Path]:
     """Load a YAML configuration and calculate its training correlations."""
@@ -398,7 +396,7 @@ def calccorrs_from_config(
     raw_config = load_config(paths)
     return calccorrs(
         raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file,
-        dataset_split=dataset_split, pairs_filename=pairs_filename, device=device,
+        dataset_split=dataset_split, device=device,
     )
 
 

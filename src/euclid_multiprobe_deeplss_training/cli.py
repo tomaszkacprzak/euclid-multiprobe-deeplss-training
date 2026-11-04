@@ -263,12 +263,10 @@ def build_parser() -> argparse.ArgumentParser:
     calccorrs_parser = subparsers.add_parser(
         "calccorrs",
         help="Calculate scalar and shear two-point correlations for training data.",
-        description="Calculate correlations using a pre-generated Nestcorr pair cache and its saved output bins.",
-    )
-    calccorrs_parser.add_argument(
-        "--pairs",
-        default=None,
-        help="Nestcorr pair-cache HDF5 file (overrides calccorrs.pairs_filename in YAML; one must be supplied).",
+        description=(
+            "Calculate correlations using the Nestcorr pair cache configured in "
+            "calccorrs.pairs_filename and its saved output bins."
+        ),
     )
     calccorrs_parser.add_argument(
         "--device",
@@ -434,8 +432,6 @@ def _run_calccorrs(args: argparse.Namespace) -> int:
         "file_index": args.file_index,
         "dataset_split": args.dataset_split,
     }
-    if args.pairs is not None:
-        kwargs["pairs_filename"] = args.pairs
     if args.device is not None:
         kwargs["device"] = args.device
     calccorrs_from_config(_config_argument(args), **kwargs)
