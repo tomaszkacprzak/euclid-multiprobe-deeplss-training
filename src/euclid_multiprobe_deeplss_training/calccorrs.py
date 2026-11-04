@@ -283,6 +283,7 @@ def create_correlations_dashboard(
     columns = math.ceil(math.sqrt(num_pairs))
     rows = math.ceil(num_pairs / columns)
     figure = make_subplots(rows=rows, cols=columns, subplot_titles=pair_names)
+    figure.update_xaxes(type="log")
 
     colors_by_parameter = []
     for parameter_index in range(labels.shape[1]):
