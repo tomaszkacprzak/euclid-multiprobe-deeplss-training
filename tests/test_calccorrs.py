@@ -77,6 +77,11 @@ def test_calccorrs_cli_preserves_selected_angular_bins_and_overrides(tmp_path, m
     _check_calccorrs_with_cache(tmp_path, monkeypatch, "selected", "argument", True, "cli")
 
 
+@pytest.mark.parametrize("config_form", ["contiguous", "repeated", "comma", "mixed"])
+def test_calccorrs_cli_merges_multiple_configuration_files(tmp_path, monkeypatch, config_form) -> None:
+    _check_calccorrs_with_cache(tmp_path, monkeypatch, "selected", "calccorrs", True, f"cli_multi_{config_form}")
+
+
 def test_calccorrs_accepts_default_standard_cache(tmp_path, monkeypatch) -> None:
     _check_calccorrs_with_cache(tmp_path, monkeypatch, "standard_nd1", "automatic", False, "mapping")
 
@@ -114,6 +119,8 @@ def _check_calccorrs_with_cache(tmp_path, monkeypatch, cache_case, device_source
         def __init__(self, _config, **kwargs):
             super().__init__()
             calls["physics_device"] = kwargs["device"]
+            calls["physics_config"] = _config
+            calls["physics_kwargs"] = kwargs
 
         def get_weight_maps(self, values):
             return values.real + 1
@@ -156,20 +163,89 @@ def _check_calccorrs_with_cache(tmp_path, monkeypatch, cache_case, device_source
     if input_kind == "config":
         config = calccorrs_module.Config.from_mapping(config)
 
-    if input_kind == "cli":
+    if input_kind.startswith("cli"):
         import yaml
 
         from euclid_multiprobe_deeplss_training.cli import main
 
-        config_file = tmp_path / "config.yaml"
-        config_file.write_text(yaml.safe_dump(config), encoding="utf-8")
+        if input_kind.startswith("cli_multi_"):
+            # Wrong initial geometry/device/cache must all be replaced before
+            # initialization, while unrelated nested settings remain available.
+            config["forward_model"]["analysis"]["n_side"] = 4
+            config["forward_model"]["survey"] = {"shared": {"retained": "base", "overridden": "base"}}
+            config["training"]["batch_size"] = 8
+            config["training"]["physics_model_args"] = {"nested_options": {"retained": "base", "overridden": "base"}}
+            config["calccorrs"] = {"pairs_filename": str(tmp_path / "base-missing.h5"), "device": "cuda"}
+            survey = {
+                "forward_model": {
+                    "analysis": {"n_side": 2},
+                    "survey": {"shared": {"overridden": "survey", "survey_only": True}},
+                },
+                "training": {
+                    "batch_size": 2,
+                    "physics_model_args": {"nested_options": {"overridden": "survey", "survey_only": True}},
+                },
+                "calccorrs": {"pairs_filename": str(tmp_path / "survey-missing.h5"), "device": "cuda"},
+            }
+            local = {
+                "forward_model": {"survey": {"shared": {"overridden": "local"}}},
+                "training": {"physics_model_args": {"nested_options": {"overridden": "local"}}},
+                "calccorrs": {"pairs_filename": str(pairs_filename), "device": "cpu"},
+            }
+            filenames = []
+            for name, contents in (("base", config), ("survey", survey), ("local", local)):
+                config_file = tmp_path / f"{name}.yaml"
+                config_file.write_text(yaml.safe_dump(contents), encoding="utf-8")
+                filenames.append(str(config_file))
+            config_form = input_kind.removeprefix("cli_multi_")
+            config_arguments = {
+                "contiguous": ["--config", *filenames],
+                "repeated": [argument for filename in filenames for argument in ("--config", filename)],
+                "comma": ["--config=" + ",".join(filenames)],
+                "mixed": ["--config", ",".join(filenames[:2]), "--config", filenames[2]],
+            }[config_form]
+            device_arguments = []
+        else:
+            config_file = tmp_path / "config.yaml"
+            config_file.write_text(yaml.safe_dump(config), encoding="utf-8")
+            config_arguments = ["--config", str(config_file)]
+            device_arguments = ["--device", "cpu"]
         result = main([
-            "--config", str(config_file), "calccorrs", "--device", "cpu",
+            *config_arguments, "calccorrs", *device_arguments,
             "--output-dir", str(tmp_path / "output"), "--num-batches-per-file", "2", "--file-index", "3",
             "--dataset-split", "validation",
         ])
         assert result == 0
         paths = [tmp_path / "output" / "corrs_validation_000003.h5"]
+        if input_kind.startswith("cli_multi_"):
+            assert calls["physics_config"]["analysis"] == {"n_side": 2, "n_side_down": 1}
+            assert calls["physics_config"]["survey"]["shared"] == {
+                "retained": "base", "overridden": "local", "survey_only": True,
+            }
+            assert calls["physics_kwargs"]["nested_options"] == {
+                "retained": "base", "overridden": "local", "survey_only": True,
+            }
+            assert calls["pipeline"]["batch_size"] == 2
+            assert calls["pipeline"]["num_workers"] == 0
+            assert calls["pipeline"]["webds_pattern"] == "unused-*.tar"
+            if input_kind == "cli_multi_mixed":
+                from euclid_multiprobe_deeplss_training import training
+
+                trained = {}
+
+                def fake_train(raw_config, *, device=None):
+                    trained.update(config=raw_config, device=device)
+                    return {"step": 0}
+
+                monkeypatch.setattr(training, "train", fake_train)
+                assert main([*config_arguments, "train", "--device", "cpu"]) == 0
+                # Train adds runtime defaults; compare the settings supplied
+                # by these files rather than requiring an exact training map.
+                assert trained["config"]["forward_model"] == calls["physics_config"]
+                assert trained["config"]["calccorrs"] == {"pairs_filename": str(pairs_filename), "device": "cpu"}
+                assert trained["config"]["training"]["batch_size"] == calls["pipeline"]["batch_size"]
+                assert trained["config"]["training"]["records_pattern"] == calls["pipeline"]["webds_pattern"]
+                assert trained["config"]["training"]["physics_model_args"]["nested_options"] == calls["physics_kwargs"]["nested_options"]
     else:
         paths = calccorrs_module.calccorrs(
             config, output_dir=tmp_path / "output", num_batches_per_file=2, file_index=3, dataset_split="validation", **overrides

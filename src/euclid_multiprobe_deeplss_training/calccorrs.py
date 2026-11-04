@@ -391,7 +391,7 @@ def calccorrs_from_config(
     dataset_split: str = "training",
     device: str | torch.device | None = None,
 ) -> list[Path]:
-    """Load a YAML configuration and calculate its training correlations."""
+    """Merge YAML configurations from left to right and calculate correlations."""
     paths = config_paths(config_path)
     raw_config = load_config(paths)
     return calccorrs(

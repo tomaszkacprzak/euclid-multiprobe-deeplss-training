@@ -992,8 +992,6 @@ def train_from_config(
     by pipeline command files (``--config=base.yaml,override.yaml``).  Configs
     are merged from left to right, so the last file has precedence.
     """
-    if isinstance(config_path, str):
-        config_path = [path.strip() for path in config_path.split(",") if path.strip()]
     paths = config_paths(config_path)
     raw_config = load_config(paths)
     overrides = {

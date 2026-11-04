@@ -114,6 +114,14 @@ uv run euclid-deeplss-training --config base.yaml --config experiment.yaml \
   --config local.yaml train
 ```
 
+The same forms apply to `calccorrs`. Comma-separated path groups also work,
+including when mixed with repeated `--config` options:
+
+```bash
+uv run euclid-deeplss-training --config survey.yaml experiment.yaml local.yaml calccorrs
+uv run euclid-deeplss-training --config=survey.yaml,experiment.yaml --config local.yaml calccorrs
+```
+
 Files merge from left to right. Nested mappings merge recursively; later scalar
 values, lists and nulls replace earlier values. Unrelated keys survive. A file
 can contain only the sections/options it contributes, so survey, experiment,

@@ -102,10 +102,15 @@ def _merge_mappings(base: dict[str, Any], override: Mapping[str, Any]) -> dict[s
 
 
 def config_paths(paths: ConfigPaths) -> list[Path]:
-    """Normalize one config path or a non-empty sequence of config paths."""
+    """Normalize config paths, expanding comma-separated string groups in order."""
     if isinstance(paths, str | Path):
-        return [Path(paths)]
-    normalized = [Path(path) for path in paths]
+        paths = [paths]
+    normalized = []
+    for path in paths:
+        if isinstance(path, Path):
+            normalized.append(path)
+        else:
+            normalized.extend(Path(part.strip()) for part in path.split(",") if part.strip())
     if not normalized:
         raise ValueError("At least one configuration file is required.")
     return normalized
