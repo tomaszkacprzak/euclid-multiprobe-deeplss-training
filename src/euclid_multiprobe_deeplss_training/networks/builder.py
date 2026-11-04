@@ -201,8 +201,8 @@ def build_encoder(encoder_name: str,
         }
         constructor_args.update(encoder_args or {})
 
-        # with prints_to_log("corrs_transformer"):
-        model = ShiftedWindowTransformerCorrNetwork(**constructor_args)
+        with prints_to_log("corrs_transformer"):
+            model = ShiftedWindowTransformerCorrNetwork(**constructor_args)
 
     elif encoder_name == "corrs_cnn":
 

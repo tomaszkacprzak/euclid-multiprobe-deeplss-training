@@ -61,7 +61,7 @@ def calccorrs(
     from nestcorr.pairs import resolve_pair_metadata
 
     config, raw_config = _coerce_config(config_or_path)
-    correlation_config = raw_config.get("calccorrs", config.training.get("calccorrs", {}))
+    correlation_config = config.training.get("encoder_args", {})
     analysis = config.forward_model["analysis"]
     nside = int(analysis["n_side"])
     nside_down = int(analysis["n_side_down"])
