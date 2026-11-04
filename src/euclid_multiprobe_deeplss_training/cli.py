@@ -263,6 +263,17 @@ def build_parser() -> argparse.ArgumentParser:
     calccorrs_parser = subparsers.add_parser(
         "calccorrs",
         help="Calculate scalar and shear two-point correlations for training data.",
+        description="Calculate correlations using a pre-generated Nestcorr pair cache and its saved output bins.",
+    )
+    calccorrs_parser.add_argument(
+        "--pairs",
+        default=None,
+        help="Nestcorr pair-cache HDF5 file (overrides calccorrs.pairs_filename in YAML; one must be supplied).",
+    )
+    calccorrs_parser.add_argument(
+        "--device",
+        default=None,
+        help="Torch device, such as 'cpu' or 'cuda' (overrides the config).",
     )
     calccorrs_parser.add_argument(
         "--output-dir",
@@ -274,13 +285,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--file-index",
         type=int,
         default=0,
-        help="Index of the WebDataset shard to calculate correlations for.",
+        help="Output-file index and random-seed selector; does not select an input shard.",
     )
     calccorrs_parser.add_argument(
         "--num-batches-per-file",
         type=int,
         default=100,
-        help="Number of input batches stored in each WebDataset tar shard.",
+        help="Maximum number of input batches written to the output HDF5 file.",
     )
     calccorrs_parser.add_argument(
         "--dataset-split",
@@ -411,7 +422,7 @@ def _run_calccls(args: argparse.Namespace) -> int:
 
 
 def _run_calccorrs(args: argparse.Namespace) -> int:
-    """Calculate training-set angular two-point correlations."""
+    """Calculate correlations in the output bins of a saved Nestcorr cache."""
     if args.config is None:
         raise ValueError("The calccorrs command requires --config.")
 
@@ -423,6 +434,10 @@ def _run_calccorrs(args: argparse.Namespace) -> int:
         "file_index": args.file_index,
         "dataset_split": args.dataset_split,
     }
+    if args.pairs is not None:
+        kwargs["pairs_filename"] = args.pairs
+    if args.device is not None:
+        kwargs["device"] = args.device
     calccorrs_from_config(_config_argument(args), **kwargs)
     return 0
 

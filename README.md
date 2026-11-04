@@ -43,9 +43,10 @@ Generate a reusable Nestcorr schema-9 cache before training a `corrs_cnn` or
 uv run nestcorr generate_pairs 9 --nd 1 -o pairs_L09_nd1.h5
 ```
 
-The default cache is `pairs_L{L:02d}_nd1.h5` in the working directory. Set
-`training.encoder_args.pairs_filename` for an encoder, or
-`calccorrs.pairs_filename` for the diagnostic, to use another path. Generate
+Encoders default to `pairs_L{L:02d}_nd1.h5` in the working directory; set
+`training.encoder_args.pairs_filename` to use another path. The `calccorrs`
+diagnostic requires an explicit cache through `--pairs PATH` or
+`calccorrs.pairs_filename` in YAML. Generate
 angular bins with `--binning angular`; both encoders read the bin count from
 the cache rather than assuming a fixed sequence length. Old Pyracorr caches
 must be regenerated; models never generate geometry during construction.
@@ -125,7 +126,7 @@ after merging. Some flags have explicit defaults that also override YAML values.
 | `training` | Records pattern, physics model, encoder, loss, optimization, batching, device, validation, checkpoints and W&B. Also supplies data/model settings for diagnostics and prediction. |
 | `likelihood` | Density-model type/arguments, fitting settings and optional MCMC settings for `likelihood`. |
 | `calccls` | Optional `lmax` override for the power-spectrum diagnostic. |
-| `calccorrs` | Optional `pairs_filename` geometry cache and `device` override for the correlation diagnostic. |
+| `calccorrs` | `pairs_filename` geometry cache (required unless `--pairs` is supplied) and optional `device` override. |
 
 The supplied files illustrate this organization:
 
@@ -231,9 +232,10 @@ HTML dashboards alongside both files.
 **Config:** `forward_model` and `training`: survey geometry,
 `analysis.n_side`/`n_side_down`, physics model, records, batch size and workers.
 Uses Nestcorr and a pre-generated geometry cache (see installation above).
-`calccorrs.device` overrides `training.device`; if neither is set, CUDA is
-selected when available and CPU otherwise. `calccorrs.pairs_filename` overrides
-the default `pairs_L{L:02d}_nd1.h5` path. For example:
+Select it with `--pairs PATH` or `calccorrs.pairs_filename`; the CLI value takes
+precedence. The file determines the neighbour distance, output binning, and bin
+count. Its resolution must match `analysis.n_side`. This command never creates
+pairs or changes the cache's bins. For example:
 
 ```yaml
 calccorrs:
@@ -241,17 +243,35 @@ calccorrs:
   device: cpu
 ```
 
+Or specify the cache and device directly:
+
+```bash
+uv run euclid-deeplss-training --config configs/example.yaml calccorrs \
+  --pairs /data/geometry/pairs_L09_nd2_angular_bpo4.h5 --device cpu
+```
+
+`--device` overrides `calccorrs.device`, which overrides `training.device`.
+If none is set, CUDA is selected when available and CPU otherwise.
+
 | Additional argument | Meaning / default |
 | --- | --- |
+| `--pairs PATH` | Existing Nestcorr pair cache; overrides `calccorrs.pairs_filename`. Required through either CLI or YAML. |
+| `--device DEVICE` | Override the diagnostic device, e.g. `cpu` or `cuda`. |
 | `--output-dir PATH` | Destination directory; default `corrs`. |
 | `--file-index N` | Output index and random-seed selector; default `0`. |
 | `--num-batches-per-file N` | Maximum input batches written per output file; default `100`. |
 | `--dataset-split {training,validation}` | Input split; default `training`. |
 
 **Output:** `corrs_<split>_<index:06d>.h5` with per-batch `separations`,
-`correlations`, `labels` and `inds` datasets, and an HTML dashboard. Despite the
-CLI help's tar-shard terminology, this command writes HDF5. `--file-index` does
-not select a single input tar shard.
+`correlations`, `labels` and `inds` datasets, and an HTML dashboard. File metadata
+records the source cache, resolution, neighbour distance, and binning scheme.
+Standard bins retain inherited output orders `L, L-1, ..., 0`, saved in
+`output_orders`; angular bins retain the saved increasing intervals in
+`angular_bin_edges` and their `bins_per_octave`. The final correlation axis and
+separations follow this stored order, including empty bins with NaN values.
+Separations are representative accepted-block centre medians in radians; angular
+edges are not exact bounds on all descendant-pixel separations. `--file-index`
+does not select a single input tar shard.
 
 ### 6. `modelprofile` — inspect model cost (optional)
 

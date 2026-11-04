@@ -63,19 +63,40 @@ def test_correlations_dashboard_requires_parameter_name_for_each_label(tmp_path)
         )
 
 
-@pytest.mark.parametrize("binning", ["standard", "angular"])
-@pytest.mark.parametrize("device_source", ["calccorrs", "training", "automatic"])
+@pytest.mark.parametrize("cache_case", ["standard", "angular", "selected"])
+@pytest.mark.parametrize("device_source", ["argument", "calccorrs", "training", "automatic"])
 @pytest.mark.parametrize("complex_input", [False, True])
 @pytest.mark.parametrize("input_kind", ["mapping", "config"])
 def test_calccorrs_uses_current_nestcorr_cache_and_cpu_device(
-    tmp_path, monkeypatch, binning, device_source, complex_input, input_kind
+    tmp_path, monkeypatch, cache_case, device_source, complex_input, input_kind
 ) -> None:
+    _check_calccorrs_with_cache(tmp_path, monkeypatch, cache_case, device_source, complex_input, input_kind)
+
+
+def test_calccorrs_cli_preserves_selected_angular_bins_and_overrides(tmp_path, monkeypatch) -> None:
+    _check_calccorrs_with_cache(tmp_path, monkeypatch, "selected", "argument", True, "cli")
+
+
+def test_calccorrs_accepts_default_standard_cache(tmp_path, monkeypatch) -> None:
+    _check_calccorrs_with_cache(tmp_path, monkeypatch, "standard_nd1", "automatic", False, "mapping")
+
+
+def _check_calccorrs_with_cache(tmp_path, monkeypatch, cache_case, device_source, complex_input, input_kind) -> None:
     from nestcorr.generate_pairs import generate_pairs
     from nestcorr.nestcorr import NestcorrFastFootprint
+    from nestcorr.select_pairs import select_pairs
 
     from euclid_multiprobe_deeplss_training import dataloaders
 
-    pairs_filename = generate_pairs(1, tmp_path / "pairs.h5", binning=binning)
+    binning = "standard" if cache_case.startswith("standard") else "angular"
+    neighbour_distance = 1 if cache_case == "standard_nd1" else 2
+    pairs_filename = generate_pairs(
+        1, tmp_path / "pairs.h5", nd=neighbour_distance, binning=binning, bins_per_octave=2 if binning == "standard" else 4
+    )
+    if cache_case == "selected":
+        with h5py.File(tmp_path / "pixels.h5", "w") as pixels:
+            pixels["data_vec"] = [0, 1]
+        pairs_filename = select_pairs(1, pairs_filename, tmp_path / "pixels.h5", tmp_path / "selected.h5")
     maps = torch.arange(2 * 48 * 2, dtype=torch.float32).reshape(2, 48, 2) / 100
     if complex_input:
         imaginary = maps.flip(1).clone()
@@ -123,7 +144,12 @@ def test_calccorrs_uses_current_nestcorr_cache_and_cpu_device(
         },
         "calccorrs": {"pairs_filename": str(pairs_filename)},
     }
-    if device_source == "calccorrs":
+    overrides = {}
+    if device_source == "argument":
+        overrides = {"pairs_filename": pairs_filename, "device": torch.device("cpu")}
+        config["calccorrs"]["pairs_filename"] = str(tmp_path / "ignored.h5")
+        config["calccorrs"]["device"] = "cuda"
+    elif device_source == "calccorrs":
         config["calccorrs"]["device"] = "cpu"
         config["training"]["device"] = "cuda"  # The diagnostic overrides training.
     elif device_source == "training":
@@ -131,9 +157,24 @@ def test_calccorrs_uses_current_nestcorr_cache_and_cpu_device(
     if input_kind == "config":
         config = calccorrs_module.Config.from_mapping(config)
 
-    paths = calccorrs_module.calccorrs(
-        config, output_dir=tmp_path / "output", num_batches_per_file=2, file_index=3, dataset_split="validation"
-    )
+    if input_kind == "cli":
+        import yaml
+
+        from euclid_multiprobe_deeplss_training.cli import main
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.safe_dump(config), encoding="utf-8")
+        result = main([
+            "--config", str(config_file), "calccorrs", "--pairs", str(pairs_filename), "--device", "cpu",
+            "--output-dir", str(tmp_path / "output"), "--num-batches-per-file", "2", "--file-index", "3",
+            "--dataset-split", "validation",
+        ])
+        assert result == 0
+        paths = [tmp_path / "output" / "corrs_validation_000003.h5"]
+    else:
+        paths = calccorrs_module.calccorrs(
+            config, output_dir=tmp_path / "output", num_batches_per_file=2, file_index=3, dataset_split="validation", **overrides
+        )
 
     reference = NestcorrFastFootprint(
         1, [0, 2], R_footprint=0, footprint_indices=np.arange(12),
@@ -149,7 +190,25 @@ def test_calccorrs_uses_current_nestcorr_cache_and_cpu_device(
     assert calls["pipeline"]["validation"] is True
     assert paths == [tmp_path / "output" / "corrs_validation_000003.h5"]
     with h5py.File(paths[0], "r") as output:
-        assert set(output) == {"batch0000", "batch0001"}
+        assert {name for name in output if name.startswith("batch")} == {"batch0000", "batch0001"}
+        assert output.attrs["pairs_filename"] == str(pairs_filename.resolve())
+        assert output.attrs["fine_order"] == 1
+        assert output.attrs["neighbour_distance"] == neighbour_distance
+        assert output.attrs["output_binning"] == binning
+        assert output.attrs["num_output_bins"] == reference.num_output_bins
+        assert output.attrs["separation_units"] == "radian"
+        np.testing.assert_allclose(output["separations"][:], reference.theta.numpy(), equal_nan=True)
+        np.testing.assert_allclose(output["theta_range"][:], reference.theta_range.numpy(), equal_nan=True)
+        if binning == "angular":
+            assert output.attrs["bin_order"] == "increasing angular interval"
+            assert output.attrs["bins_per_octave"] == 4
+            np.testing.assert_array_equal(output["angular_bin_edges"][:], reference.angular_bin_edges.numpy())
+        else:
+            assert output.attrs["bin_order"] == "descending inherited output order (L, L-1, ..., 0)"
+            np.testing.assert_array_equal(output["output_orders"][:], [1, 0])
+        if cache_case == "selected":
+            assert output.attrs["selected_pixel_count"] == 2
+            assert np.isnan(output["batch0000/correlations"][:]).any()
         for batch_name, count in (("batch0000", 2), ("batch0001", 1)):
             group = output[batch_name]
             assert group["correlations"].shape == (count, 2, 2, reference.num_output_bins)
@@ -158,3 +217,49 @@ def test_calccorrs_uses_current_nestcorr_cache_and_cpu_device(
             np.testing.assert_array_equal(group["labels"][:], labels[:count].numpy())
             np.testing.assert_array_equal(group["inds"][:], indices[:count].numpy())
     assert paths[0].with_suffix(".html").is_file()
+    document = paths[0].with_suffix(".html").read_text(encoding="utf-8")
+    assert "correlation_bins" in document
+    assert "neighbour_distance" in document
+    assert "Separation (radian)" in document
+
+
+@pytest.mark.parametrize("cache_case", ["unspecified", "missing", "wrong_order"])
+def test_calccorrs_rejects_pair_file_before_initializing_survey(tmp_path, monkeypatch, cache_case) -> None:
+    from nestcorr.generate_pairs import generate_pairs
+
+    def unexpected_survey_load(_config):
+        raise AssertionError("The survey must not load before the pair file is validated.")
+
+    monkeypatch.setattr(calccorrs_module, "load_pixel_file", unexpected_survey_load)
+    config = {"forward_model": {"analysis": {"n_side": 4, "n_side_down": 1}}}
+    overrides = {}
+    if cache_case == "unspecified":
+        error_type, message = ValueError, "use --pairs or set calccorrs.pairs_filename"
+    elif cache_case == "missing":
+        overrides["pairs_filename"] = tmp_path / "missing.h5"
+        error_type, message = FileNotFoundError, "nestcorr generate_pairs 2"
+    else:
+        overrides["pairs_filename"] = generate_pairs(1, tmp_path / "L01.h5")
+        error_type, message = RuntimeError, "built for L=1, not L=2"
+    with pytest.raises(error_type, match=message):
+        calccorrs_module.calccorrs(config, output_dir=tmp_path / "output", **overrides)
+    assert not (tmp_path / "output").exists()
+
+
+def test_calccorrs_from_config_forwards_pair_and_device_overrides(tmp_path, monkeypatch) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("calccorrs:\n  pairs_filename: configured.h5\n  device: cuda\n", encoding="utf-8")
+    pairs_filename = tmp_path / "override.h5"
+    received = {}
+
+    def fake_calccorrs(config, **kwargs):
+        received.update(config=config, **kwargs)
+        return [tmp_path / "result.h5"]
+
+    monkeypatch.setattr(calccorrs_module, "calccorrs", fake_calccorrs)
+    result = calccorrs_module.calccorrs_from_config(config_file, pairs_filename=pairs_filename, device="cpu")
+    assert result == [tmp_path / "result.h5"]
+    assert received["pairs_filename"] == pairs_filename
+    assert received["device"] == "cpu"
+    assert received["num_batches_per_file"] == 100
+    assert received["config"]["calccorrs"]["pairs_filename"] == "configured.h5"

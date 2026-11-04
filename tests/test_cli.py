@@ -356,7 +356,7 @@ def test_calccorrs_command_requires_config() -> None:
         main(["calccorrs"])
 
 
-def test_calccorrs_command_passes_sharding_options(monkeypatch) -> None:
+def test_calccorrs_command_passes_cache_and_output_options(monkeypatch) -> None:
     calls = []
     fake_calccorrs = types.ModuleType("euclid_multiprobe_deeplss_training.calccorrs")
 
@@ -371,12 +371,18 @@ def test_calccorrs_command_passes_sharding_options(monkeypatch) -> None:
             "--config",
             "configs/example.yaml",
             "calccorrs",
-            "--output-path",
-            "corrs-%03d.tar",
+            "--pairs",
+            "pairs_L09_nd2_angular_bpo4.h5",
+            "--device",
+            "cpu",
+            "--output-dir",
+            "correlations",
             "--num-batches-per-file",
             "4",
-            "--num-examples",
-            "25",
+            "--file-index",
+            "3",
+            "--dataset-split",
+            "validation",
         ]
     )
 
@@ -384,6 +390,40 @@ def test_calccorrs_command_passes_sharding_options(monkeypatch) -> None:
     assert calls == [
         (
             "configs/example.yaml",
-            {"output_path": "corrs-%03d.tar", "num_batches_per_file": 4, "num_examples": 25},
+            {
+                "output_dir": "correlations",
+                "num_batches_per_file": 4,
+                "file_index": 3,
+                "dataset_split": "validation",
+                "pairs_filename": "pairs_L09_nd2_angular_bpo4.h5",
+                "device": "cpu",
+            },
         )
     ]
+
+
+def test_calccorrs_command_preserves_configured_cache_and_device(monkeypatch) -> None:
+    calls = []
+    fake_calccorrs = types.ModuleType("euclid_multiprobe_deeplss_training.calccorrs")
+    fake_calccorrs.calccorrs_from_config = lambda config, **kwargs: calls.append((config, kwargs))
+    monkeypatch.setitem(sys.modules, "euclid_multiprobe_deeplss_training.calccorrs", fake_calccorrs)
+
+    assert main(["--config", "base.yaml", "local.yaml", "calccorrs"]) == 0
+
+    assert calls == [
+        (["base.yaml", "local.yaml"], {
+            "output_dir": "corrs", "num_batches_per_file": 100, "file_index": 0, "dataset_split": "training",
+        })
+    ]
+
+
+def test_calccorrs_help_describes_cached_bins_and_hdf5(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["calccorrs", "--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--pairs" in help_text
+    assert "saved output bins" in " ".join(help_text.split())
+    assert "HDF5" in help_text
+    assert "tar shard" not in help_text

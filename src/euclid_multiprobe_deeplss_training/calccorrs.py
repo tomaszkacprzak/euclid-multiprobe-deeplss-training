@@ -44,6 +44,8 @@ def calccorrs(
     num_batches_per_file: int = 100,
     file_index: int = 0,
     dataset_split: str = "training",
+    pairs_filename: str | Path | None = None,
+    device: str | torch.device | None = None,
 ) -> list[Path]:
     """Write real auto/cross correlations to HDF5, one group per input batch.
 
@@ -57,6 +59,28 @@ def calccorrs(
     if num_batches_per_file <= 0:
         raise ValueError("num_batches_per_file must be positive.")
 
+    from nestcorr.pairs import resolve_pair_metadata
+
+    config, raw_config = _coerce_config(config_or_path)
+    correlation_config = raw_config.get("calccorrs", config.training.get("calccorrs", {}))
+    analysis = config.forward_model["analysis"]
+    nside = int(analysis["n_side"])
+    nside_down = int(analysis["n_side_down"])
+    L = hp.nside2order(nside)
+    R = hp.nside2order(nside_down)
+    pairs_filename = pairs_filename if pairs_filename is not None else correlation_config.get("pairs_filename")
+    if not pairs_filename:
+        raise ValueError("calccorrs requires a pair cache: use --pairs or set calccorrs.pairs_filename.")
+    pairs_path = Path(pairs_filename).expanduser()
+    if not pairs_path.is_file():
+        raise FileNotFoundError(
+            f"Pair cache {pairs_path} does not exist. Create it with 'nestcorr generate_pairs {L}' "
+            "and pass its path using --pairs or calccorrs.pairs_filename."
+        )
+    # The file fixes the hierarchy, opening distance, and output bins. Validate
+    # it before expensive survey/physics/data initialization.
+    pair_metadata = resolve_pair_metadata(pairs_path, L=L)
+
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         LOGGER.info(f"Created output directory {output_dir}")
@@ -65,17 +89,10 @@ def calccorrs(
 
     from .dataloaders import OntheflyPipeline
 
-    config, raw_config = _coerce_config(config_or_path)
-    correlation_config = raw_config.get("calccorrs", config.training.get("calccorrs", {}))
-    requested_device = correlation_config.get("device", config.training.get("device"))
+    requested_device = device if device is not None else correlation_config.get("device", config.training.get("device"))
     run_device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
     LOGGER.info(f"Running on {run_device}")
     indices = np.asarray(load_pixel_file(config.forward_model)[0], dtype=np.int64)
-    analysis = config.forward_model["analysis"]
-    nside = int(analysis["n_side"])
-    nside_down = int(analysis["n_side_down"])
-    L = hp.nside2order(nside)
-    R = hp.nside2order(nside_down)
     footprint_indices = get_footprint_indices(indices, L, R)
     LOGGER.info(f"indices min={indices.min()}, max={indices.max()}")
     LOGGER.info(f"footprint_indices min={footprint_indices.min()}, max={footprint_indices.max()}")
@@ -106,11 +123,9 @@ def calccorrs(
     compression_args = {"compression": "lzf", "shuffle": True}
 
     from nestcorr.nestcorr import NestcorrFastFootprint
-    from nestcorr.pairs import get_pairs_filename
 
     LOGGER.info(f"Using NestcorrFastFootprint with L={L}")
     spins = torch.as_tensor(physics_model.channel_spins).detach().cpu().tolist()
-    pairs_filename = correlation_config.get("pairs_filename") or get_pairs_filename(L)
     correlator = NestcorrFastFootprint(
         L,
         spins,
@@ -118,7 +133,7 @@ def calccorrs(
         matmul_precision="high",
         footprint_indices=footprint_indices,
         symmetrize=True,
-        pairs_filename=pairs_filename,
+        pairs_filename=pairs_path,
     ).to(run_device)
 
     time_start = time.time()
@@ -126,6 +141,23 @@ def calccorrs(
     with torch.no_grad():
         shard_path = os.path.join(output_dir, f"corrs_{dataset_split}_{file_index:06d}.h5")
         with h5py.File(shard_path, "w") as f:
+            f.attrs["pairs_filename"] = str(pairs_path.resolve())
+            f.attrs["fine_order"] = L
+            f.attrs["neighbour_distance"] = pair_metadata["nd"]
+            f.attrs["output_binning"] = pair_metadata["binning"]
+            f.attrs["num_output_bins"] = correlator.num_output_bins
+            f.attrs["separation_units"] = "radian"
+            if pair_metadata["data_vec_pix"] is not None:
+                f.attrs["selected_pixel_count"] = len(pair_metadata["data_vec_pix"])
+            if pair_metadata["binning"] == "angular":
+                f.attrs["bin_order"] = "increasing angular interval"
+                f.attrs["bins_per_octave"] = pair_metadata["bins_per_octave"]
+                f.create_dataset("angular_bin_edges", data=pair_metadata["angular_bin_edges"])
+            else:
+                f.attrs["bin_order"] = "descending inherited output order (L, L-1, ..., 0)"
+                f.create_dataset("output_orders", data=np.arange(L, -1, -1))
+            f.create_dataset("separations", data=correlator.theta.cpu().numpy())
+            f.create_dataset("theta_range", data=correlator.theta_range.cpu().numpy())
             LOGGER.info(
                 f"Writing correlations to {shard_path}, starting {num_batches_per_file} batches per file "
                 f"with {config.training['batch_size']} examples per batch"
@@ -207,6 +239,13 @@ def create_correlations_dashboard(
     labels_by_batch = []
     separations: np.ndarray | None = None
     with h5py.File(correlations_path, "r") as source:
+        bin_information = {
+            name: value.item() if isinstance(value, np.generic) else value
+            for name, value in source.attrs.items()
+        }
+        for name in ("angular_bin_edges", "output_orders"):
+            if name in source:
+                bin_information[name] = source[name][:].tolist()
         batch_names = sorted(name for name in source if name.startswith("batch"))
         if not batch_names:
             raise ValueError("No batch groups were found in the correlations file.")
@@ -271,7 +310,9 @@ def create_correlations_dashboard(
                 col=column + 1,
             )
             trace_examples.append(example_index)
-        figure.update_xaxes(title_text="Separation" if row == rows - 1 else None, row=row + 1, col=column + 1)
+        units = bin_information.get("separation_units")
+        separation_title = f"Separation ({units})" if units else "Separation"
+        figure.update_xaxes(title_text=separation_title if row == rows - 1 else None, row=row + 1, col=column + 1)
         figure.update_yaxes(title_text="Correlation" if column == 0 else None, row=row + 1, col=column + 1)
 
     figure.add_trace(
@@ -321,7 +362,9 @@ def create_correlations_dashboard(
     )
 
     plot_html = pio.to_html(figure, full_html=False, include_plotlyjs=True, config={"responsive": True})
-    information = html.escape(json.dumps(dict(model_information or {}), indent=2, default=str))
+    information = dict(model_information or {})
+    information["correlation_bins"] = bin_information
+    information = html.escape(json.dumps(information, indent=2, default=str))
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Correlations Dashboard</title></head><body>
@@ -345,14 +388,17 @@ def calccorrs_from_config(
     *,
     output_dir: str | Path = "corrs",
     file_index: int = 0,
-    num_batches_per_file: int = 10,
+    num_batches_per_file: int = 100,
     dataset_split: str = "training",
+    pairs_filename: str | Path | None = None,
+    device: str | torch.device | None = None,
 ) -> list[Path]:
     """Load a YAML configuration and calculate its training correlations."""
     paths = config_paths(config_path)
     raw_config = load_config(paths)
     return calccorrs(
-        raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file, dataset_split=dataset_split
+        raw_config, output_dir=output_dir, file_index=file_index, num_batches_per_file=num_batches_per_file,
+        dataset_split=dataset_split, pairs_filename=pairs_filename, device=device,
     )
 
 
