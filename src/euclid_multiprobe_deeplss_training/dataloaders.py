@@ -5,12 +5,13 @@ Created February 2026
 Author: Tomasz Kacprzak
 """
 
-import warnings
-import webdataset
-import torch
-from euclid_multiprobe_deeplss_training.utils import logger
 import glob
+import warnings
 
+import torch
+import webdataset
+
+from euclid_multiprobe_deeplss_training.utils import logger
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -18,11 +19,17 @@ warnings.filterwarnings("once", category=UserWarning)
 LOGGER = logger.get_logger(__file__)
 
 
-class OntheflyPipeline():
+class OntheflyPipeline:
     """
     Sets up a dataset for the onthefly cosmologies.
+
+    A smoother must accept ``(inputs, weights)``. Its statistical weights are
+    obtained from ``physics_model.get_weight_maps(inputs)`` after physics.
     """
-    def __init__(self, webds_pattern, batch_size, physics_model, smoother=None, downsampler=None, device="cuda", validation=False, num_workers=1, seed=None):
+    def __init__(
+        self, webds_pattern, batch_size, physics_model, smoother=None, downsampler=None,
+        device="cuda", validation=False, num_workers=1, seed=None,
+    ):
 
         self.physics_model = physics_model
         self.smoother = smoother
@@ -76,7 +83,7 @@ class OntheflyPipeline():
 
 
         # test and get the number of pixels
-        for inputs, indices, targets in self.__iter__():
+        for inputs, _indices, targets in self.__iter__():
             
             self.num_pixels = inputs.shape[1]
             self.num_channels = inputs.shape[2]
@@ -109,9 +116,10 @@ class OntheflyPipeline():
                 # add physics augmentations
                 inputs, targets = self.physics_model(batch)
                 
-                # final smoothing
+                # Use the statistical weights of the physics channels before smoothing.
                 if self.smoother is not None:
-                    inputs = self.smoother(inputs)
+                    weights = self.physics_model.get_weight_maps(inputs)
+                    inputs = self.smoother(inputs, weights)
 
             LOGGER.debug(f"Batch {batch_count:>6d} physics shape = {inputs.shape}")
 

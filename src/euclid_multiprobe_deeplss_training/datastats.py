@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
-from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
+from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelScalecut
 from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
 
 from .utils.config import Config, ConfigPaths, config_paths, load_config
@@ -41,7 +41,7 @@ def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[
                         scalers=True,
                         device=device).to(device)
 
-    smoothing_model = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"],
+    smoothing_model = NestChannelScalecut(nside=config.forward_model["analysis"]["n_side"],
                         nside_base=config.forward_model["analysis"]["n_side_down"],
                         nside_lower=[512]*24,
                         operator="mean").to(device)
@@ -50,7 +50,7 @@ def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[
         webds_pattern=config.training['records_pattern'],
         batch_size=config.training['batch_size'],
         physics_model=physics_model,
-        downsampler=smoothing_model,
+        smoother=smoothing_model,
         num_workers=config.training['num_workers'],
         device=device,
     )

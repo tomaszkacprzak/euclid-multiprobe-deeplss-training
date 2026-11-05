@@ -596,7 +596,7 @@ def train(
     # downsampler = torch.compile(downsampler, dynamic=True)
 
     # Downsample each channel to a different nside
-    # smoother = NestChannelDownsampler(nside=config.forward_model["analysis"]["n_side"],
+    # smoother = NestChannelScalecut(nside=config.forward_model["analysis"]["n_side"],
     #                     nside_base=config.forward_model["analysis"]["n_side_down"],
     #                     nside_lower=[nside_training]*24,
     #                     operator="mean").to(device)

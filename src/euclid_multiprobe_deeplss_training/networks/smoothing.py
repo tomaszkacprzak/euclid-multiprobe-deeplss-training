@@ -43,9 +43,12 @@ class NestDownsampler(nn.Module):
         return x_lower.reshape(batch_size, -1, num_bins, num_fields)
         
 
-class NestChannelDownsampler(nn.Module):
-    """
-    A layer that downsamples a Healpix map to a lower resolution.
+class NestChannelScalecut(nn.Module):
+    """Aggregate NESTED pixels with statistical weights and repeat to input resolution.
+
+    Each channel has its own target resolution. A target pixel contains a
+    contiguous group of input pixels; its weighted sum or weighted mean is
+    repeated over that group. Groups with zero total weight return zero.
     """
 
     def __init__(self, nside, nside_base, nside_lower, operator="sum"):
@@ -53,45 +56,74 @@ class NestChannelDownsampler(nn.Module):
         Args:
             nside: The healpy nside of the input.
             nside_base: The healpy nside of the base resolution.
-            nside_lower: The healpy nside of the lower resolution.
-            operator: The operator to use for the downsampling (sum or mean).
+            nside_lower: One target nside per channel, between nside_base and nside.
+            operator: Weighted sum (default) or weighted mean.
         """
 
         super().__init__()
-        self.nside = nside
-        self.nside_base = nside_base
-        self.nside_lower = nside_lower
-        operators = {"sum": torch.sum, "mean": torch.mean}
-        try:
-            self.operator = operators[operator]
-        except KeyError as exc:
-            raise ValueError(f"Invalid operator: {operator}") from exc
+        if operator not in ("sum", "mean"):
+            raise ValueError(f"Invalid operator: {operator}")
+        self.operator = operator
 
-    def forward(self, x):
+        def validate_nside(value, name):
+            try:
+                integer = int(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{name} must be a valid NESTED nside") from exc
+            if integer != value or not hp.isnsideok(integer, nest=True):
+                raise ValueError(f"{name} must be a valid NESTED nside")
+            return integer
 
+        self.nside = validate_nside(nside, "nside")
+        self.nside_base = validate_nside(nside_base, "nside_base")
+        self.nside_lower = [validate_nside(value, "nside_lower") for value in nside_lower]
+        if self.nside_base > self.nside:
+            raise ValueError("nside_base must not exceed nside")
+        if not self.nside_lower or any(not self.nside_base <= value <= self.nside for value in self.nside_lower):
+            raise ValueError("nside_lower must contain target nsides between nside_base and nside")
+        self._base_group_size = (self.nside // self.nside_base) ** 2
+        self._group_sizes = tuple((self.nside // value) ** 2 for value in self.nside_lower)
+
+    def forward(self, x, w):
+        """Apply the scale cut to ``x`` with real nonnegative statistical weights ``w``.
+
+        ``x`` has shape ``(batch, pixels, channels)`` and ``w`` must broadcast to
+        that shape on the same device. Pixels must comprise complete NESTED
+        base-resolution patches. Zero-weight pixels are ignored, even when
+        their map values are NaN or infinite. PyTorch dtype promotion applies.
+        """
+        if not isinstance(x, torch.Tensor) or x.ndim != 3:
+            raise ValueError("x must be a tensor with shape (batch, pixels, channels)")
         batch_size, npix, num_channels = x.shape
-        nord = hp.nside2order(self.nside)
-        nord_base = hp.nside2order(self.nside_base)
-        npix_base = npix // ( hp.nside2npix(self.nside) // hp.nside2npix(self.nside_base)) 
-        nord_lower = torch.tensor([hp.nside2order(nside) for nside in self.nside_lower])
+        if num_channels != len(self.nside_lower):
+            raise ValueError("x must have one channel per nside_lower entry")
+        if npix == 0 or npix % self._base_group_size:
+            raise ValueError("x pixels must contain complete NESTED base-resolution patches")
+        if not isinstance(w, torch.Tensor):
+            raise TypeError("w must be a tensor of statistical weights")
+        if w.device != x.device:
+            raise ValueError("w must be on the same device as x")
+        if w.is_complex():
+            raise ValueError("w must contain real statistical weights")
+        try:
+            weights = torch.broadcast_to(w, x.shape)
+        except RuntimeError as exc:
+            raise ValueError("w must broadcast to the shape of x") from exc
+        if torch.any(~torch.isfinite(w) | (w < 0)):
+            raise ValueError("w must contain finite nonnegative statistical weights")
 
-        # each channel is lowered to a different nside
-        assert x.shape[-1] == len(self.nside_lower)
-
-        shape = [batch_size, npix_base] + [4] * (nord - nord_base)
-
-        # loop over channels
-        list_channels_lower = []
-        for i in range(num_channels):
-            nord_lower_ = int(nord_lower[i].item())
-            dims_sum = tuple(range(1 + nord_lower_ - nord_base + 1, 1 + nord - nord_base + 1))  # 1+ because of the batch dimension
-
-            x_channel = x[..., i].reshape(shape)
-            if dims_sum:
-                x_channel_lower = self.operator(x_channel, dim=dims_sum, keepdim=True).expand_as(x_channel)
-            else:
-                x_channel_lower = x_channel
-
-            list_channels_lower.append(x_channel_lower.reshape(batch_size, -1))
-
-        return torch.stack(list_channels_lower, dim=-1)
+        channels = []
+        for channel, group_size in enumerate(self._group_sizes):
+            shape = (batch_size, npix // group_size, group_size)
+            values = x[..., channel].reshape(shape)
+            channel_weights = weights[..., channel].reshape(shape)
+            # Mask before multiplying: 0 * NaN would otherwise contaminate the
+            # reduction and the derivative with respect to the weights.
+            values = torch.where(channel_weights > 0, values, torch.zeros_like(values))
+            reduced = (values * channel_weights).sum(dim=-1, keepdim=True)
+            if self.operator == "mean":
+                total_weight = channel_weights.sum(dim=-1, keepdim=True)
+                denominator = torch.where(total_weight > 0, total_weight, torch.ones_like(total_weight))
+                reduced = reduced / denominator
+            channels.append(reduced.expand(shape).reshape(batch_size, npix))
+        return torch.stack(channels, dim=-1)

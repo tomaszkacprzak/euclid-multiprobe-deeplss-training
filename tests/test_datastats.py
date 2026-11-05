@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 
 
-def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
+def test_datastats_prints_channel_statistics(monkeypatch, capsys, tmp_path) -> None:
     torch = pytest.importorskip("torch")
+    monkeypatch.chdir(tmp_path)
 
     from euclid_multiprobe_deeplss_training import datastats
 
@@ -30,10 +31,10 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
             return self
 
     class FakePipeline:
-        def __init__(self, *, webds_pattern, physics_model, downsampler, batch_size, num_workers, device):
+        def __init__(self, *, webds_pattern, physics_model, smoother, batch_size, num_workers, device):
             assert webds_pattern == "records/*.tar"
             assert physics_model.forward_model == {"survey": "euclid", "analysis": {"n_side": 1024, "n_side_down": 128}}
-            assert isinstance(downsampler, FakeSmoothingModel)
+            assert isinstance(smoother, FakeSmoothingModel)
             assert batch_size == 1
             assert num_workers == 0
             assert device == "cpu"
@@ -49,7 +50,7 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(datastats.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(datastats, "OntheflyPhysicsModelLinear", FakePhysicsModel)
-    monkeypatch.setattr(datastats, "NestChannelDownsampler", FakeSmoothingModel)
+    monkeypatch.setattr(datastats, "NestChannelScalecut", FakeSmoothingModel)
     monkeypatch.setattr(datastats, "OntheflyPipeline", FakePipeline)
     monkeypatch.setattr(datastats, "print_profiler_stats", lambda prof: None)
 
@@ -58,6 +59,7 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
             "records_pattern": "records/*.tar",
             "forward_model": {"survey": "euclid", "analysis": {"n_side": 1024, "n_side_down": 128}},
             "batch_size": 1,
+            "num_workers": 0,
             "validation_fraction": 0.0,
             "use_wandb": False,
         }
@@ -67,16 +69,16 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys) -> None:
 
     assert len(batch_stats) == 1
     assert "channel=  0" in captured.out
-    assert "min =1.0000000000e+00" in captured.out
-    assert "max =4.0000000000e+00" in captured.out
-    assert "mean=2.5000000000e+00" in captured.out
+    assert "min = 1.0000000000e+00" in captured.out
+    assert "max = 4.0000000000e+00" in captured.out
+    assert "mean= 2.5000000000e+00" in captured.out
     assert "channel=  1" in captured.out
-    assert "min =1.0000000000e+01" in captured.out
-    assert "max =4.0000000000e+01" in captured.out
-    assert "mean=2.5000000000e+01" in captured.out
+    assert "min = 1.0000000000e+01" in captured.out
+    assert "max = 4.0000000000e+01" in captured.out
+    assert "mean= 2.5000000000e+01" in captured.out
     assert "Label statistics:" in captured.out
     assert "label=  0" in captured.out
-    assert "mean=1.0000000000e+00" in captured.out
+    assert "mean= 1.0000000000e+00" in captured.out
     assert "label=  1" in captured.out
-    assert "max =5.0000000000e+00" in captured.out
-    assert "mean=3.0000000000e+00" in captured.out
+    assert "max = 5.0000000000e+00" in captured.out
+    assert "mean= 3.0000000000e+00" in captured.out

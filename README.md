@@ -354,6 +354,29 @@ Input pairs are split into disjoint training/validation sets using
 
 ## Development
 
+`NestChannelScalecut` applies a channel-specific HEALPix scale cut by reducing
+each NESTED descendant block and copying its value back to the original pixels.
+It requires both the map tensor `x` (batch, pixels, channels) and real,
+nonnegative statistical weights `w` broadcastable to that shape:
+
+```python
+from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelScalecut
+
+scalecut = NestChannelScalecut(
+    nside=512, nside_base=16, nside_lower=[128, 256], operator="mean",
+)
+smoothed_maps = scalecut(x, w)
+```
+
+For each channel and target pixel, `mean` computes `sum(w*x) / sum(w)`;
+`sum` (the default) computes `sum(w*x)`. Zero-weight inputs are ignored,
+including masked NaN values, and blocks with zero total weight return zero.
+Both modes return maps at the original pixel count. Unit weights reproduce
+the unweighted reduction. The data pipeline obtains statistical weights from
+`physics_model.get_weight_maps(inputs)` and applies this operation after physics
+augmentation through its `smoother` argument. `NestDownsampler` remains the
+separate one-input operation for reducing the raw map resolution before physics.
+
 ```bash
 uv run pytest
 uv run ruff check .

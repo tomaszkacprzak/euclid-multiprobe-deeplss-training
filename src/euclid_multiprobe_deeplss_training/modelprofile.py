@@ -9,7 +9,7 @@ import torch
 
 from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 from euclid_multiprobe_deeplss_training.networks.builder import build_model
-from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelDownsampler
+from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelScalecut
 from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
 
 from .datastats import print_profiler_stats
@@ -29,7 +29,7 @@ def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> li
                         scalers=True,
                         device=device).to(device)
 
-    smoothing_model = NestChannelDownsampler(
+    smoothing_model = NestChannelScalecut(
         nside=config.forward_model["analysis"]["n_side"],
         nside_base=config.forward_model["analysis"]["n_side_down"],
         nside_lower=[1024] * 24,
@@ -40,7 +40,7 @@ def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> li
         webds_pattern=config.training['records_pattern'],
         batch_size=config.training['batch_size'],
         physics_model=physics_model,
-        downsampler=smoothing_model,
+        smoother=smoothing_model,
         num_workers=config.training['num_workers'],
         device=device,
     )
