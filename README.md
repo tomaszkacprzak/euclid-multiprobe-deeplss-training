@@ -370,9 +370,37 @@ smoothed_maps = scalecut(x, w)
 
 For each channel and target pixel, `mean` computes `sum(w*x) / sum(w)`;
 `sum` (the default) computes `sum(w*x)`. Zero-weight inputs are ignored,
-including masked NaN values, and blocks with zero total weight return zero.
+including masked NaN values, and blocks with zero total weight reduce to zero
+before any optional coarse-background subtraction.
 Both modes return maps at the original pixel count. Unit weights reproduce
-the unweighted reduction. The data pipeline obtains statistical weights from
+the unweighted reduction.
+
+To subtract a coarse background as well, supply optional per-channel
+`nside_upper` values:
+
+```python
+scalecut = NestChannelScalecut(
+    nside=512, nside_base=16, nside_lower=[128, 256],
+    nside_upper=[32, 64], operator="mean",
+)
+filtered_maps = scalecut(x, w)
+```
+
+Each channel must satisfy `nside_base <= nside_upper <= nside_lower <= nside`.
+The background is reduced directly from the original maps with the original
+statistical weights. For `mean`, its value is copied into every target pixel
+at `nside_lower`; for `sum`, its total is divided by
+`(nside_lower / nside_upper)**2` before copying, distributing it equally among
+those target pixels. This background is subtracted from the existing
+`nside_lower` result, then the residual is repeated to the original input pixel
+count. Equal upper/lower resolutions give zero for finite inputs. Omitting
+`nside_upper` preserves the original one-sided scale cut.
+
+The subtraction is applied to every target pixel, including zero-weight target
+pixels inside a populated background pixel; these receive the negative
+background value. An entirely zero-weight background pixel remains zero.
+
+The data pipeline obtains statistical weights from
 `physics_model.get_weight_maps(inputs)` and applies this operation after physics
 augmentation through its `smoother` argument. `NestDownsampler` remains the
 separate one-input operation for reducing the raw map resolution before physics.

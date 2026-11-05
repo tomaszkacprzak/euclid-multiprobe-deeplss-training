@@ -44,20 +44,25 @@ class NestDownsampler(nn.Module):
         
 
 class NestChannelScalecut(nn.Module):
-    """Aggregate NESTED pixels with statistical weights and repeat to input resolution.
+    """Apply weighted NESTED scale cuts and repeat to input resolution.
 
     Each channel has its own target resolution. A target pixel contains a
     contiguous group of input pixels; its weighted sum or weighted mean is
-    repeated over that group. Groups with zero total weight return zero.
+    repeated over that group. Optionally subtract a coarser map to remove
+    large-scale structure. Groups with zero total weight reduce to zero.
     """
 
-    def __init__(self, nside, nside_base, nside_lower, operator="sum"):
+    def __init__(self, nside, nside_base, nside_lower, operator="sum", *, nside_upper=None):
         """
         Args:
             nside: The healpy nside of the input.
             nside_base: The healpy nside of the base resolution.
             nside_lower: One target nside per channel, between nside_base and nside.
             operator: Weighted sum (default) or weighted mean.
+            nside_upper: Optional coarse nside per channel, between nside_base
+                and that channel's nside_lower. Its weighted map is subtracted
+                at nside_lower; sums are shared equally among target children,
+                while means are copied. None disables this subtraction.
         """
 
         super().__init__()
@@ -81,6 +86,18 @@ class NestChannelScalecut(nn.Module):
             raise ValueError("nside_base must not exceed nside")
         if not self.nside_lower or any(not self.nside_base <= value <= self.nside for value in self.nside_lower):
             raise ValueError("nside_lower must contain target nsides between nside_base and nside")
+        self.nside_upper = None
+        self._upper_group_sizes = None
+        if nside_upper is not None:
+            self.nside_upper = [validate_nside(value, "nside_upper") for value in nside_upper]
+            if len(self.nside_upper) != len(self.nside_lower):
+                raise ValueError("nside_upper must have one entry per nside_lower entry")
+            if any(
+                not self.nside_base <= upper <= lower
+                for upper, lower in zip(self.nside_upper, self.nside_lower, strict=True)
+            ):
+                raise ValueError("nside_upper entries must be between nside_base and their nside_lower")
+            self._upper_group_sizes = tuple((self.nside // value) ** 2 for value in self.nside_upper)
         self._base_group_size = (self.nside // self.nside_base) ** 2
         self._group_sizes = tuple((self.nside // value) ** 2 for value in self.nside_lower)
 
@@ -91,6 +108,11 @@ class NestChannelScalecut(nn.Module):
         that shape on the same device. Pixels must comprise complete NESTED
         base-resolution patches. Zero-weight pixels are ignored, even when
         their map values are NaN or infinite. PyTorch dtype promotion applies.
+
+        With ``nside_upper``, both reductions use the original input weights.
+        Subtraction also applies to empty target pixels within populated coarse
+        pixels, so their output can be negative. Entirely empty coarse pixels
+        remain zero.
         """
         if not isinstance(x, torch.Tensor) or x.ndim != 3:
             raise ValueError("x must be a tensor with shape (batch, pixels, channels)")
@@ -120,10 +142,27 @@ class NestChannelScalecut(nn.Module):
             # Mask before multiplying: 0 * NaN would otherwise contaminate the
             # reduction and the derivative with respect to the weights.
             values = torch.where(channel_weights > 0, values, torch.zeros_like(values))
-            reduced = (values * channel_weights).sum(dim=-1, keepdim=True)
+            weighted_values = values * channel_weights
+            reduced = weighted_values.sum(dim=-1, keepdim=True)
             if self.operator == "mean":
                 total_weight = channel_weights.sum(dim=-1, keepdim=True)
                 denominator = torch.where(total_weight > 0, total_weight, torch.ones_like(total_weight))
                 reduced = reduced / denominator
+            if self._upper_group_sizes is not None:
+                upper_group_size = self._upper_group_sizes[channel]
+                upper_shape = (batch_size, npix // upper_group_size, upper_group_size)
+                upper_reduced = weighted_values.reshape(upper_shape).sum(dim=-1, keepdim=True)
+                num_children = upper_group_size // group_size
+                if self.operator == "mean":
+                    upper_weight = channel_weights.reshape(upper_shape).sum(dim=-1, keepdim=True)
+                    upper_denominator = torch.where(upper_weight > 0, upper_weight, torch.ones_like(upper_weight))
+                    upper_reduced = upper_reduced / upper_denominator
+                else:
+                    upper_reduced = upper_reduced / num_children
+                # Broadcast the coarse value over target children, then repeat
+                # each residual over its original input descendants below.
+                reduced = (
+                    reduced.reshape(batch_size, npix // upper_group_size, num_children) - upper_reduced
+                ).reshape(batch_size, npix // group_size, 1)
             channels.append(reduced.expand(shape).reshape(batch_size, npix))
         return torch.stack(channels, dim=-1)
