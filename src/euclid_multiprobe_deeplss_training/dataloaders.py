@@ -84,9 +84,9 @@ class OntheflyPipeline:
 
         # test and get the number of pixels
         for inputs, _indices, targets in self.__iter__():
-            
-            self.num_pixels = inputs.shape[1]
-            self.num_channels = inputs.shape[2]
+
+            self.num_channels = len(inputs)
+            self.num_pixels = inputs[0].shape[1]
             self.num_targets = targets.shape[1]
             break
 
@@ -115,13 +115,16 @@ class OntheflyPipeline:
 
                 # add physics augmentations
                 inputs, targets = self.physics_model(batch)
+
+                for i, inp in enumerate(inputs):
+                    LOGGER.debug(f"OntheflyPipeline: Batch {batch_count:>6d} inputs[{i}].shape={inp.shape} dtype={inp.dtype}")
                 
                 # Use the statistical weights of the physics channels before smoothing.
                 if self.smoother is not None:
                     weights = self.physics_model.get_weight_maps(inputs)
                     inputs = self.smoother(inputs, weights)
 
-            LOGGER.debug(f"Batch {batch_count:>6d} physics shape = {inputs.shape}")
+            LOGGER.debug(f"Batch {batch_count:>6d} physics len {len(inputs)}")
 
             batch_count += 1
 

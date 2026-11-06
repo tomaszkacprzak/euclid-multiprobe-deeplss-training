@@ -34,11 +34,13 @@ def build_encoder(encoder_name: str,
 
         constructor_args.update(encoder_args or {})
         model = TransformerClass(
+            batch_size=batch_size,
             nside=nside,
             nside_down=nside_down,
             num_pixels=num_pixels,
             in_channels=num_channels,
             embed_dim=embed_dim,
+            spins=physics_model.channel_spins,
             **constructor_args,
         )
 
@@ -116,79 +118,13 @@ def build_encoder(encoder_name: str,
         LOGGER.info(f"  n_side: {nside}, n_side_down: {nside_down}, num_pixels: {num_pixels}")
         LOGGER.info(f"  encoder_args: {constructor_args}")
 
-    elif encoder_name == "cls_linear":
 
-        assert indices is not None, "indices are required for cls_linear"
-
-        from .linear_cls import LinearClsNetwork
-
-        constructor_args = {
-            "indices": indices,
-            "nside": nside,
-            "num_channels": num_channels,
-            "embed_dim": embed_dim,
-            "unstack_function": physics_model.unstack_batch_channels,
-            "device": device,
-        }
-        constructor_args.update(encoder_args or {})
-        model = LinearClsNetwork(**constructor_args)
-
-        LOGGER.info(f"Built {LinearClsNetwork.__name__} {encoder_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
-        LOGGER.info(f"  encoder_args: {constructor_args}")
-
-    elif encoder_name == "cls_transformer":
-
-        assert indices is not None, "indices are required for cls_transformer"
-
-        from .transformer_cls import ShiftedWindowTransformerClsNetwork
-        constructor_args = {
-            "indices": indices,
-            "nside": nside,
-            "num_channels": num_channels,
-            "embed_dim": embed_dim,
-            "unstack_function": physics_model.unstack_batch_channels,
-            "device": device,
-            "inner_embed_dim": 32,
-            "depth": 6,
-            "num_heads": 8,
-            "window_size": 64,
-        }
-        constructor_args.update(encoder_args or {})
-        model = ShiftedWindowTransformerClsNetwork(**constructor_args)
-
-        LOGGER.info(f"Built {ShiftedWindowTransformerClsNetwork.__name__} {encoder_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
-        LOGGER.info(f"  encoder_args: {constructor_args}")
-
-    elif encoder_name == "cls_cnn":
-
-        assert indices is not None, "indices are required for cls_cnn"
-
-        from .cnn_cls import ConvolutionalResidualClsNetwork
-        constructor_args = {
-            "indices": indices,
-            "nside": nside,
-            "num_channels": num_channels,
-            "embed_dim": embed_dim,
-            "unstack_function": physics_model.unstack_batch_channels,
-            "device": device,
-            "inner_channels": 32,
-            "downsampling_layers": 3,
-            "residual_layers": 3,
-            "kernel_size": 3,
-        }
-        constructor_args.update(encoder_args or {})
-        model = ConvolutionalResidualClsNetwork(**constructor_args)
-
-        LOGGER.info(f"Built {ConvolutionalResidualClsNetwork.__name__} {encoder_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
-        LOGGER.info(f"  encoder_args: {constructor_args}")
 
     elif encoder_name == "corrs_transformer":
 
         from .transformer_corrs import ShiftedWindowTransformerCorrNetwork
         constructor_args = {
+            "batch_size": batch_size,
             "indices": indices,
             "nside": nside,
             "nside_down": nside_down,
@@ -204,37 +140,10 @@ def build_encoder(encoder_name: str,
         with prints_to_log("corrs_transformer"):
             model = ShiftedWindowTransformerCorrNetwork(**constructor_args)
 
-    elif encoder_name == "corrs_cnn":
-
-        assert indices is not None, "indices are required for corrs_cnn"
-
-        from .cnn_corrs import ConvolutionalResidualCorrNetwork
-        constructor_args = {
-            "indices": indices,
-            "nside": nside,
-            "nside_down": nside_down,
-            "num_channels": num_channels,
-            "spins": physics_model.channel_spins,
-            "embed_dim": embed_dim,
-            "weight_function": physics_model.get_weight_maps,
-            "preprocess_function": physics_model.preprocess_for_correlations,
-            "device": device,
-            "inner_channels": 32,
-            "downsampling_layers": 3,
-            "residual_layers": 3,
-            "kernel_size": 3,
-        }
-        constructor_args.update(encoder_args or {})
-        model = ConvolutionalResidualCorrNetwork(**constructor_args)
-
-        LOGGER.info(f"Built {ConvolutionalResidualCorrNetwork.__name__} {encoder_name}")
-        LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
-        LOGGER.info(f"  encoder_args: {constructor_args}")
 
     else:
 
         raise ValueError(f"Encoder {encoder_name} not supported")
-
 
     return model
 
@@ -250,18 +159,18 @@ def build_loss(loss_name: str,
     if loss_name == "mse":
 
         from .mse_loss import MSEModel
-        model = MSEModel(encoder, num_targets)
+        model = MSEModel(encoder, embed_dim, num_targets)
         
 
     elif loss_name == "vimm_gmm":
 
         from .vimm_loss import VIMMGMMModel
-        model = VIMMGMMModel(encoder, num_targets, loss_args)
+        model = VIMMGMMModel(encoder, embed_dim, num_targets, loss_args)
 
     elif loss_name == "flowmatching":
 
         from .flowmatching_loss import CNFFMModel
-        model = CNFFMModel(encoder, y_dim=num_targets, vectorfield_kwargs=loss_args)
+        model = CNFFMModel(encoder, embed_dim, y_dim=num_targets, vectorfield_kwargs=loss_args)
 
     else:
 
@@ -271,3 +180,103 @@ def build_loss(loss_name: str,
 
 
     return model
+
+
+# Code graveyard
+
+    # elif encoder_name == "corrs_cnn":
+
+    #     assert indices is not None, "indices are required for corrs_cnn"
+
+    #     from .cnn_corrs import ConvolutionalResidualCorrNetwork
+    #     constructor_args = {
+    #         "indices": indices,
+    #         "nside": nside,
+    #         "nside_down": nside_down,
+    #         "num_channels": num_channels,
+    #         "spins": physics_model.channel_spins,
+    #         "embed_dim": embed_dim,
+    #         "weight_function": physics_model.get_weight_maps,
+    #         "preprocess_function": physics_model.preprocess_for_correlations,
+    #         "device": device,
+    #         "inner_channels": 32,
+    #         "downsampling_layers": 3,
+    #         "residual_layers": 3,
+    #         "kernel_size": 3,
+    #     }
+    #     constructor_args.update(encoder_args or {})
+    #     model = ConvolutionalResidualCorrNetwork(**constructor_args)
+
+    #     LOGGER.info(f"Built {ConvolutionalResidualCorrNetwork.__name__} {encoder_name}")
+    #     LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+    #     LOGGER.info(f"  encoder_args: {constructor_args}")
+
+
+    #     elif encoder_name == "cls_transformer":
+
+    #     assert indices is not None, "indices are required for cls_transformer"
+
+    #     from .transformer_cls import ShiftedWindowTransformerClsNetwork
+    #     constructor_args = {
+    #         "indices": indices,
+    #         "nside": nside,
+    #         "num_channels": num_channels,
+    #         "embed_dim": embed_dim,
+    #         "unstack_function": physics_model.unstack_batch_channels,
+    #         "device": device,
+    #         "inner_embed_dim": 32,
+    #         "depth": 6,
+    #         "num_heads": 8,
+    #         "window_size": 64,
+    #     }
+    #     constructor_args.update(encoder_args or {})
+    #     model = ShiftedWindowTransformerClsNetwork(**constructor_args)
+
+    #     LOGGER.info(f"Built {ShiftedWindowTransformerClsNetwork.__name__} {encoder_name}")
+    #     LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+    #     LOGGER.info(f"  encoder_args: {constructor_args}")
+
+    # elif encoder_name == "cls_cnn":
+
+    #     assert indices is not None, "indices are required for cls_cnn"
+
+    #     from .cnn_cls import ConvolutionalResidualClsNetwork
+    #     constructor_args = {
+    #         "indices": indices,
+    #         "nside": nside,
+    #         "num_channels": num_channels,
+    #         "embed_dim": embed_dim,
+    #         "unstack_function": physics_model.unstack_batch_channels,
+    #         "device": device,
+    #         "inner_channels": 32,
+    #         "downsampling_layers": 3,
+    #         "residual_layers": 3,
+    #         "kernel_size": 3,
+    #     }
+    #     constructor_args.update(encoder_args or {})
+    #     model = ConvolutionalResidualClsNetwork(**constructor_args)
+
+    #     LOGGER.info(f"Built {ConvolutionalResidualClsNetwork.__name__} {encoder_name}")
+    #     LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+    #     LOGGER.info(f"  encoder_args: {constructor_args}")
+
+    # elif encoder_name == "cls_linear":
+
+    #     assert indices is not None, "indices are required for cls_linear"
+
+    #     from .linear_cls import LinearClsNetwork
+
+    #     constructor_args = {
+    #         "indices": indices,
+    #         "nside": nside,
+    #         "num_channels": num_channels,
+    #         "embed_dim": embed_dim,
+    #         "unstack_function": physics_model.unstack_batch_channels,
+    #         "device": device,
+    #     }
+    #     constructor_args.update(encoder_args or {})
+    #     model = LinearClsNetwork(**constructor_args)
+
+    #     LOGGER.info(f"Built {LinearClsNetwork.__name__} {encoder_name}")
+    #     LOGGER.info(f"  num_channels: {num_channels}, embed_dim: {embed_dim}")
+    #     LOGGER.info(f"  encoder_args: {constructor_args}")

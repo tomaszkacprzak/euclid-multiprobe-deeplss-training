@@ -633,8 +633,8 @@ def train(
     # encoder = torch.compile(encoder, dynamic=True)
 
     # print some info
-    torchinfo.summary(encoder,
-                      input_size=(loader_training.batch_size, loader_training.num_pixels, loader_training.num_channels),
+    torchinfo.summary(encoder.trainable_sequence,
+                      input_size=encoder.trainable_input_shape,
                       col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds", "trainable"],
                       col_width=40)
 
@@ -747,9 +747,6 @@ def train(
 
                 model_loss.train()
                 maps, labels, inds = batch
-                LOGGER.debug(f'Labels shape={labels.shape}, maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
-                maps = maps.to(device=device, dtype=torch.float32)
-                labels = labels.to(device=device, dtype=torch.float32)
                 optimizer.zero_grad(set_to_none=True)
                 LOGGER.debug('Running forward pass')
                 train_loss = model_loss(maps, labels)
@@ -1222,12 +1219,16 @@ def tree_io_counters(root_pid=None):
 
 def get_tensor_stats(x, name: str):
 
-    return {
-        f"Batch/{name}/mean": x.mean().detach().cpu(),
-        f"Batch/{name}/std": x.std().detach().cpu(),
-        f"Batch/{name}/min": x.min().detach().cpu(),
-        f"Batch/{name}/max": x.max().detach().cpu(),
-    }
+    stats = {}
+
+    for i, x_i in enumerate(x):
+        
+        stats[f"Batch/{name}/mean_{i:02d}"] = x_i.mean().detach().cpu()
+        stats[f"Batch/{name}/std_{i:02d}"]  = x_i.std().detach().cpu()
+        stats[f"Batch/{name}/min_{i:02d}"]  = x_i.min().detach().cpu()
+        stats[f"Batch/{name}/max_{i:02d}"]  = x_i.max().detach().cpu()
+
+    return stats
 
 def get_examples_stats(examples_seen, dt):
     world_size = dist.get_world_size() if dist.is_initialized() else 1

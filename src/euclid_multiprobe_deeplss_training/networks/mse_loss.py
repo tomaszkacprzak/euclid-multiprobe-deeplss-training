@@ -18,12 +18,12 @@ class MSEHead(nn.Module):
 
 class MSEModel(nn.Module):
 
-    def __init__(self, encoder: nn.Module, num_targets: int):
+    def __init__(self, encoder: nn.Module, embed_dim: int, num_targets: int):
         super().__init__()
         self.encoder = encoder
         self.num_targets = num_targets
-        assert hasattr(encoder, 'embed_dim'), "Encoder must have an embed_dim attribute"
-        self.loss = MSEHead(encoder.embed_dim, self.num_targets)
+        self.embed_dim = embed_dim
+        self.loss = MSEHead(self.embed_dim, self.num_targets)
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         predictions = self.encoder(inputs)

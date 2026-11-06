@@ -603,6 +603,14 @@ def get_footprint_indices(indices, L, R):
     assert np.all(np.diff(indices) >= 0), "indices must be sorted"
     return np.unique(np.asarray(indices) // ((hp.order2nside(L) // hp.order2nside(R)) ** 2))
 
+class FlattenChannels(nn.Module):
+    """Flatten the channels dimension of the input tensor."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x.reshape(x.shape[0], -1, 1)
 
 class ShiftedWindowTransformerCorrNetwork(nn.Module):
     """Encode part-sky maps by applying a transformer to their correlations.
@@ -619,6 +627,7 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
     def __init__(
         self,
         *,
+        batch_size: int,
         indices: list[int] | torch.Tensor,
         nside: int,
         nside_down: int,
@@ -641,6 +650,7 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.batch_size = batch_size
         self.weight_function = weight_function
         self.preprocess_function = preprocess_function
         self.embed_dim = int(embed_dim)
@@ -654,9 +664,11 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         R = hp.nside2order(self.nside_down)
 
         self.indices = indices
+        self.num_pixels = len(self.indices)
         if len(spins) != self.num_channels:
             raise ValueError("spins must have the same length as num_channels.")
         self.spins = spins
+        self.complex_input = torch.any(self.spins ==2)
         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
 
         self.correlator = NestcorrFastFootprint(
@@ -670,7 +682,28 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(L),
         ).to(device)
         self.num_corrs = self.correlator.num_output_bins
+
+        self.register_buffer(
+            "upper_triangular_idx",
+            torch.triu_indices(self.num_channels, self.num_channels),
+            persistent=False,
+        )
+
+        # trainable part
         
+        seq = []
+
+        self.correlation_batch_norm = InputBatchNorm(self.num_corrs, self.num_channel_pairs)
+        seq.append(self.correlation_batch_norm)
+        
+        self.scaler = None
+        if scaler == "asinh":
+            self.scaler = RunningMedianAsinh(self.num_channel_pairs)
+            seq.append(self.scaler)
+
+        self.flattener = FlattenChannels()
+        seq.append(self.flattener)
+
         self.transformer = ShiftedWindowTransformerRegressor(
             input_channels=1,
             embed_dim=self.embed_dim,
@@ -683,48 +716,53 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             dropout=dropout,
             attention_dropout=attention_dropout,
         )
+        seq.append(self.transformer)
 
-        self.correlation_batch_norm = InputBatchNorm(
-            self.num_corrs, self.num_channel_pairs
-        )
+        self.trainable_sequence = nn.Sequential(*seq)
+        self.trainable_input_shape = (self.batch_size, self.num_corrs, self.num_channel_pairs)
 
-        self.scaler = None
-        if scaler == "asinh":
-            self.scaler = RunningMedianAsinh(self.num_channel_pairs)
-
-        self.register_buffer(
-            "upper_triangular_idx",
-            torch.triu_indices(self.num_channels, self.num_channels),
-            persistent=False,
-        )
 
 
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
         """Return one transformer embedding for every set of input maps."""
-        if maps.ndim != 3:
-            raise ValueError(
-                "maps must have shape (batch_size, num_pixels, num_channels)."
-            )
-        if maps.shape[-1] != self.num_channels:
+        
+        for i, m in enumerate(maps):
+            print(f"ShiftedWindowTransformerCorrNetwork: maps[{i}].shape={m.shape} dtype={m.dtype}", flush=True)
+
+        # check the number of maps in the batch should be the same as the number of channels declared
+        if len(maps) != self.num_channels:
             raise ValueError(
                 f"Expected {self.num_channels} input channels, "
-                f"got {maps.shape[-1]}."
+                f"got {len(maps)}."
             )
 
-        # calculate wegiths used for correlations
-        # weights of shape (batch_size, num_pixels, num_channels)
+        # each channel map should have the same number of pixels
+        for i, m in enumerate(maps):
+            assert m.shape[1] == self.num_pixels, f"map {i} has {m.shape[1]} pixels, expected {self.num_pixels}"
+            assert m.shape[0] == self.batch_size, f"map {i} has {m.shape[0]} rows, expected {self.batch_size}"
+
+        # calculate wegiths used for correlations (list of tensors with shape (batch_size, num_pixels))
         weights = self.weight_function(maps)
 
         # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
-        # (batch_size, num_pixels, num_channels)
+        # maps is a list of tensors with shape (batch_size, num_pixels)
         maps = self.preprocess_function(maps)
+
+        # if we have a spin2 channels, use everything as complex numbers
+        if self.complex_input: # use scalar maps as complex numbers with real component (imag set to zero)
+            maps = torch.stack([m.to(torch.complex64) for m in maps], dim=-1)
+        else:
+            maps = torch.stack(maps, dim=-1) # stack scalar maps only
+        weights = torch.stack(weights, dim=-1) # stack scalar weights
         
-        # Main magic - calculate the correlations
+        # reshape for correlations
         maps = torch.movedim(maps, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
         weights = torch.movedim(weights, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
 
+        # main magic - calculate the correlations
         correlations = self.correlator(maps, weights)
-        # Empty or entirely masked bins have no measured correlation. Encode
+
+        # empty or entirely masked bins have no measured correlation. Encode
         # them as zero before scaling and updating normalization statistics.
         correlations = torch.nan_to_num(correlations, nan=0.0, posinf=0.0, neginf=0.0)
         correlations_unique = correlations[
@@ -734,10 +772,408 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             :,
         ].transpose(1, 2)
 
-        if self.scaler is not None:
-            correlations_unique = self.scaler(correlations_unique)
+        outputs = self.trainable_sequence(correlations_unique)
+        return outputs
 
-        correlations_normalized = self.correlation_batch_norm(correlations_unique)
-        correlations_flat = correlations_normalized.reshape(correlations_normalized.shape[0], -1, 1)
+        # if self.scaler is not None:
+        #     correlations_unique = self.scaler(correlations_unique)
+
+        # correlations_normalized = self.correlation_batch_norm(correlations_unique)
+        # correlations_flat = correlations_normalized.reshape(correlations_normalized.shape[0], -1, 1)
     
-        return self.transformer(correlations_flat)
+        # return self.transformer(correlations_flat)
+
+
+
+# class CorrPrepper(nn.Module):
+#     """
+#     """
+
+#     tag = "corr_prepper"
+
+#     def __init__(
+#         self,
+#         *,
+#         batch_size: int,
+#         indices: list[int] | torch.Tensor,
+#         nside: int,
+#         nside_down: int,
+#         num_channels: int,
+#         spins: list[int],
+#         pairs_filename: str | None = None,
+#         sub_batch_size: int = 16,
+#         device: torch.device | str | None = None,
+#         weight_function: callable | None = None,
+#         preprocess_function: callable | None = None,
+#     ) -> None:
+#         super().__init__()
+
+#         self.batch_size = batch_size
+#         self.weight_function = weight_function
+#         self.preprocess_function = preprocess_function
+#         self.num_channels = int(num_channels)
+#         if self.num_channels <= 0:
+#             raise ValueError("num_channels must be positive.")
+
+#         self.nside = nside
+#         self.nside_down = nside_down
+#         L = hp.nside2order(self.nside)
+#         R = hp.nside2order(self.nside_down)
+
+#         self.indices = indices
+#         self.num_pixels = len(indices)
+#         if len(spins) != self.num_channels:
+#             raise ValueError("spins must have the same length as num_channels.")
+#         self.spins = spins
+#         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
+
+#         self.correlator = NestcorrFastFootprint(
+#             L=L,
+#             spins=self.spins,
+#             R_footprint=R,
+#             matmul_precision="high",
+#             footprint_indices=get_footprint_indices(self.indices, L, R),
+#             symmetrize=True,
+#             execution="fused",
+#             pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(L),
+#         ).to(device)
+#         self.num_corrs = self.correlator.num_output_bins
+        
+
+#     def forward(self, maps):
+    
+#         for i, m in enumerate(maps):
+#             print(f"CorrPrepper: maps[{i}].shape={m.shape} dtype={m.dtype}", flush=True)
+
+#         # check the number of maps in the batch should be the same as the number of channels declared
+#         if len(maps) != self.num_channels:
+#             raise ValueError(
+#                 f"Expected {self.num_channels} input channels, "
+#                 f"got {len(maps)}."
+#             )
+
+#         # each channel map should have the same number of pixels
+#         for i, m in enumerate(maps):
+#             assert m.shape[1] == self.num_pixels, f"map {i} has {m.shape[1]} pixels, expected {self.num_pixels}"
+#             assert m.shape[0] == self.batch_size, f"map {i} has {m.shape[0]} rows, expected {self.batch_size}"
+
+#         # calculate wegiths used for correlations (list of tensors with shape (batch_size, num_pixels))
+#         weights = self.weight_function(maps)
+
+#         # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
+#         # maps is a list of tensors with shape (batch_size, num_pixels)
+#         maps = self.preprocess_function(maps)
+
+#         # if we have a spin2 channels, use everything as complex numbers
+#         if self.complex_input: # use scalar maps as complex numbers with real component (imag set to zero)
+#             maps = torch.stack([m.to(torch.complex64) for m in maps], dim=-1)
+#         else:
+#             maps = torch.stack(maps, dim=-1) # stack scalar maps only
+#         weights = torch.stack(weights, dim=-1) # stack scalar weights
+
+#         # main magic - calculate the correlations
+#         correlations = self.correlator(maps, weights)
+
+#         # empty or entirely masked bins have no measured correlation. Encode
+#         # them as zero before scaling and updating normalization statistics.
+#         correlations = torch.nan_to_num(correlations, nan=0.0, posinf=0.0, neginf=0.0)
+#         correlations_unique = correlations[
+#             :,
+#             self.upper_triangular_idx[0],
+#             self.upper_triangular_idx[1],
+#             :,
+#         ].transpose(1, 2)
+
+#         return correlations_unique
+
+
+
+
+# class ShiftedWindowVectorTransformerNetwork(nn.Module):
+#     """
+#     """
+
+#     tag = "vector_transformer"
+
+#     def __init__(
+#         self,
+#         *,
+#         batch_size: int,
+#         num_channels: int,
+#         num_corrs: int,
+#         embed_dim: int,
+#         sub_batch_size: int = 16,
+#         device: torch.device | str | None = None,
+#         inner_embed_dim: int = 128,
+#         depth: int = 6,
+#         num_heads: int = 8,
+#         window_size: int = 64,
+#         mlp_ratio: float = 4.0,
+#         dropout: float = 0.0,
+#         attention_dropout: float = 0.0,
+#         scaler: str = "none", # "none", "asinh"
+#     ) -> None:
+#         super().__init__() 
+
+#         self.embed_dim = int(embed_dim)
+#         self.num_corrs = num_corrs
+#         self.batch_size = batch_size
+#         self.num_channels = int(num_channels)
+#         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
+#         self.input_shape = (self.batch_size, self.num_channel_pairs * self.num_corrs)
+        
+
+#         self.transformer = ShiftedWindowTransformerRegressor(
+#             input_channels=1,
+#             embed_dim=self.embed_dim,
+#             max_length=self.num_channel_pairs * self.num_corrs,
+#             inner_embed_dim=inner_embed_dim,
+#             depth=depth,
+#             num_heads=num_heads,
+#             window_size=window_size,
+#             mlp_ratio=mlp_ratio,
+#             dropout=dropout,
+#             attention_dropout=attention_dropout,
+#         )
+
+#         self.correlation_batch_norm = InputBatchNorm(self.num_corrs, self.num_channel_pairs)
+
+#         self.scaler = None
+#         if scaler == "asinh":
+#             self.scaler = RunningMedianAsinh(self.num_channel_pairs)
+
+
+
+#     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+#         """
+#         """
+              
+#         if self.scaler is not None:
+#             inputs = self.scaler(inputs)
+
+#         inputs_normalized = self.correlation_batch_norm(inputs)
+#         inputs_flat = inputs_normalized.reshape(inputs_normalized.shape[0], -1, 1)
+    
+#         return self.transformer(inputs_flat)
+
+
+
+
+
+
+
+
+# class ShiftedWindowTransformerCorrNetwork(nn.Module):
+#     """Encode part-sky maps by applying a transformer to their correlations.
+
+#     As in :class:`~.transformer_cls.ShiftedWindowTransformerClsNetwork`, inputs have shape
+#     ``(batch, pixels, channels)``, and nestcorr computes every correlation.
+#     The resulting correlation sequence is passed to a 
+#     :class:`ShiftedWindowTransformerRegressor`, with one input feature per
+#     correlation.
+#     """
+
+#     tag = "corr_transformer"
+
+#     def __init__(
+#         self,
+#         *,
+#         indices: list[int] | torch.Tensor,
+#         nside: int,
+#         nside_down: int,
+#         num_channels: int,
+#         spins: torch.Tensor,
+#         embed_dim: int,
+#         pairs_filename: str | None = None,
+#         sub_batch_size: int = 16,
+#         device: torch.device | str | None = None,
+#         inner_embed_dim: int = 128,
+#         depth: int = 6,
+#         num_heads: int = 8,
+#         window_size: int = 64,
+#         mlp_ratio: float = 4.0,
+#         dropout: float = 0.0,
+#         attention_dropout: float = 0.0,
+#         scaler: str = "none", # "none", "asinh"
+#     ) -> None:
+#         super().__init__()
+
+#         self.embed_dim = int(embed_dim)
+#         self.num_channels = int(num_channels)
+#         if self.num_channels <= 0:
+#             raise ValueError("num_channels must be positive.")
+
+#         self.nside = nside
+#         self.nside_down = nside_down
+#         L = hp.nside2order(self.nside)
+#         R = hp.nside2order(self.nside_down)
+
+#         self.indices = indices
+#         if len(spins) != self.num_channels:
+#             raise ValueError("spins must have the same length as num_channels.")
+#         self.spins = spins
+#         self.complex_input = torch.any(self.spins == 2)
+#         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
+
+#         self.correlator = NestcorrFastFootprint(
+#             L=L,
+#             spins=self.spins,
+#             R_footprint=R,
+#             matmul_precision="high",
+#             footprint_indices=get_footprint_indices(self.indices, L, R),
+#             symmetrize=True,
+#             execution="fused",
+#             pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(L),
+#         ).to(device)
+#         self.num_corrs = self.correlator.num_output_bins
+        
+#         self.transformer = ShiftedWindowTransformerRegressor(
+#             input_channels=1,
+#             embed_dim=self.embed_dim,
+#             max_length=self.num_channel_pairs * self.num_corrs,
+#             inner_embed_dim=inner_embed_dim,
+#             depth=depth,
+#             num_heads=num_heads,
+#             window_size=window_size,
+#             mlp_ratio=mlp_ratio,
+#             dropout=dropout,
+#             attention_dropout=attention_dropout,
+#         )
+
+#         self.correlation_batch_norm = InputBatchNorm(
+#             self.num_corrs, self.num_channel_pairs
+#         )
+
+#         self.scaler = None
+#         if scaler == "asinh":
+#             self.scaler = RunningMedianAsinh(self.num_channel_pairs)
+
+#         self.register_buffer(
+#             "upper_triangular_idx",
+#             torch.triu_indices(self.num_channels, self.num_channels),
+#             persistent=False,
+#         )
+
+
+#     def forward(self, inputs) -> torch.Tensor:
+#         """Return one transformer embedding for every set of input maps."""
+
+#         maps, weights = inputs
+
+#         print('maps.shape=' + str(maps.shape), flush=True)
+#         print('weights.shape=' + str(weights.shape), flush=True)
+
+#         # reshape for correlations
+#         maps = torch.movedim(maps, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
+#         weights = torch.movedim(weights, -1, 1).contiguous()  # -> (batch_size, num_channels, num_pixels)
+
+#         # main magic - calculate the correlations
+#         correlations = self.correlator(maps, weights)
+#         # empty or entirely masked bins have no measured correlation. Encode
+#         # them as zero before scaling and updating normalization statistics.
+#         correlations = torch.nan_to_num(correlations, nan=0.0, posinf=0.0, neginf=0.0)
+#         correlations_unique = correlations[
+#             :,
+#             self.upper_triangular_idx[0],
+#             self.upper_triangular_idx[1],
+#             :,
+#         ].transpose(1, 2)
+
+#         if self.scaler is not None:
+#             correlations_unique = self.scaler(correlations_unique)
+
+#         correlations_normalized = self.correlation_batch_norm(correlations_unique)
+#         correlations_flat = correlations_normalized.reshape(correlations_normalized.shape[0], -1, 1)
+    
+#         return self.transformer(correlations_flat)
+
+# class CorrPrepper(nn.Module):
+
+#     def __init__(
+#         self, 
+#         batch_size: int, 
+#         num_channels: int, 
+#         num_pixels: int,
+#         weight_function: callable | None = None,
+#         preprocess_function: callable | None = None,
+#         complex_input: bool = False,
+#         ):
+        
+#         super().__init__()
+
+
+#         self.num_channels = int(num_channels)
+#         if self.num_channels <= 0:
+#             raise ValueError("num_channels must be positive.")
+
+#         self.nside = nside
+#         self.nside_down = nside_down
+#         L = hp.nside2order(self.nside)
+#         R = hp.nside2order(self.nside_down)
+
+#         self.indices = indices
+#         if len(spins) != self.num_channels:
+#             raise ValueError("spins must have the same length as num_channels.")
+#         self.spins = spins
+#         self.complex_input = torch.any(self.spins == 2)
+#         self.num_channel_pairs = self.num_channels * (self.num_channels + 1) // 2
+
+#         self.correlator = NestcorrFastFootprint(
+#             L=L,
+#             spins=self.spins,
+#             R_footprint=R,
+#             matmul_precision="high",
+#             footprint_indices=get_footprint_indices(self.indices, L, R),
+#             symmetrize=True,
+#             execution="fused",
+#             pairs_filename=pairs_filename if pairs_filename is not None else get_pairs_filename(L),
+#         ).to(device)
+#         self.num_corrs = self.correlator.num_output_bins
+
+
+#         self.batch_size = batch_size
+#         self.num_channels = num_channels
+#         self.num_pixels = num_pixels
+#         self.input_shapes = [(batch_size, num_pixels),]*num_channels
+#         self.output_shapes = (batch_size, num_pixels, num_channels)
+
+#         self.weight_function = weight_function
+#         self.preprocess_function = preprocess_function
+#         self.complex_input = complex_input
+
+#     def forward(self, inputs):
+
+#         maps = inputs
+
+#         for i, m in enumerate(maps):
+#             print(f"ShiftedWindowTransformerCorrPrepper: maps[{i}].shape={m.shape} dtype={m.dtype}", flush=True)
+
+#         # check the number of maps in the batch should be the same as the number of channels declared
+#         if len(maps) != self.num_channels:
+#             raise ValueError(
+#                 f"Expected {self.num_channels} input channels, "
+#                 f"got {len(maps)}."
+#             )
+
+#         # each channel map should have the same number of pixels
+#         for i, m in enumerate(maps):
+#             assert m.shape[1] == self.num_pixels, f"map {i} has {m.shape[1]} pixels, expected {self.num_pixels}"
+
+#         # calculate wegiths used for correlations (list of tensors with shape (batch_size, num_pixels))
+#         weights = self.weight_function(maps)
+
+#         # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
+#         # maps is a list of tensors with shape (batch_size, num_pixels)
+#         maps = self.preprocess_function(maps)
+
+#         # if we have a spin2 channels, use everything as complex numbers
+#         if self.complex_input: # use scalar maps as complex numbers with real component (imag set to zero)
+#             maps = torch.stack([m.to(torch.complex64) for m in maps], dim=-1)
+#         else:
+#             maps = torch.stack(maps, dim=-1) # stack scalar maps only
+#         weights = torch.stack(weights, dim=-1) # stack scalar weights
+
+#         outputs = [maps, weights]
+
+#         return outputs
+

@@ -53,7 +53,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
         super().__init__()
 
-        self.model_name = "linkappa_dmo"
+        self.model_name = "linkappa_dmb"
         self.conf = conf
         self.seed = seed
         self.device = device
@@ -90,7 +90,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         self.targets_shift = shift_targets.reshape(1, -1).to(self.device)
         self.targets_scale = scale_targets.reshape(1, -1).to(self.device)
         self.channel_shift = shift_channels #.reshape(1, 1, -1).to(self.device)
-        self.channel_scale = scale_channels.reshape(1, 1, -1).to(self.device)
+        self.channel_scale = scale_channels.to(self.device)
 
     def set_params(self):
 
@@ -202,8 +202,8 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         tomo_bg = targets[:, ids_bg].unsqueeze(1) # shape (batch_size, 1, n_GC_bins)
         assert dg.shape[-1] == tomo_bg.shape[-1], "The number of bias parameters must match the number of tomographic bins"
         # convert density contrast to mean number counts
-        ng = galaxy_density_to_count(ng_bar, dg, tomo_bg)
-        LOGGER.debug(f'drawn poisson galaxy clustering map ng={ng.shape} min={ng.min():>10.3f} max={ng.max():>10.3f} mean={ng.mean():>10.3f}')
+        ng = galaxy_density_to_count(ng_bar, dg, tomo_bg).to(torch.float32)
+        LOGGER.debug(f'drawn poisson galaxy clustering map ng={ng.shape} dtype={ng.dtype} min={ng.min():>10.3f} max={ng.max():>10.3f} mean={ng.mean():>10.3f}')
 
         #
         # Linear bias map for galaxy clustering (sources)
@@ -213,8 +213,8 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         ng_bar = self.num_gal_wl * self.pixel_area
         ids_bsc = [20, 21, 22, 23, 24, 25] # bsc1, bsc2, bsc3, bsc4, bsc5, bsc6
         tomo_bsc = targets[:, ids_bsc].unsqueeze(1) # shape (batch_size, 1, n_WL_bins)
-        ns = galaxy_density_to_count(ng_bar, ds, tomo_bsc)
-        LOGGER.debug(f'drawn poisson galaxy clustering map ns={ns.shape} min={ns.min():>10.3f} max={ns.max():>10.3f} mean={ns.mean():>10.3f}')
+        ns = galaxy_density_to_count(ng_bar, ds, tomo_bsc).to(torch.float32)
+        LOGGER.debug(f'drawn poisson galaxy clustering map ns={ns.shape} dtype={ns.dtype} min={ns.min():>10.3f} max={ns.max():>10.3f} mean={ns.mean():>10.3f}')
 
         #
         # Add lensing shape noise to kappa
@@ -224,6 +224,7 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         kg_noise_temp.div_(torch.sqrt(ns))
         kg_noise_temp[ns==0] = 0
         kg.add_(kg_noise_temp)
+        LOGGER.debug(f'created weak lensing map kg={kg.shape} dtype={kg.dtype} min={kg.min():>10.3f} max={kg.max():>10.3f} mean={kg.mean():>10.3f}')
         
 
         #
@@ -245,14 +246,23 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         LOGGER.debug(f'ng.shape={ng.shape}, ng.dtype={ng.dtype}')
 
         # Stack probes as channels
-        inputs = torch.cat([kg_tot, ns, ng], dim=-1)
-        LOGGER.debug(f'inputs shape={inputs.shape} dtype={inputs.dtype}')
+        # inputs = torch.cat([kg_tot, ns, ng], dim=-1)
+        inputs = list(kg_tot.unbind(dim=-1) + ns.unbind(dim=-1) + ng.unbind(dim=-1))
+
+        for i, inp in enumerate(inputs):
+            LOGGER.debug(f'inputs[{i}].shape={inp.shape} dtype={inp.dtype}')
+        
 
         return inputs, targets
 
     def apply_scalers(self, inputs, targets):
 
-        inputs = (inputs + self.channel_shift) * self.channel_scale
+        # per channel scaler
+        for i, inp in enumerate(inputs):
+            # print(f'inputs[{i}].shape={inputs[i].shape} dtype={inputs[i].dtype} self.channel_scale.shape={self.channel_scale.shape}', f'self.channel_shift={self.channel_shift}')
+            inputs[i] = (inputs[i] + self.channel_shift) * self.channel_scale[i]
+
+        # vectorized targets scaler
         targets = (targets + self.targets_shift) * self.targets_scale
 
         return inputs, targets
@@ -271,39 +281,53 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
     def get_weight_maps(self, inputs):
 
-        weights = torch.ones_like(inputs, device=self.device, dtype=torch.float32)
-        weights[..., :6] = inputs[..., 6:12]  # lensing maps weights are set to source clustering pixel count
+        weights = [None] * len(inputs)
+        for i, inp in enumerate(inputs):
+            weights[i] = torch.ones_like(inp, device=self.device, dtype=torch.float32)
+
+        # lensing maps weights are set to source clustering pixel count
+        for j in range(6):
+            weights[j] = inputs[j+6]
+
         return weights
 
+    # def unstack_batch_channels(self, inputs):
+    #     """
+    #     Unstack the channels of the input tensor into a list of maps.
+    #     Inputs: 
+    #         inputs: tensor of shape (batch_size, num_pixels, num_channels)
+    #     Outputs:
+    #         maps: list of tensors, each tensor is of shape (batch_size, num_pixels).
+    #     """
 
+    #     # all maps are scalar, simple unbind is enough
+    #     channel_maps = inputs.unbind(dim=-1)
 
-    def unstack_batch_channels(self, inputs):
-        """
-        Unstack the channels of the input tensor into a list of maps.
-        Inputs: 
-            inputs: tensor of shape (batch_size, num_pixels, num_channels)
-        Outputs:
-            maps: list of tensors, each tensor is of shape (batch_size, num_pixels).
-        """
-
-        # all maps are scalar, simple unbind is enough
-        channel_maps = inputs.unbind(dim=-1)
-
-        return channel_maps
+    #     return channel_maps
 
     def preprocess_for_correlations(self, inputs):
 
         # first 6 channels are shear maps, subtract the mean
-        shear_maps = inputs[..., :6]
-        select = shear_maps != 0
-        shear_maps_mean = shear_maps[select].mean(dim=-1)
-        shear_maps = shear_maps - shear_maps_mean
-        
-        # next 12 channels are clustering maps, convert to density contrast
-        source_maps = inputs[..., 6:18]
-        select = source_maps != 0
-        source_maps_mean = source_maps[select].mean(dim=-1)
-        source_maps = source_maps / source_maps_mean - 1
+        # shear_maps = inputs[..., :6]
+        # select = shear_maps != 0
+        # shear_maps_mean = shear_maps[select].mean(dim=-1)
+        # shear_maps = shear_maps - shear_maps_mean
 
-        return torch.cat([shear_maps, source_maps], dim=-1)
+        # source_maps = inputs[..., 6:18]
+        # select = source_maps != 0
+        # source_maps_mean = source_maps[select].mean(dim=-1)
+        # source_maps = source_maps / source_maps_mean - 1
+
+
+        # first 6 channels are shear maps, subtract the mean
+        for i in range(6):
+            select = inputs[i] != 0
+            inputs[i] = inputs[i] - inputs[i][select].mean(dim=-1, keepdim=True)
+        
+        # next 12 channels are clustering maps, convert to overdensity rho (not density contrast)
+        for i in range(6, 18):
+            select = inputs[i] != 0
+            inputs[i] = inputs[i] / inputs[i][select].mean(dim=-1, keepdim=True)
+
+        return inputs
         
