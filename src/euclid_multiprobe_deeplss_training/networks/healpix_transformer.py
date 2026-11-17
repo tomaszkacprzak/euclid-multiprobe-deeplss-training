@@ -4,6 +4,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from euclid_multiprobe_deeplss_training.utils import logger
+LOGGER = logger.get_logger(__file__)
+
 
 class HealpixNestedHierarchicalLocalWindowTransformer(nn.Module):
 
@@ -38,6 +41,13 @@ class HealpixNestedHierarchicalLocalWindowTransformer(nn.Module):
         self.trainable_sequence = self.transformer
         self.trainable_input_shape = (self.batch_size, *self.nested_shape)
 
+        LOGGER.debug(f"created HealpixNestedHierarchicalLocalWindowTransformer with nside={nside} nside_down={nside_down} num_pixels={num_pixels}")
+        LOGGER.debug(f" -- spins={spins}")
+        LOGGER.debug(f" -- scalar_channels={self.scalar_channels}")
+        LOGGER.debug(f" -- in_channels={self.in_channels}")
+        LOGGER.debug(f" -- num_nested_levels={self.num_nested_levels}")
+        LOGGER.debug(f" -- nested_shape={self.nested_shape}")
+        
 
     def batch_flat_to_nested(self, batch: torch.Tensor) -> torch.Tensor:
         """Convert pipeline batch shaped ``(B, P, C)`` to nested transformer input."""
@@ -51,7 +61,8 @@ class HealpixNestedHierarchicalLocalWindowTransformer(nn.Module):
         x_stacked = []
         for i, x_i in enumerate(x):
             if x_i.is_complex(): # convert complex tensors to real,imag channels if needed
-                x_stacked.append(torch.stack([x_i.real, x_i.imag], dim=-1))
+                x_stacked.append(x_i.real)
+                x_stacked.append(x_i.imag)
             else: # stack scalar tensors
                 x_stacked.append(x_i)
         x_stacked = torch.stack(x_stacked, dim=-1)
