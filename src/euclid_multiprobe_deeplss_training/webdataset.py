@@ -366,6 +366,9 @@ def build_webdataset(
         start = (index % n_cosmos) * settings.n_cosmos_per_file % n_cosmos
         stop = start + settings.n_cosmos_per_file
         permutation = index * (n_patches * n_perms) // n_cosmos
+
+        LOGGER.info(f"====================Index {index}/{len(indices)} start {start} stop {stop} permutation {permutation}")
+
         if permutation >= n_perms:
             raise ValueError(f"Index {index} selects permutation {permutation}, but only {n_perms} exist.")
         with ExitStack() as stack:
@@ -383,9 +386,15 @@ def build_webdataset(
             # Process every cosmology once and write its patches to their
             # respective tar archives.
             for i_cosmo, cosmo_dir in zip(range(start, stop), cosmo_dirs_in[start:stop], strict=True):
+                
                 cosmo = get_hard_parameters(forward_model, cosmo_params_info, i_cosmo)
                 i_sobol = int(cosmo_dir.name.split('_')[-1])
                 full_maps_file = get_full_sky_perm(settings.cosmogrid_version, forward_model, str(cosmo_dir), permutation)
+
+                LOGGER.info(f"======== i_cosmo={i_cosmo}")
+                LOGGER.info(f"cosmo_dir={cosmo_dir}")
+                LOGGER.info(f"full_maps_file={full_maps_file}")
+
                 full_maps = get_postprocessed_maps(forward_model, full_maps_file)
                 for patch in range(n_patches):
                     # Each stored map starts with shape
