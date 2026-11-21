@@ -1222,11 +1222,24 @@ def get_tensor_stats(x, name: str):
     stats = {}
 
     for i, x_i in enumerate(x):
+
+        if x_i.is_complex():
         
-        stats[f"Batch/{name}/mean_{i:02d}"] = x_i.mean().detach().cpu()
-        stats[f"Batch/{name}/std_{i:02d}"]  = x_i.std().detach().cpu()
-        stats[f"Batch/{name}/min_{i:02d}"]  = x_i.min().detach().cpu()
-        stats[f"Batch/{name}/max_{i:02d}"]  = x_i.max().detach().cpu()
+            stats[f"Batch/{name}_real/mean_{i:02d}"] = x_i.real.mean().detach().cpu()
+            stats[f"Batch/{name}_real/std_{i:02d}"]  = x_i.real.std().detach().cpu()
+            stats[f"Batch/{name}_real/min_{i:02d}"]  = x_i.real.min().detach().cpu()
+            stats[f"Batch/{name}_real/max_{i:02d}"]  = x_i.real.max().detach().cpu()
+            stats[f"Batch/{name}_imag/mean_{i:02d}"] = x_i.imag.mean().detach().cpu()
+            stats[f"Batch/{name}_imag/std_{i:02d}"]  = x_i.imag.std().detach().cpu()
+            stats[f"Batch/{name}_imag/min_{i:02d}"]  = x_i.imag.min().detach().cpu()
+            stats[f"Batch/{name}_imag/max_{i:02d}"]  = x_i.imag.max().detach().cpu()
+        
+        else:
+            
+            stats[f"Batch/{name}/mean_{i:02d}"] = x_i.mean().detach().cpu()
+            stats[f"Batch/{name}/std_{i:02d}"]  = x_i.std().detach().cpu()
+            stats[f"Batch/{name}/min_{i:02d}"]  = x_i.min().detach().cpu()
+            stats[f"Batch/{name}/max_{i:02d}"]  = x_i.max().detach().cpu()
 
     return stats
 

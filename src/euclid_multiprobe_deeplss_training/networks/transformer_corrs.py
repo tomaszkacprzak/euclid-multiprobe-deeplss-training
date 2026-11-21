@@ -11,6 +11,11 @@ from nestcorr.nestcorr import NestcorrFastFootprint
 from nestcorr.pairs import get_pairs_filename
 from torch import Tensor, nn
 
+from euclid_multiprobe_deeplss_training.utils import logger
+LOGGER = logger.get_logger(__file__)
+
+
+
 
 class RunningMedianAsinh(nn.Module):
     """
@@ -721,13 +726,19 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         self.trainable_sequence = nn.Sequential(*seq)
         self.trainable_input_shape = (self.batch_size, self.num_corrs, self.num_channel_pairs)
 
+        LOGGER.debug(f"created ShiftedWindowTransformerCorrNetwork with nside={self.nside} nside_down={self.nside_down} indices={len(self.indices)} num_channels={self.num_channels}")
+        LOGGER.debug(f" -- input shape {self.trainable_input_shape}")
+        LOGGER.debug(f" -- spins={self.spins}")
+        LOGGER.debug(f" -- num_corrs={self.num_corrs} num_channel_pairs={self.num_channel_pairs}")
+        LOGGER.debug(f" -- embed_dim={self.embed_dim} inner_embed_dim={inner_embed_dim} depth={depth} num_heads={num_heads} window_size={window_size} mlp_ratio={mlp_ratio} dropout={dropout} attention_dropout={attention_dropout}")
+
 
 
     def forward(self, maps: torch.Tensor) -> torch.Tensor:
         """Return one transformer embedding for every set of input maps."""
         
         for i, m in enumerate(maps):
-            print(f"ShiftedWindowTransformerCorrNetwork: maps[{i}].shape={m.shape} dtype={m.dtype}", flush=True)
+            LOGGER.debug(f"ShiftedWindowTransformerCorrNetwork: maps[{i}].shape={m.shape} dtype={m.dtype}")
 
         # check the number of maps in the batch should be the same as the number of channels declared
         if len(maps) != self.num_channels:
