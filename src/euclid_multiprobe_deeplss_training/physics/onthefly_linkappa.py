@@ -47,9 +47,37 @@ def galaxy_density_to_count(ng_bar, dg, bg):
     ng = torch.poisson(ng_lambda)
     return ng
 
+# Layout of the full 18-channel input produced by forward_physics, by channel block.
+# Each block brings the nuisance parameters that only it is sensitive to directly.
+CHANNEL_BLOCKS = ('kappa', 'ns', 'ng')
+CHANNEL_BLOCK_SLICES = {'kappa': slice(0, 6), 'ns': slice(6, 12), 'ng': slice(12, 18)}
+CHANNEL_BLOCK_PARAMS = {
+    'kappa': ['Aia1', 'Aia2', 'Aia3', 'Aia4', 'Aia5', 'Aia6'],
+    'ns': ['bsc1', 'bsc2', 'bsc3', 'bsc4', 'bsc5', 'bsc6'],
+    'ng': ['bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6'],
+}
+COSMO_PARAMS = ['Om', 's8', 'Ob', 'H0', 'ns', 'w0', 'bary_Mc', 'bary_nu']
+# convenience aliases for the probe combinations
+CHANNEL_PRESETS = {'wl': ('kappa',), 'gc': ('ns', 'ng'), 'wlgc': ('kappa', 'ns', 'ng'), 'all': ('kappa', 'ns', 'ng')}
+
+
+def _parse_channel_blocks(channels):
+    """Return the requested channel blocks in canonical order (kappa, ns, ng)."""
+    if isinstance(channels, str):
+        key = channels.lower()
+        if key not in CHANNEL_PRESETS:
+            raise ValueError(f"Unknown channel preset {channels!r}, use one of {sorted(CHANNEL_PRESETS)} or a list of {CHANNEL_BLOCKS}")
+        channels = CHANNEL_PRESETS[key]
+    channels = [str(c) for c in channels]
+    unknown = [c for c in channels if c not in CHANNEL_BLOCKS]
+    if unknown or len(channels) == 0 or len(set(channels)) != len(channels):
+        raise ValueError(f"channels must be a non-empty list of distinct entries of {CHANNEL_BLOCKS}, got {channels}")
+    return tuple(c for c in CHANNEL_BLOCKS if c in channels)
+
+
 class OntheflyPhysicsModelLinkappa(nn.Module):
 
-    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, **kwargs):
+    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, channels=CHANNEL_BLOCKS, **kwargs):
 
         super().__init__()
 
@@ -58,7 +86,10 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         self.seed = seed
         self.device = device
         self.nside = nside
+        self.channel_blocks = _parse_channel_blocks(channels)
+        self.full_channels = self.channel_blocks == CHANNEL_BLOCKS
         self.set_params()
+        self.set_channels()
         self.onthefly_samples = self.get_onthefly_params(num_samples_prior)
         self.shape_noise_std = shape_noise_std
         self.num_gal_wl = torch.from_numpy(np.array(self.conf["survey"]["WL"]["n_gal"])).to(self.device)
@@ -67,14 +98,13 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         self.sample_uniform_lo = torch.tensor(0., device=self.device, dtype=torch.float32)
         self.sample_uniform_hi = torch.tensor(2 * math.pi, device=self.device, dtype=torch.float32)
         self.num_targets = len(self.params)
-        self.num_channels = 18
-        self.channel_spins = torch.from_numpy(np.array([0]*18)).to(self.device)
+        self.channel_spins = torch.from_numpy(np.array([0]*self.num_channels)).to(self.device)
         # self.param_names = ['Om', 's8', 'Ob', 'H0', 'ns', 'w0', 'bary_Mc', 'bary_nu', 'Aia', 'n_Aia', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'bsc1', 'bsc2', 'bsc3', 'bsc4', 'bsc5', 'bsc6']
         self.scalers = scalers
         self.randomize_astro_params = randomize_astro_params
         if self.scalers:
             self.set_scalers()
-        LOGGER.info(f"Created physics model Linear, num_channels={self.num_channels}, num_targets={self.num_targets}, apply_scalers={self.scalers}, shape_noise_std={self.shape_noise_std}")
+        LOGGER.info(f"Created physics model Linear, channels={self.channel_blocks}, num_channels={self.num_channels}, num_targets={self.num_targets}, apply_scalers={self.scalers}, shape_noise_std={self.shape_noise_std}")
                 
 
     def set_scalers(self):
@@ -82,19 +112,32 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
         shift_channels = 0.
         scale_channels = torch.tensor([1.]*6 + [1./100000.]*6 + [1./10000.]*6, device=self.device)
 
-        list_min = torch.tensor([self.priors[p][0] for p in self.params], device=self.device, dtype=torch.float32)
-        list_max = torch.tensor([self.priors[p][1] for p in self.params], device=self.device, dtype=torch.float32)
+        list_min = torch.tensor([self.priors[p][0] for p in self.params_full], device=self.device, dtype=torch.float32)
+        list_max = torch.tensor([self.priors[p][1] for p in self.params_full], device=self.device, dtype=torch.float32)
         shift_targets = -list_min
         scale_targets = 1./(list_max-list_min)
 
-        self.targets_shift = shift_targets.reshape(1, -1).to(self.device)
-        self.targets_scale = scale_targets.reshape(1, -1).to(self.device)
+        # scalers for the full 18-channel / 26-parameter layout (used inside forward)
+        self._targets_shift_full = shift_targets.reshape(1, -1).to(self.device)
+        self._targets_scale_full = scale_targets.reshape(1, -1).to(self.device)
+        self._channel_scale_full = scale_channels.reshape(1, 1, -1).to(self.device)
+        # public scalers for the selected channels / targets
+        self.targets_shift = self._targets_shift_full[:, self.target_indices]
+        self.targets_scale = self._targets_scale_full[:, self.target_indices]
         self.channel_shift = shift_channels #.reshape(1, 1, -1).to(self.device)
-        self.channel_scale = scale_channels.reshape(1, 1, -1).to(self.device)
+        self.channel_scale = self._channel_scale_full[:, :, self.channel_indices]
 
     def set_params(self):
 
-        self.params = ['Om', 's8', 'Ob', 'H0', 'ns', 'w0', 'bary_Mc', 'bary_nu', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'Aia1', 'Aia2', 'Aia3', 'Aia4', 'Aia5', 'Aia6', 'bsc1', 'bsc2', 'bsc3', 'bsc4', 'bsc5', 'bsc6']
+        # full parameter vector produced by forward_physics, order fixed by the hard-coded indices below
+        self.params_full = ['Om', 's8', 'Ob', 'H0', 'ns', 'w0', 'bary_Mc', 'bary_nu', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'Aia1', 'Aia2', 'Aia3', 'Aia4', 'Aia5', 'Aia6', 'bsc1', 'bsc2', 'bsc3', 'bsc4', 'bsc5', 'bsc6']
+        # targets of this model: cosmology + the nuisance parameters of the selected channel blocks.
+        # Nuisance parameters of the other blocks are still drawn, i.e. marginalised over the prior.
+        selected = set(COSMO_PARAMS)
+        for block in self.channel_blocks:
+            selected.update(CHANNEL_BLOCK_PARAMS[block])
+        self.params = [p for p in self.params_full if p in selected]
+        self.target_indices = [self.params_full.index(p) for p in self.params]
 
         # from Table 1 in https://arxiv.org/pdf/2201.07771
         self.priors = {
@@ -133,6 +176,22 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
             assert param in self.priors, f"Parameter {param} not found in priors"
 
         LOGGER.info(f"Model {self.model_name} parameters: {self.params}")
+
+    def set_channels(self):
+
+        self.channel_indices = []
+        self.block_slices = {}  # positions of each block in the selected input
+        for block in self.channel_blocks:
+            s = CHANNEL_BLOCK_SLICES[block]
+            start = len(self.channel_indices)
+            self.channel_indices += list(range(s.start, s.stop))
+            self.block_slices[block] = slice(start, len(self.channel_indices))
+        self.num_channels = len(self.channel_indices)
+        # kappa without the ns channels: the n_s maps used as kappa weights are kept on the side
+        self.ns_weights_on_side = ('kappa' in self.channel_blocks) and ('ns' not in self.channel_blocks)
+        self._side_ns = None
+        self._side_ns_owner = None
+        self.side_weight_fallbacks = 0
 
 
     def get_onthefly_params(self, num_samples_prior):
@@ -261,18 +320,60 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
     
     def forward(self, example):
-        
+
+        # full 18-channel inputs and 26 targets
         inputs, targets = self.forward_physics(example)
 
         if self.scalers:
-            inputs, targets = self.apply_scalers(inputs, targets)
+            inputs = (inputs + self.channel_shift) * self._channel_scale_full
+            targets = (targets + self._targets_shift_full) * self._targets_scale_full
+
+        if self.full_channels:
+            return inputs, targets
+
+        ns_full = inputs[..., CHANNEL_BLOCK_SLICES['ns']]
+        inputs = inputs[..., self.channel_indices].contiguous()
+        targets = targets[:, self.target_indices].contiguous()
+
+        if self.ns_weights_on_side:
+            # keep the (scaled) source counts of exactly this batch for get_weight_maps
+            # keep a reference to the batch itself, get_weight_maps checks that it is called on (a copy of) it
+            self._side_ns = ns_full.contiguous()
+            self._side_ns_owner = inputs
 
         return inputs, targets
+
+    def _side_ns_for(self, inputs):
+        """Source-count maps belonging to `inputs` (same tensor object as returned by forward)."""
+
+        owner = self._side_ns_owner
+        if owner is not None and inputs.shape == owner.shape and inputs.device == owner.device:
+            # same memory (no-op .to()), or a copy of this batch, e.g. the float64 -> float32 cast done
+            # by the training / prediction loops before calling the network
+            same = (inputs.data_ptr() == owner.data_ptr() and inputs.dtype == owner.dtype) \
+                or torch.equal(inputs, owner.to(inputs.dtype))
+            if same:
+                return self._side_ns.to(inputs.dtype)
+
+        # Not a batch produced by this physics model, e.g. the random tensor of torchinfo.summary.
+        # Allow it once (uniform weights on the footprint), fail on any later occurrence.
+        self.side_weight_fallbacks += 1
+        if self.side_weight_fallbacks > 1:
+            raise RuntimeError(
+                "get_weight_maps called on a tensor that was not produced by the last forward() of the physics model; "
+                "the n_s weights for the kappa channels are unknown. Run the network on the batch right after it is generated.")
+        LOGGER.warning("get_weight_maps: no n_s maps for this tensor (expected once, for the model summary); using footprint weights")
+        return (inputs[..., self.block_slices['kappa']] != 0).to(inputs.dtype)
 
     def get_weight_maps(self, inputs):
 
         weights = torch.ones_like(inputs, device=self.device, dtype=torch.float32)
-        weights[..., :6] = inputs[..., 6:12]  # lensing maps weights are set to source clustering pixel count
+        if 'kappa' in self.channel_blocks:
+            # lensing maps weights are set to source clustering pixel count
+            if 'ns' in self.channel_blocks:
+                weights[..., self.block_slices['kappa']] = inputs[..., self.block_slices['ns']]
+            else:
+                weights[..., self.block_slices['kappa']] = self._side_ns_for(inputs)
         return weights
 
 
@@ -293,17 +394,27 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
     def preprocess_for_correlations(self, inputs):
 
-        # first 6 channels are shear maps, subtract the mean
-        shear_maps = inputs[..., :6]
-        select = shear_maps != 0
-        shear_maps_mean = shear_maps[select].mean(dim=-1)
-        shear_maps = shear_maps - shear_maps_mean
-        
-        # next 12 channels are clustering maps, convert to density contrast
-        source_maps = inputs[..., 6:18]
-        select = source_maps != 0
-        source_maps_mean = source_maps[select].mean(dim=-1)
-        source_maps = source_maps / source_maps_mean - 1
+        outputs = []
 
-        return torch.cat([shear_maps, source_maps], dim=-1)
+        # shear/kappa channels, subtract the mean
+        if 'kappa' in self.channel_blocks:
+            shear_maps = inputs[..., self.block_slices['kappa']]
+            select = shear_maps != 0
+            shear_maps_mean = shear_maps[select].mean(dim=-1)
+            shear_maps = shear_maps - shear_maps_mean
+            outputs.append(shear_maps)
+
+        # clustering channels (n_s and/or n_g, contiguous), convert to density contrast
+        # NOTE (as in d722fd7): one common mean over all clustering channels of the batch
+        count_blocks = [b for b in ('ns', 'ng') if b in self.channel_blocks]
+        if count_blocks:
+            start = self.block_slices[count_blocks[0]].start
+            stop = self.block_slices[count_blocks[-1]].stop
+            source_maps = inputs[..., start:stop]
+            select = source_maps != 0
+            source_maps_mean = source_maps[select].mean(dim=-1)
+            source_maps = source_maps / source_maps_mean - 1
+            outputs.append(source_maps)
+
+        return torch.cat(outputs, dim=-1)
         
