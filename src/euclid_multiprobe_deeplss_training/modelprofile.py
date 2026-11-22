@@ -8,12 +8,11 @@ from typing import Any
 import torch
 
 from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
-from euclid_multiprobe_deeplss_training.networks.builder import build_model
-from euclid_multiprobe_deeplss_training.networks.smoothing import NestChannelScalecut
-from euclid_multiprobe_deeplss_training.physics.onthefly_linear import OntheflyPhysicsModelLinear
+from euclid_multiprobe_deeplss_training.networks.builder import build_encoder
 
 from .datastats import print_profiler_stats
-from .utils.config import Config, ConfigPaths, config_paths, load_config
+from .training import iter_tensors, load_physics_model_class
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -25,34 +24,36 @@ def modelprofile(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> li
     LOGGER.info(f"Using device: {device}")
     config = _coerce_config(config_or_path)
 
-    physics_model = OntheflyPhysicsModelLinear(config.forward_model, 
-                        scalers=True,
-                        device=device).to(device)
-
-    smoothing_model = NestChannelScalecut(
+    physics_model_class = load_physics_model_class(config.training['physics_model'])
+    physics_model = physics_model_class(
+        config.forward_model,
+        scalers=True,
+        device=device,
         nside=config.forward_model["analysis"]["n_side"],
-        nside_base=config.forward_model["analysis"]["n_side_down"],
-        nside_lower=[1024] * 24,
-        operator="mean",
+        **config.training.get('physics_model_args', {}),
     ).to(device)
 
     loader = OntheflyPipeline(
         webds_pattern=config.training['records_pattern'],
         batch_size=config.training['batch_size'],
         physics_model=physics_model,
-        smoother=smoothing_model,
+        smoother=None,
         num_workers=config.training['num_workers'],
         device=device,
     )
 
-    model = build_model(
+    model = build_encoder(
         config.training['encoder_name'],
         num_channels=physics_model.num_channels,
-        num_targets=physics_model.num_targets,
+        embed_dim=config.training['embed_dim'],
         num_pixels=loader.num_pixels,
         nside=int(config.forward_model["analysis"]["n_side"]),
         nside_down=int(config.forward_model["analysis"]["n_side_down"]),
         encoder_args=config.training['encoder_args'],
+        batch_size=config.training['batch_size'],
+        indices=load_pixel_file(config.forward_model)[0],
+        physics_model=physics_model,
+        device=device,
     ).to(device)
     model.eval()
     LOGGER.info(f"Profiling model: {model.__class__.__name__}")
@@ -215,15 +216,14 @@ def _profile_loader_forward_passes(
         with_stack=True,
     ) as prof:
         with torch.no_grad():
-            for batch_count, (maps, _labels) in enumerate(dataloader):
-                transformer_batch = _prepare_transformer_batch(maps, config=config)
+            for batch_count, (maps, _labels, _indices) in enumerate(dataloader):
                 LOGGER.debug(
-                    "Batch %s transformer input shape=%s size=%.2f MB",
+                    "Batch %s encoder input shapes=%s size=%.2f MB",
                     batch_count,
-                    tuple(transformer_batch.shape),
-                    transformer_batch.numel() * transformer_batch.itemsize / 1024**2,
+                    _format_tensor_shapes(maps),
+                    sum(m.numel() * m.itemsize for m in iter_tensors(maps)) / 1024**2,
                 )
-                output = model(transformer_batch)
+                output = model(maps)
                 if should_print_specification:
                     for handle in specification_hooks:
                         handle.remove()
@@ -231,7 +231,7 @@ def _profile_loader_forward_passes(
                     should_print_specification = False
                 outputs.append(output.detach().cpu())
 
-                if transformer_batch.is_cuda:
+                if any(m.is_cuda for m in iter_tensors(maps)):
                     torch.cuda.synchronize()
                 prof.step()
 

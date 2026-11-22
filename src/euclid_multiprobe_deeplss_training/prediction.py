@@ -10,7 +10,7 @@ from typing import Any
 import torch
 
 from .networks.builder import build_encoder, build_loss
-from .training import load_physics_model_class
+from .training import iter_tensors, load_physics_model_class, move_to_device
 from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
@@ -40,6 +40,8 @@ def predict(
     evaluation_batch_size = config.training['batch_size'] if batch_size is None else batch_size
     if evaluation_batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    if num_examples is not None and num_examples <= 0:
+        raise ValueError("num_examples must be positive.")
 
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     indices = load_pixel_file(config.forward_model)[0]
@@ -61,6 +63,7 @@ def predict(
         smoother=None,
         num_workers=config.training['num_workers'],
         validation=True,
+        device=device,
     )
 
     encoder = build_encoder(
@@ -94,10 +97,11 @@ def predict(
     inds_batches: list[torch.Tensor] = []
     j = 0
     i = 0
-    while i < num_examples:
+    while num_examples is None or i < num_examples:
+        examples_before_pass = i
         for batch in validation_loader:
             inputs, labels, inds = batch
-            inputs = inputs.to(device=device, dtype=torch.float32)
+            inputs = move_to_device(inputs, device)
             predictions = model.predict(inputs)
             label_batches.append(labels.detach().cpu())
             inds_batches.append(inds.detach().cpu())
@@ -105,17 +109,19 @@ def predict(
             LOGGER.debug(
                 "Batch %5d: input maps shape: %s, labels shape: %s, predictions shape: %s, indices shape: %s",
                 j,
-                inputs.shape,
+                [tuple(channel.shape) for channel in iter_tensors(inputs)],
                 labels.shape,
                 predictions.shape,
                 inds.shape,
             )
             j += 1
-            i += evaluation_batch_size
-            if i >= num_examples:
+            i += labels.shape[0]
+            if num_examples is not None and i >= num_examples:
                 break
-            if j % 10 == 0:
+            if j % 10 == 0 and num_examples is not None:
                 LOGGER.info(f"Predicted {i:>10d} examples out of {num_examples:>10d} [{i / num_examples * 100:.2f}%]")
+        if num_examples is None or i == examples_before_pass:
+            break
 
     if not label_batches:
         raise ValueError("The validation set did not produce any examples.")

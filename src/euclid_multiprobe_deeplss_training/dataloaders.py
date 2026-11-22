@@ -23,8 +23,9 @@ class OntheflyPipeline:
     """
     Sets up a dataset for the onthefly cosmologies.
 
-    A smoother must accept ``(inputs, weights)``. Its statistical weights are
-    obtained from ``physics_model.get_weight_maps(inputs)`` after physics.
+    A smoother must accept dense ``(batch, pixels, channels)`` inputs and
+    weights. Channel lists are stacked at that boundary and restored afterwards.
+    Weights come from ``physics_model.get_weight_maps(inputs)`` after physics.
     """
     def __init__(
         self, webds_pattern, batch_size, physics_model, smoother=None, downsampler=None,
@@ -83,7 +84,7 @@ class OntheflyPipeline:
 
 
         # test and get the number of pixels
-        for inputs, _indices, targets in self.__iter__():
+        for inputs, targets, _indices in self.__iter__():
 
             self.num_channels = len(inputs)
             self.num_pixels = inputs[0].shape[1]
@@ -122,7 +123,16 @@ class OntheflyPipeline:
                 # Use the statistical weights of the physics channels before smoothing.
                 if self.smoother is not None:
                     weights = self.physics_model.get_weight_maps(inputs)
-                    inputs = self.smoother(inputs, weights)
+                    if isinstance(inputs, (list, tuple)):
+                        # The scale-cut layer uses a dense channel axis. Restore
+                        # each channel's dtype afterwards, including scalar maps.
+                        smoothed = self.smoother(torch.stack(inputs, dim=-1), torch.stack(weights, dim=-1))
+                        inputs = [
+                            (channel if original.is_complex() else channel.real).to(original.dtype)
+                            for channel, original in zip(smoothed.unbind(dim=-1), inputs, strict=True)
+                        ]
+                    else:
+                        inputs = self.smoother(inputs, weights)
 
             LOGGER.debug(f"Batch {batch_count:>6d} physics len {len(inputs)}")
 

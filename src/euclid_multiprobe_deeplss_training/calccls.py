@@ -15,9 +15,8 @@ import h5py
 import numpy as np
 import torch
 
-from .training import load_physics_model_class
-from .utils.cls_cuhpx import PartSkyAutoCls, PartSkyCls
-from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_indices
+from .training import load_physics_model_class, move_to_device
+from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
 LOGGER = get_logger(__file__)
@@ -57,13 +56,14 @@ def calccls(
     GPU memory use grows over either pass through the data.
     """
     from .dataloaders import OntheflyPipeline
+    from .utils.cls_cuhpx import PartSkyAutoCls, PartSkyCls
 
     config, raw_config = _coerce_config(config_or_path)
     training_config = raw_config.get("training", {}) or {}
     requested_device = device or training_config.get("device") or raw_config.get("device")
     run_device = torch.device(requested_device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    indices = load_pixel_indices(config.forward_model)
+    indices = load_pixel_file(config.forward_model)[0]
     analysis = config.forward_model["analysis"]
     nside = int(analysis["n_side"])
     cls_config = raw_config.get("calccls", {}) or {}
@@ -78,6 +78,7 @@ def calccls(
         device=run_device,
         seed=int(time.time()),
         nside=nside,
+        **config.training.get('physics_model_args', {}),
     ).to(run_device)
     loader = OntheflyPipeline(
         webds_pattern=config.training['records_pattern'],
@@ -86,6 +87,7 @@ def calccls(
         downsampler=None,
         smoother=None,
         num_workers=config.training['num_workers'],
+        device=run_device,
     )
 
     output_path = Path(output_path)
@@ -106,14 +108,17 @@ def calccls(
     with h5py.File(output_path, "w") as output_file, torch.no_grad():
         for maps, labels, inds in loader:
             j += 1
-            i += len(maps)
-            maps = maps.to(device=run_device, dtype=torch.float32)
-            maps_list = physics_model.unstack_batch_channels(maps)
+            i += labels.shape[0]
+            maps_list = move_to_device(maps, run_device)
+            if isinstance(maps_list, torch.Tensor):
+                maps_list = maps_list.unbind(dim=-1)
             batch_spectra_list = cls_calculator.forward(*maps_list)
             _append_batch(output_file, batch_spectra_list, labels, inds)
             output_file.flush()
-            batch_spectra = torch.stack(batch_spectra_list, dim=-1)
-            LOGGER.debug(f"Batch {j: 5d}: input maps shape: {maps.shape}, output spectra shape: {batch_spectra.shape}")
+            LOGGER.debug(
+                "Batch %5d: input map shapes: %s, output spectrum shapes: %s",
+                j, [tuple(m.shape) for m in maps_list], [tuple(s.shape) for s in batch_spectra_list],
+            )
 
             if i >= num_examples:
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
@@ -150,13 +155,17 @@ def calccls(
     with h5py.File(cross_output_path, "w") as output_file, torch.no_grad():
         for maps, labels, inds in loader:
             j += 1
-            i += len(maps)
-            maps = maps.to(device=run_device, dtype=torch.float32)
-            maps_list = physics_model.unstack_batch_channels(maps)
+            i += labels.shape[0]
+            maps_list = move_to_device(maps, run_device)
+            if isinstance(maps_list, torch.Tensor):
+                maps_list = maps_list.unbind(dim=-1)
             batch_spectra = cross_cls_calculator.forward(*maps_list)
             _append_batch(output_file, (batch_spectra,), labels, inds)
             output_file.flush()
-            LOGGER.debug(f"Batch {j: 5d}: input maps shape: {maps.shape}, output cross spectra shape: {batch_spectra.shape}")
+            LOGGER.debug(
+                "Batch %5d: input map shapes: %s, output cross spectra shape: %s",
+                j, [tuple(m.shape) for m in maps_list], tuple(batch_spectra.shape),
+            )
 
             if i >= num_examples:
                 LOGGER.info(f"Calculated {i} examples, stopping at requested {num_examples} examples.")
