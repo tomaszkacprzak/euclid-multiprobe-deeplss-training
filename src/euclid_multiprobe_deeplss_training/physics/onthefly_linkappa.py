@@ -77,9 +77,18 @@ def _parse_channel_blocks(channels):
 
 class OntheflyPhysicsModelLinkappa(nn.Module):
 
-    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, channels=CHANNEL_BLOCKS, **kwargs):
+    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, channels=CHANNEL_BLOCKS, corr_mean="batch", **kwargs):
 
         super().__init__()
+
+        # Mean used by preprocess_for_correlations (correlation networks only):
+        #   "batch"   (default, = d722fd7): one mean over the whole batch; kappa: one value for all 6 bins;
+        #             counts: ONE value for all n_s AND n_g channels -> offsets and batch-mate dependence.
+        #   "per_map": per example and per channel (see _preprocess_for_correlations_per_map).
+        # Existing corrswin checkpoints were trained with "batch"; use "per_map" only for new training.
+        if corr_mean not in ("batch", "per_map"):
+            raise ValueError(f"corr_mean must be 'batch' or 'per_map', got {corr_mean!r}")
+        self.corr_mean = corr_mean
 
         self.model_name = "linkappa_dmo"
         self.conf = conf
@@ -394,6 +403,9 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
 
     def preprocess_for_correlations(self, inputs):
 
+        if self.corr_mean == "per_map":
+            return self._preprocess_for_correlations_per_map(inputs)
+
         outputs = []
 
         # shear/kappa channels, subtract the mean
@@ -416,5 +428,28 @@ class OntheflyPhysicsModelLinkappa(nn.Module):
             source_maps = source_maps / source_maps_mean - 1
             outputs.append(source_maps)
 
+        return torch.cat(outputs, dim=-1)
+
+    def _preprocess_for_correlations_per_map(self, inputs):
+        """corr_mean="per_map": means taken per example AND per channel, so no map depends on its batch mates.
+
+        kappa channels: subtract the mean over the non-zero pixels of that map/channel (as the batch version, per map).
+        count channels (n_s, n_g): density contrast n / <n> - 1 with <n> the mean of that map/channel over all input
+        pixels (zero counts are real pixels and are included; the input pixels are the footprint).
+        """
+        outputs = []
+        if 'kappa' in self.channel_blocks:
+            shear_maps = inputs[..., self.block_slices['kappa']]
+            select = (shear_maps != 0).to(shear_maps.dtype)
+            mean = (shear_maps * select).sum(dim=1, keepdim=True) / select.sum(dim=1, keepdim=True).clamp_min(1.0)
+            outputs.append(shear_maps - mean)
+        count_blocks = [b for b in ('ns', 'ng') if b in self.channel_blocks]
+        if count_blocks:
+            start = self.block_slices[count_blocks[0]].start
+            stop = self.block_slices[count_blocks[-1]].stop
+            source_maps = inputs[..., start:stop]
+            mean = source_maps.mean(dim=1, keepdim=True)
+            mean = mean.clamp_min(torch.finfo(source_maps.dtype).tiny)
+            outputs.append(source_maps / mean - 1)
         return torch.cat(outputs, dim=-1)
         
