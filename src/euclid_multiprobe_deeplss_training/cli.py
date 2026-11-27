@@ -224,6 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     datastats_parser.set_defaults(func=_run_datastats)
 
+    #####################################################################################
+    #
+    # plot_channel_maps
+    #
+    #####################################################################################
+
     channel_maps_parser = subparsers.add_parser(
         "plot_channel_maps",
         help="Plot one physics-processed example as half-sky and 10-degree channel maps.",

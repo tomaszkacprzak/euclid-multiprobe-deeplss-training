@@ -9,6 +9,7 @@ Created June 2026
 Author: Tomasz Kacprzak
 """
 # from tkinter import E
+import os
 import warnings
 import numpy as np
 import healpy as hp
@@ -43,13 +44,13 @@ def galaxy_density_to_count(ng_bar, dg, bg):
     """
 
     # get mean number of galaxies per pixel
-    ng = (1 + bg * dg) * ng_bar
+    ng = torch.where(dg != 0, (1 + bg * dg) * ng_bar, 0)
     # remove negative values
     ng_clip = torch.clamp(ng, min=0, max=1e6)
     # adjust so that the total is conserved
     ng_lambda = ng_clip * torch.sum(ng, axis=1, keepdim=True) / torch.sum(ng_clip, axis=1, keepdim=True)
     # draw Poisson noise
-    ng = torch.poisson(ng_lambda)
+    ng = torch.where(ng_lambda != 0, torch.poisson(ng_lambda), 0)
     return ng
 
 class OntheflyPhysicsModelLinearShear(nn.Module):
@@ -123,14 +124,20 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         # Channels with identical scale cuts share the same sparse geometry.
         smoothers = {}
 
-        def get_smoother(sigma_arcmin, weighted):
-            key = (float(sigma_arcmin), weighted)
-            if key not in smoothers:
-                smoothers[key] = nestconv(
-                    nside=self.nside, pixel_ids=self.indices_pixels,
-                    sigma=np.radians(sigma_arcmin / 60.), weighted=weighted, verbosity=1,
-                )
-            return smoothers[key]
+        def get_smoother(sigma_arcmin, channel_id):
+
+            cache_file=f"small_scale_smoother_channel{channel_id:02d}.pkl"
+            if os.path.exists(cache_file):
+                return nestconv(verbosity=1,
+                                cache_file=cache_file)
+            else:
+                return nestconv(nside=self.nside, 
+                                pixel_ids=self.indices_pixels, 
+                                sigma=np.radians(sigma_arcmin / 60.), 
+                                weighted=True, 
+                                verbosity=1,
+                                cache_file=cache_file)
+            
 
         # six WL bins shear
         fwhm_mpc = self.small_scale_selection['WL']
@@ -138,9 +145,9 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             j = i + 0
             z_med = self.z_med_wl[i]
             sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
-            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, weighted=True)
+            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, j)
             LOGGER.info(f"small scale smoother for lensing shear channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
-            self.small_scale_smoothers[j].stage_info()
+            LOGGER.info(self.small_scale_smoothers[j].stage_info())
 
         # six WL bins source clustering
         fwhm_mpc = self.small_scale_selection['GC']
@@ -148,9 +155,9 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             j = i + 6
             z_med = self.z_med_wl[i]
             sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
-            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, weighted=False)
+            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, j)
             LOGGER.info(f"small scale smoother for source clustering channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
-            self.small_scale_smoothers[j].stage_info()
+            LOGGER.info(self.small_scale_smoothers[j].stage_info())
 
 
         # six GC bins galaxy clustering
@@ -159,9 +166,9 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             j = i + 12
             z_med = self.z_med_gc[i]
             sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
-            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, weighted=False)
+            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, j)
             LOGGER.info(f"small scale smoother for galaxy clustering channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
-            self.small_scale_smoothers[j].stage_info()
+            LOGGER.info(self.small_scale_smoothers[j].stage_info())
 
 
     def set_large_scale_smoothing_scales(self):
@@ -172,17 +179,17 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
 
         fwhm_deg = self.large_scale_selection
         sigma_deg = fwhm_deg/2.355
-        weighted_smoothing = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=True, verbosity=1)
-        weighted_smoothing.stage_info()
-        regular_smoothing = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=False, verbosity=1)
-        regular_smoothing.stage_info()
+        cache_file=f"large_scale_smoother.pkl"
+        if os.path.exists(cache_file):
+            smoothing = nestconv(verbosity=1, cache_file=cache_file)
+        else:
+            smoothing = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=True, verbosity=1, cache_file=cache_file)
+
+        LOGGER.info(smoothing.stage_info())
 
         # lensing weighted smoothing
-        for j in range(6): 
-            self.large_scale_smoothers[j] = weighted_smoothing
-
-        for j in range(6, self.num_channels):
-            self.large_scale_smoothers[j] = regular_smoothing
+        for j in range(self.num_channels): 
+            self.large_scale_smoothers[j] = smoothing
 
 
     def set_scalers(self):
@@ -289,6 +296,14 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         # split into lensing, IA, and galaxy clustering maps
         gg1, gg2, ga1, ga2, ds, dg = maps.unbind(dim=-1)
 
+        for i in range(6):
+            print(f'gg1[{i}].shape {gg1[:,:,i].shape} gg1[{i}].nnz {(gg1[:,:,i]!=0).sum()}')
+            print(f'gg2[{i}].shape {gg2[:,:,i].shape} gg2[{i}].nnz {(gg2[:,:,i]!=0).sum()}')
+            print(f'ga1[{i}].shape {ga1[:,:,i].shape} ga1[{i}].nnz {(ga1[:,:,i]!=0).sum()}')
+            print(f'ga2[{i}].shape {ga2[:,:,i].shape} ga2[{i}].nnz {(ga2[:,:,i]!=0).sum()}')
+            print(f'ds[{i}].shape  {ds[:,:,i].shape}  ds[{i}].nnz  {(ds[:,:,i]!=0).sum()}')
+            print(f'dg[{i}].shape  {dg[:,:,i].shape}  dg[{i}].nnz  {(dg[:,:,i]!=0).sum()}')
+
         # get onthefly parameters
         onthefly_params = self.select_onthefly_parameters(hard_params.shape[0], id_cosmo)
         onthefly_params = torch.atleast_2d(onthefly_params)
@@ -308,7 +323,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         assert dg.shape[-1] == tomo_bg.shape[-1], "The number of bias parameters must match the number of tomographic bins"
         # convert density contrast to mean number counts
         ng = galaxy_density_to_count(ng_bar, dg, tomo_bg).to(torch.float32)
-        LOGGER.debug(f'drawn poisson galaxy clustering map ng={ng.shape} dtype={ng.dtype} min={ng.min():>10.3f} max={ng.max():>10.3f} mean={ng.mean():>10.3f}')
+        LOGGER.debug(f'drawn poisson galaxy clustering map ng={ng.shape} dtype={ng.dtype} min={ng.min():>10.3f} max={ng.max():>10.3f} mean={ng.mean():>10.3f} nnz={(ng!=0).sum()} size={ng.size}')
 
         #
         # Linear bias map for galaxy clustering (sources)
@@ -379,6 +394,10 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         # set lensing weights to source clustering pixel count
         for j in range(6):
             weights[j] = inputs[j+6]
+        for j in range(6, self.num_channels):
+            # dims = [1] * len(inputs[j].shape)
+            # weights[j] = np.ones(dims, dtype=np.float32) # only rank, will broadcast
+            weights[j] = torch.where(inputs[j] != 0, 1, 0)
 
         return inputs, weights, targets
 
@@ -398,25 +417,27 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
 
     def apply_smoothing(self, inputs, weights):
 
-        inputs_smoothed = list(inputs)
+        inputs_smoothed = [None] * self.num_channels
 
         # difference of Gaussians - like bandpass
         # weights are used just for smoothing, not for the final output
 
         if self.small_scale_selection is not None:
-            for j in range(6):
+            for j in range(self.num_channels):
+                print(f'{j} inputs shape={inputs[j].shape} dtype={inputs[j].dtype} weights shape={weights[j].shape} dtype={weights[j].dtype}')
                 m_small, w_small = self.small_scale_smoothers[j](inputs[j], weights[j])
                 inputs_smoothed[j] = m_small
-            for j in range(6, self.num_channels):
-                inputs_smoothed[j] = self.small_scale_smoothers[j](inputs[j])
 
         if self.large_scale_selection is not None:
-            for j in range(6):
-                m_large, w_large = self.large_scale_smoothers[j](inputs_smoothed[j], weights[j])
+            for j in range(self.num_channels):
+                m_large, w_large = self.large_scale_smoothers[j](inputs[j], weights[j])
                 inputs_smoothed[j] = inputs_smoothed[j] - m_large
-            for j in range(6, self.num_channels):
-                m_large = self.large_scale_smoothers[j](inputs_smoothed[j])
-                inputs_smoothed[j] = inputs_smoothed[j] - m_large
+                # inputs_smoothed[j] = m_large
+
+        # # set the zero-weight pixel back to zero
+        for i in range(len(inputs_smoothed)):
+            print(f"weight {weights[i].shape} num nonzero weights {(weights[i]!=0).sum()}")
+            inputs_smoothed[i] = torch.where(weights[i] == 0, 0, inputs_smoothed[i])
        
         return inputs_smoothed
     
@@ -427,8 +448,8 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         if self.smoothing:
             inputs = self.apply_smoothing(inputs, weights)
 
-        if self.scalers:
-            inputs, targets = self.apply_scalers(inputs, targets)
+        # if self.scalers:
+        #     inputs, targets = self.apply_scalers(inputs, targets)
 
         return inputs, targets
 
