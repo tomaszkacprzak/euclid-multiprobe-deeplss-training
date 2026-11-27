@@ -69,13 +69,13 @@ Adapt them before running data-dependent commands.
 
 Code variables 
 
-| Name    | Decription                                                 |
-|---------|------------------------------------------------------------|
-| kg      | Weak lensing convergence                                   | 
-| dg      | Galaxy clustering density contrast (lenses)                | 
-| ia      | Linear intrinsic galaxy alignment convergence (NLA model)  | 
-| ds      | Galaxy clustering density contrast (sources)               |
-| dm      | Clustering magnification map for lenses                    |
+| Name      | Decription                                                 |
+|-----------|------------------------------------------------------------|
+| `kg`      | Weak lensing convergence                                   | 
+| `dg`      | Galaxy clustering density contrast (lenses)                | 
+| `ia`      | Linear intrinsic galaxy alignment convergence (NLA model)  | 
+| `ds`      | Galaxy clustering density contrast (sources)               |
+| `dm`      | Clustering magnification map for lenses                    |
 
 
 ## Workflow
