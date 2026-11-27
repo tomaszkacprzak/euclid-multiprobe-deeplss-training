@@ -231,8 +231,10 @@ into an output `debug/` subdirectory.
 uses the linear on-the-fly physics model.
 **Additional arguments:** none.
 **Output:** map-channel/label statistics and profiler summaries on stdout/logs,
-`maps_batch_1.npy` in the working directory, and scheduled traces under
+`maps_batch_1.npz` in the working directory (one `channel_<index>` array per
+channel, preserving complex shear), and scheduled traces under
 `torch_profiler_logs/`. Device selection is automatic (CUDA if available, else CPU).
+Complex channels report separate real and imaginary statistics.
 
 ### 4. `calccls` — inspect angular power spectra (optional)
 
@@ -296,8 +298,9 @@ does not select a single input tar shard.
 ### 6. `modelprofile` — inspect model cost (optional)
 
 **Config:** `forward_model` and `training`: records/batching, resolutions,
-`encoder_name` and `encoder_args`. The current profiler prepares inputs using
-the linear on-the-fly physics model.
+`physics_model`, `physics_model_args`, `encoder_name`, `encoder_args` and
+`embed_dim`. The profiler passes per-channel maps from the configured physics
+model directly to the configured encoder, as training does.
 **Additional arguments:** none.
 **Output:** model specifications, tensor shapes and timing/memory profiler
 summaries, with scheduled traces under `torch_profiler_logs/`. It profiles up

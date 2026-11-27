@@ -97,8 +97,8 @@ def evaluate(
 ) -> float | dict[str, float] | None:
     """Evaluate one full validation stream pass and optionally save targets/predictions.
 
-    The primary ``loss`` metric is computed with the supplied ``loss_fn`` so it
-    matches training.  ``mse_loss`` is always computed with standard mean
+    The primary ``loss`` metric is computed by the model so it matches
+    training. ``prediction_loss`` is always computed with standard mean
     squared error for consistent validation monitoring, regardless of the
     configured training loss.
     """
@@ -115,16 +115,15 @@ def evaluate(
 
     for inputs, targets, inds in dataloader:
 
-        # Evaluatate model
-        inputs = inputs.to(device=device, dtype=torch.float32)
         targets = targets.to(device=device, dtype=torch.float32)
 
-        # Evaluate main loss function
-        loss = float(model(inputs, targets).detach().cpu())
+        # Preserve real/complex channel dtypes. Each pass gets its own list:
+        # physics preprocessing may replace entries in the channel list.
+        loss = float(model(move_to_device(inputs, device), targets).detach().cpu())
         losses.append(loss)
 
         # Evaluate predictions and their MSE loss
-        predictions = model.predict(inputs)
+        predictions = model.predict(move_to_device(inputs, device))
         prediction_loss = float(F.mse_loss(predictions, targets).detach().cpu())
         prediction_losses.append(prediction_loss)
 
@@ -133,7 +132,7 @@ def evaluate(
         prediction_batches.append(predictions.detach().cpu())
 
         # Housekeeping
-        num_examples_seen += inputs.shape[0]
+        num_examples_seen += targets.shape[0]
         if num_examples_seen >= num_examples:
             break
 
@@ -783,7 +782,7 @@ def train(
                 # every step housekeeping
                 LOGGER.debug('Running housekeeping')
                 train_losses.append(train_loss.detach().cpu())
-                train_examples_seen += int(maps.shape[0]) if hasattr(maps, "shape") and maps.ndim > 0 else config.training['batch_size']
+                train_examples_seen += labels.shape[0]
                 train_timer.stop()
 
                 current_learning_rate = optimizer.param_groups[0]["lr"]

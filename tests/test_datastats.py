@@ -10,8 +10,11 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys, tmp_path) -> N
     from euclid_multiprobe_deeplss_training import datastats
 
     class FakePhysicsModel:
-        def __init__(self, forward_model, *, scalers, device):
+        num_channels = 2
+
+        def __init__(self, forward_model, *, scalers, device, nside):
             assert scalers is True
+            assert nside == 1024
             self.forward_model = forward_model
             self.device = device
 
@@ -23,7 +26,7 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys, tmp_path) -> N
         def __init__(self, *, nside, nside_base, nside_lower, operator):
             assert nside == 1024
             assert nside_base == 128
-            assert nside_lower == [512] * 24
+            assert nside_lower == [512] * 2
             assert operator == "mean"
 
         def to(self, device):
@@ -82,3 +85,31 @@ def test_datastats_prints_channel_statistics(monkeypatch, capsys, tmp_path) -> N
     assert "label=  1" in captured.out
     assert "max = 5.0000000000e+00" in captured.out
     assert "mean= 3.0000000000e+00" in captured.out
+
+
+def test_datastats_handles_ragged_complex_channels_across_batches(monkeypatch, tmp_path, capsys) -> None:
+    import numpy as np
+    import torch
+
+    from euclid_multiprobe_deeplss_training import datastats
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(datastats, "print_profiler_stats", lambda _prof: None)
+    batches = [
+        ([torch.full((size, 2), 1 + 2j), torch.full((size, 4), 3.0)], torch.ones(size, 1), torch.arange(size))
+        for size in (2, 1)
+    ]
+    map_batches, label_batches = datastats._collect_loader_stats(batches, split="train")
+    summary = datastats._combine_batch_stats(map_batches)
+    assert summary.feature_names == ["0_real", "0_imag", "1"]
+    torch.testing.assert_close(summary.count, torch.tensor([6, 6, 12], dtype=torch.float64))
+    torch.testing.assert_close(summary.total, torch.tensor([6, 12, 36], dtype=torch.float64))
+    assert len(label_batches) == 2
+    datastats._print_channel_stats(summary)
+    output = capsys.readouterr().out
+    assert "channel=0_real" in output
+    assert "channel=0_imag" in output
+    with np.load(tmp_path / "maps_batch_1.npz") as saved:
+        assert saved["channel_0"].dtype == np.complex64
+        np.testing.assert_array_equal(saved["channel_0"].imag, np.full((2, 2), 2.0))
+        assert saved["channel_1"].shape == (2, 4)

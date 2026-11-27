@@ -223,8 +223,8 @@ class OntheflyPhysicsModelLinear(nn.Module):
         #
         gg1_noise_temp = torch.empty(gg1.shape, dtype=torch.float32, device=self.device)
         gg2_noise_temp = torch.empty(gg2.shape, dtype=torch.float32, device=self.device)
-        nn.init.trunc_normal_(gg1_noise_temp, mean=0.0, std=self.shape_noise_std, a=-1.0, b=1.0)
-        nn.init.trunc_normal_(gg2_noise_temp, mean=0.0, std=self.shape_noise_std, a=-1.0, b=1.0)
+        nn.init.trunc_normal_(gg1_noise_temp, mean=0.0, std=self.shape_noise_std/math.sqrt(2.), a=-1.0, b=1.0)
+        nn.init.trunc_normal_(gg2_noise_temp, mean=0.0, std=self.shape_noise_std/math.sqrt(2.), a=-1.0, b=1.0)
         ns_sqrt = torch.sqrt(ns)
         select = ns_sqrt==0
         gg1_noise_temp.div_(ns_sqrt)

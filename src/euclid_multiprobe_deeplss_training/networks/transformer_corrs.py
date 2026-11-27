@@ -652,11 +652,13 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
         dropout: float = 0.0,
         attention_dropout: float = 0.0,
         scaler: str = "none", # "none", "asinh"
+        weighted_correlations: bool = True,
     ) -> None:
         super().__init__()
 
         self.batch_size = batch_size
         self.weight_function = weight_function
+        self.weighted_correlations = weighted_correlations
         self.preprocess_function = preprocess_function
         self.embed_dim = int(embed_dim)
         self.num_channels = int(num_channels)
@@ -753,7 +755,13 @@ class ShiftedWindowTransformerCorrNetwork(nn.Module):
             assert m.shape[0] == self.batch_size, f"map {i} has {m.shape[0]} rows, expected {self.batch_size}"
 
         # calculate wegiths used for correlations (list of tensors with shape (batch_size, num_pixels))
-        weights = self.weight_function(maps)
+        if self.weighted_correlations:
+            weights = self.weight_function(maps)
+        else:
+            # if we do not use weights, pre-allocate dummy ones weights
+            if getattr(self, "ones_weights", None) is None:
+                self.ones_weights = [torch.ones(*m.shape, device=m.device, dtype=torch.float32) for m in maps]
+            weights = self.ones_weights
 
         # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
         # maps is a list of tensors with shape (batch_size, num_pixels)

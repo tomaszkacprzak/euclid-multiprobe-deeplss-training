@@ -89,3 +89,45 @@ def test_unsmoothed_pipeline_does_not_require_weight_maps() -> None:
     torch.testing.assert_close(actual_inputs, maps[..., 0] + 10)
     torch.testing.assert_close(actual_targets, targets)
     torch.testing.assert_close(actual_indices, indices)
+
+
+def test_pipeline_smooths_mixed_real_and_complex_channel_lists() -> None:
+    channels = [
+        torch.complex(torch.arange(8.0), torch.arange(8.0) + 1)[None],
+        torch.ones(1, 8),
+    ]
+    targets = torch.ones(1, 2)
+    indices = torch.tensor([[7]])
+
+    class PhysicsModel:
+        def __call__(self, batch):
+            return channels, targets
+
+        def get_weight_maps(self, inputs):
+            assert inputs is channels
+            return [torch.ones_like(channel.real) for channel in inputs]
+
+    smoother = NestChannelScalecut(nside=2, nside_base=1, nside_lower=[1, 1], operator="mean")
+    pipeline = _pipeline((torch.zeros(1, 8, 1, 1), indices, targets), PhysicsModel(), smoother=smoother)
+    actual, actual_targets, actual_indices = next(iter(pipeline))
+
+    assert isinstance(actual, list)
+    assert [channel.dtype for channel in actual] == [torch.complex64, torch.float32]
+    torch.testing.assert_close(actual[0], torch.tensor([[1.5 + 2.5j] * 4 + [5.5 + 6.5j] * 4]))
+    torch.testing.assert_close(actual[1], channels[1])
+    torch.testing.assert_close(actual_targets, targets)
+    torch.testing.assert_close(actual_indices, indices)
+
+
+def test_pipeline_metadata_uses_targets_not_indices(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    from euclid_multiprobe_deeplss_training import dataloaders
+
+    monkeypatch.setattr(dataloaders.webdataset, "WebDataset", MagicMock())
+    monkeypatch.setattr(dataloaders.webdataset, "WebLoader", MagicMock())
+    monkeypatch.setattr(OntheflyPipeline, "__iter__", lambda _self: iter([
+        ([torch.zeros(2, 8), torch.zeros(2, 8, dtype=torch.complex64)], torch.zeros(2, 3), torch.zeros(2, 7)),
+    ]))
+    pipeline = OntheflyPipeline("unused-*.tar", 2, object(), device="cpu")
+    assert (pipeline.num_channels, pipeline.num_pixels, pipeline.num_targets) == (2, 8, 3)

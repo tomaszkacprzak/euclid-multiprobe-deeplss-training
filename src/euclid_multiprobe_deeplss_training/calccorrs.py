@@ -16,7 +16,7 @@ import healpy as hp
 import numpy as np
 import torch
 
-from .training import load_physics_model_class
+from .training import load_physics_model_class, move_to_device
 from .utils.config import Config, ConfigPaths, config_paths, load_config, load_pixel_file
 from .utils.logger import get_logger
 
@@ -163,17 +163,23 @@ def calccorrs(
             )
 
             for batch_index, (maps, labels, inds) in enumerate(loader):
-                # raw batch of shape (batch_size, num_pixels, num_channels)
-                map_dtype = torch.complex64 if torch.is_complex(maps) else torch.float32
-                maps = maps.to(device=run_device, dtype=map_dtype)
+                # Keep the per-channel real/complex representation for physics.
+                maps = move_to_device(maps, run_device)
 
-                # calculate wegiths used for correlations
-                # weights of shape (batch_size, num_pixels, num_channels)
+                # Calculate weights from the unprocessed channel maps.
                 weights = physics_model.get_weight_maps(maps)
 
                 # convert the raw counts to density contrast, subtract the mean from shear/kappa maps
-                # (batch_size, num_pixels, num_channels)
                 maps = physics_model.preprocess_for_correlations(maps)
+
+                # Nestcorr consumes a dense (batch, channels, pixels) tensor.
+                # Stack only here, after weights and channel preprocessing.
+                if isinstance(maps, (list, tuple)):
+                    maps = torch.stack(maps, dim=-1)
+                if isinstance(weights, (list, tuple)):
+                    weights = torch.stack(weights, dim=-1)
+                map_dtype = torch.complex64 if maps.is_complex() else torch.float32
+                maps = maps.to(dtype=map_dtype)
 
                 if batch_index == 0:
                     LOGGER.info(f"maps    shape={maps.shape}    dtype={maps.dtype}")
@@ -202,7 +208,7 @@ def calccorrs(
                 f.create_dataset(f"batch{batch_index:04d}/labels", data=labels.cpu().numpy(), **compression_args)
                 f.create_dataset(f"batch{batch_index:04d}/inds", data=inds.cpu().numpy(), **compression_args)
 
-                examples_written += maps.shape[0]
+                examples_written += labels.shape[0]
 
                 if batch_index == num_batches_per_file - 1:
                     break

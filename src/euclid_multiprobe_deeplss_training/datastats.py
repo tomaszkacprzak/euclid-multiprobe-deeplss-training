@@ -29,6 +29,7 @@ class BatchChannelStats:
     maximum: torch.Tensor
     total: torch.Tensor
     sum_squares: torch.Tensor
+    feature_names: list[str] | None = None
 
 
 def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[BatchChannelStats]:
@@ -39,11 +40,13 @@ def datastats(config_or_path: ConfigPaths | Mapping[str, Any] | Config) -> list[
 
     physics_model = OntheflyPhysicsModelLinear(config.forward_model,
                         scalers=True,
-                        device=device).to(device)
+                        device=device,
+                        nside=config.forward_model["analysis"]["n_side"],
+                        **config.training.get('physics_model_args', {})).to(device)
 
     smoothing_model = NestChannelScalecut(nside=config.forward_model["analysis"]["n_side"],
                         nside_base=config.forward_model["analysis"]["n_side_down"],
-                        nside_lower=[512]*24,
+                        nside_lower=[min(512, config.forward_model["analysis"]["n_side"])] * physics_model.num_channels,
                         operator="mean").to(device)
 
     loader = OntheflyPipeline(
@@ -89,7 +92,8 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
     except StopIteration:
         return map_stats, label_stats
 
-    LOGGER.debug(f'Batch {batch_count} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+    channels = list(maps.unbind(dim=-1)) if isinstance(maps, torch.Tensor) else maps
+    LOGGER.debug(f'Batch {batch_count} map shapes={[tuple(m.shape) for m in channels]}')
     LOGGER.debug(f'Batch {batch_count} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
     LOGGER.debug(f'Batch {batch_count} inds shape={inds.shape} size={inds.numel()*inds.itemsize/1024**2:.2f} MB')
 
@@ -97,11 +101,11 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
     label_stats.append(_summarize_labels(labels, split=split))
     batch_count += 1
 
-    print('maps.device =', maps.device)
+    print('maps devices =', [m.device for m in channels])
     print('labels.device =', labels.device)
 
-    fname = 'maps_batch_1.npy'
-    np.save(fname, maps.detach().cpu().numpy())
+    fname = 'maps_batch_1.npz'
+    np.savez(fname, **{f'channel_{i}': m.detach().cpu().numpy() for i, m in enumerate(channels)})
     LOGGER.info(f'Saved maps to {fname}')
 
     prof_schedule = schedule(
@@ -125,9 +129,10 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
     ) as prof:
 
         time_start = time.time()
-        for maps, labels in data_iter:
+        for maps, labels, _inds in data_iter:
 
-            LOGGER.debug(f'Batch {batch_count:>4d} maps shape={maps.shape} size={maps.numel()*maps.itemsize/1024**2:.2f} MB')
+            channels = list(maps.unbind(dim=-1)) if isinstance(maps, torch.Tensor) else maps
+            LOGGER.debug(f'Batch {batch_count:>4d} map shapes={[tuple(m.shape) for m in channels]}')
             LOGGER.debug(f'Batch {batch_count:>4d} labels shape={labels.shape} size={labels.numel()*labels.itemsize/1024**2:.2f} MB')
 
             if batch_count % 10 == 0:
@@ -139,7 +144,7 @@ def _collect_loader_stats(dataloader: Iterable, *, split: str) -> tuple[list[Bat
             label_stats.append(_summarize_labels(labels, split=split))
             batch_count += 1
 
-            if maps.is_cuda:
+            if any(m.is_cuda for m in channels):
                 torch.cuda.synchronize()
             prof.step()
 
@@ -201,10 +206,28 @@ def print_profiler_stats(prof: Any, num_rows=20):
     print()
 
 
-def _summarize_maps(maps: torch.Tensor, *, split: str) -> BatchChannelStats:
+def _summarize_maps(maps: torch.Tensor | list[torch.Tensor], *, split: str) -> BatchChannelStats:
+    """Summarize each channel independently, separating real/imaginary parts."""
 
-    channel_values = _flatten_by_channel(maps)
-    return _summarize_feature_values(channel_values, split=split)
+    channels = maps.unbind(dim=-1) if isinstance(maps, torch.Tensor) else maps
+    summaries = []
+    names = []
+    for index, channel in enumerate(channels):
+        if channel.is_complex():
+            components = ((f"{index}_real", channel.real), (f"{index}_imag", channel.imag))
+        else:
+            components = ((str(index), channel),)
+        for name, values in components:
+            summaries.append(_summarize_feature_values(values.reshape(1, -1), split=split))
+            names.append(name)
+    return BatchChannelStats(
+        split=split,
+        **{
+            field: torch.cat([getattr(item, field) for item in summaries])
+            for field in ("count", "minimum", "maximum", "total", "sum_squares")
+        },
+        feature_names=names,
+    )
 
 
 def _summarize_labels(labels: torch.Tensor, *, split: str) -> BatchChannelStats:
@@ -257,6 +280,7 @@ def _combine_batch_stats(batch_stats: list[BatchChannelStats]) -> BatchChannelSt
         maximum=torch.stack([item.maximum for item in batch_stats]).max(dim=0).values,
         total=torch.stack([item.total for item in batch_stats]).sum(dim=0),
         sum_squares=torch.stack([item.sum_squares for item in batch_stats]).sum(dim=0),
+        feature_names=batch_stats[0].feature_names,
     )
 
 
@@ -270,8 +294,9 @@ def _print_feature_stats(stats: BatchChannelStats | None, *, feature_name: str) 
     std = torch.sqrt(torch.clamp(variance, min=0.0))
 
     for feature in range(stats.count.numel()):
+        feature_label = stats.feature_names[feature] if stats.feature_names is not None else str(feature)
         print(
-            f"{feature_name}={feature:>3d}, "
+            f"{feature_name}={feature_label:>3s}, "
             f"min ={stats.minimum[feature].item(): 10.10e}, "
             f"max ={stats.maximum[feature].item(): 10.10e}, "
             f"mean={mean[feature].item(): 10.10e}, "
