@@ -131,3 +131,25 @@ def test_pipeline_metadata_uses_targets_not_indices(monkeypatch) -> None:
     ]))
     pipeline = OntheflyPipeline("unused-*.tar", 2, object(), device="cpu")
     assert (pipeline.num_channels, pipeline.num_pixels, pipeline.num_targets) == (2, 8, 3)
+
+
+def test_single_batch_pipeline_disables_worker_prefetch_and_shape_inference(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    from euclid_multiprobe_deeplss_training import dataloaders
+
+    monkeypatch.setattr(dataloaders.webdataset, "WebDataset", MagicMock())
+    loader = MagicMock()
+    monkeypatch.setattr(dataloaders.webdataset, "WebLoader", loader)
+
+    def unexpected_iteration(_self):
+        raise AssertionError("Initialization should not consume a diagnostic batch")
+
+    monkeypatch.setattr(OntheflyPipeline, "__iter__", unexpected_iteration)
+    OntheflyPipeline("unused-*.tar", 1, object(), device="cpu", num_workers=0, infer_shapes=False)
+    options = loader.call_args.kwargs
+    assert options["batch_size"] == 1
+    assert options["num_workers"] == 0
+    assert options["pin_memory"] is False
+    assert "prefetch_factor" not in options
+    assert "persistent_workers" not in options

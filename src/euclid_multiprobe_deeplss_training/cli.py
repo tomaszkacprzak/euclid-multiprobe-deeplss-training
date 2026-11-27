@@ -224,6 +224,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     datastats_parser.set_defaults(func=_run_datastats)
 
+    channel_maps_parser = subparsers.add_parser(
+        "plot_channel_maps",
+        help="Plot one physics-processed example as half-sky and 10-degree channel maps.",
+    )
+    channel_maps_parser.add_argument(
+        "--output-file", default="channel_maps.pdf", help="Output PDF filename (default: channel_maps.pdf).",
+    )
+    channel_maps_parser.add_argument(
+        "--device", default=None, help="Torch device, such as 'cpu' or 'cuda' (defaults to the training configuration).",
+    )
+    channel_maps_parser.add_argument(
+        "--dpi", type=int, default=300, help="Resolution of rasterized maps in the PDF (default: 300).",
+    )
+    channel_maps_parser.set_defaults(func=_run_plot_channel_maps)
+
     modelprofile_parser = subparsers.add_parser(
         "modelprofile",
         help="Profile nested-transformer forward passes on input dataset batches.",
@@ -383,6 +398,19 @@ def _run_predict(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_plot_channel_maps(args: argparse.Namespace) -> int:
+    """Plot a single example using the configured training physics and loader."""
+    if args.config is None:
+        raise ValueError("The plot_channel_maps command requires --config.")
+
+    from euclid_multiprobe_deeplss_training.plot_channel_maps import plot_channel_maps_from_config
+
+    plot_channel_maps_from_config(
+        _config_argument(args), output_file=args.output_file, device=args.device, dpi=args.dpi,
+    )
+    return 0
+
+
 def _run_likelihood(args: argparse.Namespace) -> int:
     """Train a conditional likelihood model from saved predictions."""
     if args.config is None:
@@ -460,7 +488,10 @@ def _expand_config_arguments(argv: list[str]) -> list[str]:
     subcommand, so contiguous config values are normalized to repeated options
     before parsing. Repeated ``--config`` options continue to work directly.
     """
-    commands = {"info", "webdataset", "train", "predict", "likelihood", "datastats", "modelprofile", "calccls", "calccorrs"}
+    commands = {
+        "info", "webdataset", "train", "predict", "likelihood", "datastats",
+        "plot_channel_maps", "modelprofile", "calccls", "calccorrs",
+    }
     expanded: list[str] = []
     index = 0
     while index < len(argv):

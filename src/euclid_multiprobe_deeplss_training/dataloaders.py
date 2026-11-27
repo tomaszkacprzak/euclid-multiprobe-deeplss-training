@@ -29,7 +29,7 @@ class OntheflyPipeline:
     """
     def __init__(
         self, webds_pattern, batch_size, physics_model, smoother=None, downsampler=None,
-        device="cuda", validation=False, num_workers=1, seed=None,
+        device="cuda", validation=False, num_workers=1, seed=None, infer_shapes=True,
     ):
 
         self.physics_model = physics_model
@@ -71,27 +71,32 @@ class OntheflyPipeline:
         
         # get torch DataLoader
         # self.loader = DataLoader(dataset, **kwargs)
+        worker_options = {"prefetch_factor": 1, "persistent_workers": True} if num_workers else {}
         self.loader = webdataset.WebLoader(
                         dataset,
-                        pin_memory=True,
+                        pin_memory=torch.device(device).type == "cuda",
                         # batch_size=None,
                         num_workers=num_workers, 
-                        prefetch_factor=1, 
-                        persistent_workers=True,
+                        **worker_options,
                         batch_size=self.batch_size,
                         drop_last=True,
                       )
 
 
-        # test and get the number of pixels
-        for inputs, targets, _indices in self.__iter__():
+        # Training needs metadata before constructing its encoder. One-batch
+        # diagnostics can skip this extra physics evaluation and allocation.
+        if infer_shapes:
+            for inputs, targets, _indices in self.__iter__():
+                if isinstance(inputs, torch.Tensor):
+                    self.num_channels = inputs.shape[-1]
+                    self.num_pixels = inputs.shape[1]
+                else:
+                    self.num_channels = len(inputs)
+                    self.num_pixels = inputs[0].shape[1]
+                self.num_targets = targets.shape[1]
+                break
 
-            self.num_channels = len(inputs)
-            self.num_pixels = inputs[0].shape[1]
-            self.num_targets = targets.shape[1]
-            break
-
-        LOGGER.info(f"Created OntheflyPipeline with num_pixels={self.num_pixels}, num_channels={self.num_channels}, num_targets={self.num_targets}")
+            LOGGER.info(f"Created OntheflyPipeline with num_pixels={self.num_pixels}, num_channels={self.num_channels}, num_targets={self.num_targets}")
 
 
     def __iter__(self):
@@ -104,6 +109,9 @@ class OntheflyPipeline:
 
                 # move to GPU
                 batch = tuple(tensor.to(self.device, non_blocking=True) for tensor in batch)
+
+                if self.downsampler is not None:
+                    batch = (self.downsampler(batch[0]), batch[1], batch[2])
 
                 # add physics augmentations
                 inputs, targets = self.physics_model(batch)
@@ -129,6 +137,6 @@ class OntheflyPipeline:
 
             batch_count += 1
 
-            yield inputs, targets, vec_int
+            yield inputs, targets, batch[1]
 
 

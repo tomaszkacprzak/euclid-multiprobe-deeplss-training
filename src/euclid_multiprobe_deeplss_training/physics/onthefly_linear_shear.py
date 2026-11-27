@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 
 from euclid_multiprobe_deeplss_training.utils import logger
+from euclid_multiprobe_deeplss_training.utils.distances import smoothing_sigma
 from euclid_multiprobe_deeplss_training.dataloaders import OntheflyPipeline
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -118,7 +119,18 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
 
         from nestconv import nestconv
 
-        self.small_scale_smoothers = [None] * self.num_channels
+        self.small_scale_smoothers = nn.ModuleList([None] * self.num_channels)
+        # Channels with identical scale cuts share the same sparse geometry.
+        smoothers = {}
+
+        def get_smoother(sigma_arcmin, weighted):
+            key = (float(sigma_arcmin), weighted)
+            if key not in smoothers:
+                smoothers[key] = nestconv(
+                    nside=self.nside, pixel_ids=self.indices_pixels,
+                    sigma=np.radians(sigma_arcmin / 60.), weighted=weighted, verbosity=1,
+                )
+            return smoothers[key]
 
         # six WL bins shear
         fwhm_mpc = self.small_scale_selection['WL']
@@ -126,9 +138,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             j = i + 0
             z_med = self.z_med_wl[i]
             sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
-            sigma_deg = sigma_arcmin/60.
-            
-            self.small_scale_smoothers[j] = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=True, verbosity=1)
+            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, weighted=True)
             LOGGER.info(f"small scale smoother for lensing shear channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
             self.small_scale_smoothers[j].stage_info()
 
@@ -138,7 +148,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             j = i + 6
             z_med = self.z_med_wl[i]
             sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
-            self.small_scale_smoothers[j] = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_arcmin/60.), weighted=False, verbosity=1)
+            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, weighted=False)
             LOGGER.info(f"small scale smoother for source clustering channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
             self.small_scale_smoothers[j].stage_info()
 
@@ -149,7 +159,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             j = i + 12
             z_med = self.z_med_gc[i]
             sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
-            self.small_scale_smoothers[j] = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_arcmin/60.), weighted=False, verbosity=1)
+            self.small_scale_smoothers[j] = get_smoother(sigma_arcmin, weighted=False)
             LOGGER.info(f"small scale smoother for galaxy clustering channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
             self.small_scale_smoothers[j].stage_info()
 
@@ -158,7 +168,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
 
         from nestconv import nestconv
         
-        self.large_scale_smoothers = [None] * self.num_channels
+        self.large_scale_smoothers = nn.ModuleList([None] * self.num_channels)
 
         fwhm_deg = self.large_scale_selection
         sigma_deg = fwhm_deg/2.355
@@ -171,7 +181,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         for j in range(6): 
             self.large_scale_smoothers[j] = weighted_smoothing
 
-        for j in range(6, 12): 
+        for j in range(6, self.num_channels):
             self.large_scale_smoothers[j] = regular_smoothing
 
 
@@ -388,7 +398,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
 
     def apply_smoothing(self, inputs, weights):
 
-        inputs_smoothed = [None] * len(inputs)
+        inputs_smoothed = list(inputs)
 
         # difference of Gaussians - like bandpass
         # weights are used just for smoothing, not for the final output
@@ -397,16 +407,15 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
             for j in range(6):
                 m_small, w_small = self.small_scale_smoothers[j](inputs[j], weights[j])
                 inputs_smoothed[j] = m_small
-            for j in range(6, 12):
-                m_small, w_small = self.small_scale_smoothers[j](inputs[j])
-                inputs_smoothed[j] = m_small
+            for j in range(6, self.num_channels):
+                inputs_smoothed[j] = self.small_scale_smoothers[j](inputs[j])
 
         if self.large_scale_selection is not None:
             for j in range(6):
                 m_large, w_large = self.large_scale_smoothers[j](inputs_smoothed[j], weights[j])
                 inputs_smoothed[j] = inputs_smoothed[j] - m_large
-            for j in range(6, 12):
-                m_large, w_large = self.large_scale_smoothers[j](inputs_smoothed[j])
+            for j in range(6, self.num_channels):
+                m_large = self.large_scale_smoothers[j](inputs_smoothed[j])
                 inputs_smoothed[j] = inputs_smoothed[j] - m_large
        
         return inputs_smoothed

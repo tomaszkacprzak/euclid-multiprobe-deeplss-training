@@ -34,6 +34,10 @@ environment with `uv pip install --python .venv/bin/python --no-deps -e ../nestc
 Use `.venv/bin/python` and `.venv/bin/euclid-deeplss-training` directly to retain
 that editable installation without an automatic project sync.
 
+The shear physics model's configured scale cuts also require the sibling
+Nestconv checkout: install it in the same environment with
+`uv pip install --python .venv/bin/python --no-deps -e ../nestconv`.
+
 ### Correlation geometry
 
 Generate a reusable Nestcorr schema-9 cache before training a `corrs_cnn` or
@@ -235,6 +239,34 @@ uses the linear on-the-fly physics model.
 channel, preserving complex shear), and scheduled traces under
 `torch_profiler_logs/`. Device selection is automatic (CUDA if available, else CPU).
 Complex channels report separate real and imaginary statistics.
+
+### `plot_channel_maps` — view a physics-processed example
+
+This diagnostic uses the same composite configuration, physics-model selection,
+model arguments and training scalers as `train`. It processes one batch of size
+one with zero loader workers, without building an encoder. Smoothing is applied
+by the physics model according to `training.physics_model_args`.
+
+Run from the directory containing the two survey/experiment files:
+
+```bash
+euclid-deeplss-training --config conf_nside512_shear_EuclidDR1F.yaml \
+  conf_nside512_mse_mapnvit.yaml plot_channel_maps --device cpu \
+  --output-file output/pdf/channel_maps_EuclidDR1F_nside512.pdf
+```
+
+`--device` defaults to the training configuration; `--output-file` defaults to
+`channel_maps.pdf`; `--dpi` defaults to 300. The command uses `training.seed`
+(falling back to `forward_model.master_seed`) for physics and shard sampling.
+It loads only the explicitly supplied config files.
+
+The large, single-page PDF has one row per scalar channel, with a half-sky
+`orthview` and a 10 x 10 degree `gnomview`. Complex shear becomes separate
+gamma-1 and gamma-2 rows, giving 24 rows for the six-bin shear model. Both views
+center on the loaded NESTED footprint and share percentile color limits per
+row. Unloaded pixels are masked. The caption reports how many loaded pixels
+are visible in the half-sky view, since disconnected footprints may extend
+behind the horizon. Shear components retain their original map basis.
 
 ### 4. `calccls` — inspect angular power spectra (optional)
 
