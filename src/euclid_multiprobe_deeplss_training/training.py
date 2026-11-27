@@ -583,22 +583,11 @@ def train(
                         device=device,
                         seed=seed,
                         nside=nside_training,
+                        indices_pixels=indices_pixels_healpix,
                         **config.training.get('physics_model_args', {}))
     physics_model = physics_model.to(device)
     # physics_model = torch.compile(physics_model, dynamic=True)
 
-    # Downsample all maps to the same nside
-    # downsampler = NestDownsampler(nside=config.forward_model["analysis"]["n_side"],
-    #                               nside_base=config.forward_model["analysis"]["n_side_down"],
-    #                               nside_lower=nside_training)
-    # downsampler = downsampler.to(device)
-    # downsampler = torch.compile(downsampler, dynamic=True)
-
-    # Downsample each channel to a different nside
-    # smoother = NestChannelScalecut(nside=config.forward_model["analysis"]["n_side"],
-    #                     nside_base=config.forward_model["analysis"]["n_side_down"],
-    #                     nside_lower=[nside_training]*24,
-    #                     operator="mean").to(device)
 
     def get_loaders(**kwargs):
         loader_training = OntheflyPipeline(**kwargs)
@@ -609,8 +598,6 @@ def train(
     loader_training, loader_validation = get_loaders(webds_pattern=config.training['records_pattern'],
                                                      batch_size=config.training['batch_size'],
                                                      physics_model=physics_model,
-                                                     downsampler=None,
-                                                     smoother=None,
                                                      num_workers=config.training['num_workers'])
 
     #

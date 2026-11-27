@@ -46,14 +46,25 @@ def galaxy_density_to_count(ng_bar, dg, bg):
     # remove negative values
     ng_clip = torch.clamp(ng, min=0, max=1e6)
     # adjust so that the total is conserved
-    ng_lambda = ng_clip * torch.sum(ng) / torch.sum(ng_clip)
+    ng_lambda = ng_clip * torch.sum(ng, axis=1, keepdim=True) / torch.sum(ng_clip, axis=1, keepdim=True)
     # draw Poisson noise
     ng = torch.poisson(ng_lambda)
     return ng
 
 class OntheflyPhysicsModelLinearShear(nn.Module):
 
-    def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, **kwargs):
+    def __init__(self, conf, 
+                 scalers=False, 
+                 seed=424344, 
+                 num_samples_prior=1_000_000, 
+                 device=None, 
+                 nside=None, 
+                 shape_noise_std=0.3, 
+                 randomize_astro_params=True, 
+                 indices_pixels=None, 
+                 small_scale_selection=None, 
+                 large_scale_selection=None, 
+                 **kwargs):
 
         super().__init__()
 
@@ -61,26 +72,108 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         self.conf = conf
         self.seed = seed
         self.device = device
+
+        # basics and dimensions
         self.nside = nside
-        self.set_params()
-        self.onthefly_samples = self.get_onthefly_params(num_samples_prior)
         self.shape_noise_std = shape_noise_std
-        self.num_gal_wl = torch.from_numpy(np.array(self.conf["survey"]["WL"]["n_gal"])).to(self.device)
-        self.num_gal_gc = torch.from_numpy(np.array(self.conf["survey"]["GC"]["n_gal"])).to(self.device)
+        self.indices_pixels = indices_pixels
         self.pixel_area = hp.nside2pixarea(self.nside, degrees=True)
-        self.sample_uniform_lo = torch.tensor(0., device=self.device, dtype=torch.float32)
-        self.sample_uniform_hi = torch.tensor(2 * math.pi, device=self.device, dtype=torch.float32)
-        self.num_targets = len(self.params)
         self.num_channels = 18
         self.channel_spins = torch.from_numpy(np.array([2]*6 + [0]*12)).to(self.device)
-        # self.param_names = ['Om', 's8', 'Ob', 'H0', 'ns', 'w0', 'bary_Mc', 'bary_nu', 'Aia', 'n_Aia', 'bg1', 'bg2', 'bg3', 'bg4', 'bg5', 'bg6', 'bsc1', 'bsc2', 'bsc3', 'bsc4', 'bsc5', 'bsc6']
-        self.scalers = scalers
+
+        # samples properties
+        self.num_gal_wl = torch.from_numpy(np.array(self.conf["survey"]["WL"]["n_gal"])).to(self.device)
+        self.num_gal_gc = torch.from_numpy(np.array(self.conf["survey"]["GC"]["n_gal"])).to(self.device)
+        self.z_med_wl = np.array(self.conf["survey"]["WL"]["z_med"])
+        self.z_med_gc = np.array(self.conf["survey"]["GC"]["z_med"])
+
+        # priors and sampling
+        self.set_params()
+        self.num_targets = len(self.params)
+        self.onthefly_samples = self.get_onthefly_params(num_samples_prior)
+        self.sample_uniform_lo = torch.tensor(0., device=self.device, dtype=torch.float32)
+        self.sample_uniform_hi = torch.tensor(2 * math.pi, device=self.device, dtype=torch.float32)
         self.randomize_astro_params = randomize_astro_params
+
+        # scalers
+        self.scalers = scalers
         if self.scalers:
             self.set_scalers()
+
+        # scale selection
+        self.small_scale_selection = small_scale_selection
+        self.large_scale_selection = large_scale_selection
+        self.smoothing = self.small_scale_selection is not None or self.large_scale_selection is not None
+        if self.small_scale_selection is not None:
+            assert self.indices_pixels is not None, "indices_pixels must be provided for smoothing"
+            self.set_small_scale_smoothing_scales()
+        if self.large_scale_selection is not None:
+            assert self.indices_pixels is not None, "indices_pixels must be provided for smoothing"
+            self.set_large_scale_smoothing_scales()
+
         LOGGER.info(f"created physics model Linear, num_channels={self.num_channels}, num_targets={self.num_targets}, apply_scalers={self.scalers}, shape_noise_std={self.shape_noise_std}")
         LOGGER.debug(f"spins={self.channel_spins}")
-                
+
+    def set_small_scale_smoothing_scales(self):
+
+        from nestconv import nestconv
+
+        self.small_scale_smoothers = [None] * self.num_channels
+
+        # six WL bins shear
+        fwhm_mpc = self.small_scale_selection['WL']
+        for i in range(6): 
+            j = i + 0
+            z_med = self.z_med_wl[i]
+            sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
+            sigma_deg = sigma_arcmin/60.
+            
+            self.small_scale_smoothers[j] = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=True, verbosity=1)
+            LOGGER.info(f"small scale smoother for lensing shear channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
+            self.small_scale_smoothers[j].stage_info()
+
+        # six WL bins source clustering
+        fwhm_mpc = self.small_scale_selection['GC']
+        for i in range(6): 
+            j = i + 6
+            z_med = self.z_med_wl[i]
+            sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
+            self.small_scale_smoothers[j] = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_arcmin/60.), weighted=False, verbosity=1)
+            LOGGER.info(f"small scale smoother for source clustering channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
+            self.small_scale_smoothers[j].stage_info()
+
+
+        # six GC bins galaxy clustering
+        fwhm_mpc = self.small_scale_selection['GC']
+        for i in range(6): 
+            j = i + 12
+            z_med = self.z_med_gc[i]
+            sigma_arcmin = smoothing_sigma(z_med, fwhm_mpc)
+            self.small_scale_smoothers[j] = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_arcmin/60.), weighted=False, verbosity=1)
+            LOGGER.info(f"small scale smoother for galaxy clustering channel {j} fwhm_mpc = {fwhm_mpc} z_med = {z_med} sigma_arcmin = {sigma_arcmin}")
+            self.small_scale_smoothers[j].stage_info()
+
+
+    def set_large_scale_smoothing_scales(self):
+
+        from nestconv import nestconv
+        
+        self.large_scale_smoothers = [None] * self.num_channels
+
+        fwhm_deg = self.large_scale_selection
+        sigma_deg = fwhm_deg/2.355
+        weighted_smoothing = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=True, verbosity=1)
+        weighted_smoothing.stage_info()
+        regular_smoothing = nestconv(nside=self.nside, pixel_ids=self.indices_pixels, sigma=np.radians(sigma_deg), weighted=False, verbosity=1)
+        regular_smoothing.stage_info()
+
+        # lensing weighted smoothing
+        for j in range(6): 
+            self.large_scale_smoothers[j] = weighted_smoothing
+
+        for j in range(6, 12): 
+            self.large_scale_smoothers[j] = regular_smoothing
+
 
     def set_scalers(self):
 
@@ -249,7 +342,7 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
                            
 
         # 
-        # Wrap up
+        # Create inputs maps
         # 
 
         # final report
@@ -265,9 +358,20 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
 
         for i, inp in enumerate(inputs):
             LOGGER.debug(f'inputs[{i}].shape={inp.shape} dtype={inp.dtype}')
-        
 
-        return inputs, targets
+        # 
+        # Create weigths maps
+        # 
+
+        # initialize empty weights
+        weights = [None] * len(inputs)
+
+        # set lensing weights to source clustering pixel count
+        for j in range(6):
+            weights[j] = inputs[j+6]
+
+        return inputs, weights, targets
+
 
     def apply_scalers(self, inputs, targets):
 
@@ -282,28 +386,44 @@ class OntheflyPhysicsModelLinearShear(nn.Module):
         return inputs, targets
 
 
+    def apply_smoothing(self, inputs, weights):
 
+        inputs_smoothed = [None] * len(inputs)
+
+        # difference of Gaussians - like bandpass
+        # weights are used just for smoothing, not for the final output
+
+        if self.small_scale_selection is not None:
+            for j in range(6):
+                m_small, w_small = self.small_scale_smoothers[j](inputs[j], weights[j])
+                inputs_smoothed[j] = m_small
+            for j in range(6, 12):
+                m_small, w_small = self.small_scale_smoothers[j](inputs[j])
+                inputs_smoothed[j] = m_small
+
+        if self.large_scale_selection is not None:
+            for j in range(6):
+                m_large, w_large = self.large_scale_smoothers[j](inputs_smoothed[j], weights[j])
+                inputs_smoothed[j] = inputs_smoothed[j] - m_large
+            for j in range(6, 12):
+                m_large, w_large = self.large_scale_smoothers[j](inputs_smoothed[j])
+                inputs_smoothed[j] = inputs_smoothed[j] - m_large
+       
+        return inputs_smoothed
     
     def forward(self, example):
         
-        inputs, targets = self.forward_physics(example)
+        inputs, weights, targets = self.forward_physics(example)
+
+        if self.smoothing:
+            inputs = self.apply_smoothing(inputs, weights)
 
         if self.scalers:
             inputs, targets = self.apply_scalers(inputs, targets)
 
         return inputs, targets
 
-    def get_weight_maps(self, inputs):
 
-        weights = [None] * len(inputs)
-        for i, inp in enumerate(inputs):
-            weights[i] = torch.ones_like(inp, device=self.device, dtype=torch.float32)
-
-        # lensing maps weights are set to source clustering pixel count
-        for j in range(6):
-            weights[j] = inputs[j+6]
-
-        return weights
 
 
     def preprocess_for_correlations(self, inputs):

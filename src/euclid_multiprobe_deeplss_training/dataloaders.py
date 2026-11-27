@@ -105,15 +105,6 @@ class OntheflyPipeline:
                 # move to GPU
                 batch = tuple(tensor.to(self.device, non_blocking=True) for tensor in batch)
 
-                # Remove the unused fields for now
-                maps, vec_int, vec_float = batch
-
-                # initial downsampling 
-                if self.downsampler is not None:
-                    maps, vec_int, vec_float = batch
-                    maps = self.downsampler(maps)
-                    batch = (maps, vec_int, vec_float)
-
                 # add physics augmentations
                 inputs, targets = self.physics_model(batch)
 
