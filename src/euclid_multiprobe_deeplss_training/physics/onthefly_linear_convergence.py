@@ -47,13 +47,13 @@ def galaxy_density_to_count(ng_bar, dg, bg):
     ng = torch.poisson(ng_lambda)
     return ng
 
-class OntheflyPhysicsModelLinkappa(nn.Module):
+class OntheflyPhysicsModelLinearConvergence(nn.Module):
 
     def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, **kwargs):
 
         super().__init__()
 
-        self.model_name = "linkappa_dmb"
+        self.model_name = "linear_convergence_dmb"
         self.conf = conf
         self.seed = seed
         self.device = device

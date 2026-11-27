@@ -1322,8 +1322,8 @@ def reduce_mean(x: torch.Tensor) -> torch.Tensor:
 
 def load_physics_model_class(model_name: str):
 
-    class_names = {'onthefly_linear': 'OntheflyPhysicsModelLinear',
-                   'onthefly_linkappa': 'OntheflyPhysicsModelLinkappa'}
+    class_names = {'onthefly_linear_shear': 'OntheflyPhysicsModelLinear',
+                   'onthefly_linear_convergence': 'OntheflyPhysicsModelLinkappa'}
 
     if model_name not in class_names:
         raise ValueError(f"Invalid model name: {model_name}")

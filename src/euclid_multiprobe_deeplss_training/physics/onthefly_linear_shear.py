@@ -51,13 +51,13 @@ def galaxy_density_to_count(ng_bar, dg, bg):
     ng = torch.poisson(ng_lambda)
     return ng
 
-class OntheflyPhysicsModelLinear(nn.Module):
+class OntheflyPhysicsModelLinearShear(nn.Module):
 
     def __init__(self, conf, scalers=False, seed=424344, num_samples_prior=1_000_000, device=None, nside=None, shape_noise_std=0.3, randomize_astro_params=True, **kwargs):
 
         super().__init__()
 
-        self.model_name = "linear_dmb"
+        self.model_name = "linear_shear_dmb"
         self.conf = conf
         self.seed = seed
         self.device = device
