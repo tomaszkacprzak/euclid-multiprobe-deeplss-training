@@ -64,6 +64,20 @@ preserve gradients.
 The supplied configs contain machine-specific dataset and auxiliary-file paths.
 Adapt them before running data-dependent commands.
 
+
+## Conventions
+
+Code variables 
+
+| Name    | Decription                                                 |
+|---------|------------------------------------------------------------|
+| kg      | Weak lensing convergence                                   | 
+| dg      | Galaxy clustering density contrast (lenses)                | 
+| ia      | Linear intrinsic galaxy alignment convergence (NLA model)  | 
+| ds      | Galaxy clustering density contrast (sources)               |
+| dm      | Clustering magnification map for lenses                    |
+
+
 ## Workflow
 
 1. `webdataset`: package projected simulation maps into tar shards.
